@@ -1,0 +1,41 @@
+# ── Python (tsamx, ams-server) ──────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Node (ams-web) ──────────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# ── Go (ama-agent) ──────────────────────────────────────────
+ama-agent/bin/
+*.exe
+
+# ── 시크릿 / 환경 ────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+
+# ── 로컬 도구 설정 ───────────────────────────────────────────
+.claude/settings.local.json
+.idea/
+.vscode/
+
+# ── OS 잡파일 ────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

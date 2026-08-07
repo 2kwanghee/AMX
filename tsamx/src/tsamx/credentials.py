@@ -1,0 +1,1184 @@
+"""Credential storage layer for tsamx.
+
+Owns *where* credentials live and *how* they are read/written — the macOS
+Keychain-vs-file routing, per-process capability detection and sticky fallback,
+and the ``.enc``-wins backup reconciliation that landed in #66. Split out of
+``switcher.py`` so the switcher reads as account orchestration again.
+
+``CredentialStore`` is a leaf collaborator: it imports only the OS-primitive and
+path helpers (``macos_keychain``, ``paths``) and never imports ``switcher``. It
+reads its live configuration (``platform``, ``_logger``, ``credentials_dir``)
+from a host *view* — a small data-only window onto the switcher that constructs
+it — and must never call a switcher *method* through that host, or storage and
+orchestration would re-couple. The store owns only its two pieces of state:
+``_keychain_usable_cache`` (sticky, process-local) and
+``_last_active_credentials_backend`` (for the post-switch follow-up message).
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import NamedTuple, Protocol
+
+from tsamx import macos_keychain
+from tsamx.exceptions import CredentialError, CredentialWriteError
+from tsamx.fsutil import replace_with_retry
+from tsamx.models import Platform
+from tsamx.paths import (
+    get_claude_config_home,
+    get_credentials_path,
+    get_global_config_path,
+)
+
+_logger = logging.getLogger("tsamx")
+
+# Service name for per-account backup credentials now managed via the ``security``
+# CLI on macOS. Deliberately distinct from KEYRING_SERVICE so old keyring items and
+# new security items coexist during migration (safe write → verify → delete).
+SECURITY_SERVICE = "tsamx"
+
+# Service name of Claude Code's *active* OAuth credential in the macOS Keychain
+# (read by Claude Code itself; we read/write it when switching accounts).
+CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+# Service name of Claude Code's *active* managed API key (``/login`` with an
+# ``sk-ant-api…`` key) in the macOS Keychain. Distinct from the OAuth service above
+# (no ``-credentials`` suffix); Claude Code resolves it on a separate auth axis
+# (``getApiKeyFromConfigOrMacOSKeychain``). On non-macOS the managed key instead
+# lives in ``~/.claude.json`` as ``primaryApiKey`` (see below).
+CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE = "Claude Code"
+
+# Bounded retry for the active OAuth-credential Keychain read. A locked/contended
+# login Keychain can fail a single `security` call transiently — e.g. just after
+# wake while the keychain is still settling, or under contention with Claude Code's
+# own statusline polling the same item — and a second attempt a moment later
+# usually succeeds. This is an I/O backoff between retries of an external CLI, NOT
+# a sleep papering over an internal race.
+_ACTIVE_READ_ATTEMPTS = 2
+_ACTIVE_READ_RETRY_DELAY = 0.3  # seconds between attempts
+
+# After a Keychain failure the store drops to file mode so one CLI invocation
+# can't split-brain between backends. A long-running daemon (menu bar / TUI)
+# instead re-probes this long after the last failure: far longer than any CLI
+# command runs (so the guarantee holds — a sub-second command never re-probes),
+# short enough that a transient `security` timeout self-heals within a minute
+# instead of disabling the Keychain for the whole process lifetime.
+KEYCHAIN_RECHECK_COOLDOWN_S = 60.0
+
+
+class ActiveCredentials(NamedTuple):
+    """Outcome of reading Claude Code's active credential.
+
+    ``value`` is the credential string (OAuth JSON or a raw managed key), ``""``
+    when none exists in any backend, or ``None`` on a plaintext-file read error.
+    ``keychain_unavailable`` is True only when the macOS OAuth Keychain read failed
+    (locked / denied / timeout) and nothing else covered it — letting callers
+    distinguish a transiently unreadable Keychain from a genuinely empty slot,
+    instead of collapsing both into a misleading "no credentials".
+    """
+
+    value: str | None
+    keychain_unavailable: bool
+
+
+def looks_like_api_key(credentials: str | None) -> bool:
+    """Whether a stored active credential is a raw managed API key vs OAuth JSON.
+
+    Strict on purpose: a managed key is a bare ``sk-ant-api…`` string, while every
+    OAuth/setup-token credential is a JSON object (``{"claudeAiOauth": …}``). Requiring
+    the ``sk-ant-api`` prefix (and that it isn't JSON) keeps a raw/garbled
+    ``sk-ant-oat…`` setup token from ever being misclassified as an API key.
+    """
+    if not credentials:
+        return False
+    text = credentials.strip()
+    return text.startswith("sk-ant-api") and not text.startswith("{")
+
+
+def _credential_object(credentials: str | None) -> dict | None:
+    """Parse a JSON credential object, excluding managed API keys."""
+    if not credentials or looks_like_api_key(credentials):
+        return None
+    try:
+        data = json.loads(credentials)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# The credential object's siblings of claudeAiOauth are not uniformly owned:
+# these keys hold machine-shared OAuth integrations that rotate independently
+# of any account slot, so on activation the live copy is authoritative.
+# Everything else — known (trustedDeviceToken is enrolled per-account and
+# re-enrolled on every login) or unknown — stays with the target slot: a
+# stale restore of an unlisted shared field merely re-prompts for auth,
+# while carrying a live account-bound field across a switch would present
+# one account's credential under another.
+SHARED_CREDENTIAL_KEYS = frozenset({
+    "mcpOAuth",
+    "mcpOAuthClientConfig",
+    "mcpXaaIdp",
+    "mcpXaaIdpConfig",
+    "pluginSecrets",
+})
+
+# Account-scoped siblings tsamx knows about, named so the unrecognized-key
+# probe below doesn't flag them: claudeAiOauth is the login itself,
+# trustedDeviceToken is enrolled per (device, account) at /login.
+ACCOUNT_CREDENTIAL_KEYS = frozenset({
+    "claudeAiOauth",
+    "trustedDeviceToken",
+})
+
+
+def shared_credential_fields(credentials: str | None) -> dict | None:
+    """Return the machine-shared fields of a Claude OAuth credential object.
+
+    Only the ``SHARED_CREDENTIAL_KEYS`` allowlist is machine-shared; other
+    siblings of ``claudeAiOauth`` are account-scoped or unknown and stay
+    slot-owned. ``None`` means the input is not a JSON credential object
+    (missing, malformed, or a managed API key). A dictionary — including
+    ``{}`` — is authoritative for every allowlisted key: a key absent here
+    is absent from the machine's current shared state.
+    """
+    data = _credential_object(credentials)
+    if data is None:
+        return None
+    if "claudeAiOauth" in data:
+        # A sibling key tsamx doesn't know defaults to slot-owned (fails
+        # safe), but silently: if Claude Code grows a new *shared* key,
+        # that default quietly reintroduces the stale-restore papercut for
+        # it — leave a trace so it gets noticed.
+        unrecognized = data.keys() - SHARED_CREDENTIAL_KEYS - ACCOUNT_CREDENTIAL_KEYS
+        if unrecognized:
+            _logger.debug(
+                "Live credential has sibling keys tsamx does not recognize "
+                "(a newer Claude Code?), treating them as slot-owned: %s",
+                sorted(unrecognized),
+            )
+    return {key: data[key] for key in SHARED_CREDENTIAL_KEYS if key in data}
+
+
+def merge_shared_credential_fields(
+    target_credentials: str, shared_fields: dict
+) -> str:
+    """Compose a target Claude login with the machine's shared fields.
+
+    The allowlisted keys are wholly live-owned, presence and absence alike:
+    the target's copies are discarded and ``shared_fields`` supplies the
+    current generation, so a shared key the machine no longer holds is not
+    resurrected from the slot's snapshot. All other target fields pass
+    through untouched. Returns ``target_credentials`` unchanged when it is
+    not a JSON credential object carrying a Claude login (managed API keys
+    and opaque legacy shapes stay activatable verbatim).
+    """
+    target = _credential_object(target_credentials)
+    if target is None or "claudeAiOauth" not in target:
+        return target_credentials
+
+    composed = {
+        key: value
+        for key, value in target.items()
+        if key not in SHARED_CREDENTIAL_KEYS
+    }
+    composed.update(shared_fields)
+    return json.dumps(composed)
+
+
+def approved_form(api_key: str) -> str:
+    """The value Claude Code stores in ``customApiKeyResponses.approved``.
+
+    Mirrors Claude Code's ``normalizeApiKeyForConfig`` (``apiKey.slice(-20)``): the
+    last 20 chars. Storing anything else makes Claude Code's "is this key approved?"
+    check miss and re-prompt the user to approve the key.
+    """
+    return api_key.strip()[-20:]
+
+
+class _StoreHost(Protocol):
+    """The live configuration view ``CredentialStore`` reads from its owner.
+
+    Data only — the store reads these attributes at call time so post-construction
+    overrides (e.g. tests setting ``switcher.platform``) are honored. The store
+    must not reach for any *method* here.
+    """
+
+    platform: Platform
+    credentials_dir: Path
+    _logger: logging.Logger
+
+
+class CredentialStore:
+    """Owns the active and per-account backup credential stores.
+
+    One store per switcher: the capability cache is per-process, learned from real
+    ``security`` calls, and a fresh process re-evaluates from scratch.
+    """
+
+    def __init__(self, host: _StoreHost):
+        self._host = host
+        # macOS Keychain usability, learned per-process from real `security`
+        # calls (see _kc_call / _use_keychain). None = not yet probed; True/False
+        # once an op has run. _last_active_credentials_backend records where the
+        # most recent active-credential write landed ("keychain" | "file"), for the
+        # post-switch follow-up message.
+        self._keychain_usable_cache: bool | None = None
+        # When file mode was entered by a real failure, the epoch after which to
+        # re-probe the Keychain (see KEYCHAIN_RECHECK_COOLDOWN_S). 0.0 = no
+        # pending re-probe (never failed, or forced to file mode deliberately).
+        self._keychain_disabled_until: float = 0.0
+        self._last_active_credentials_backend: str | None = None
+
+    def _kc_call(self, fn, *args):
+        """Run a ``macos_keychain`` wrapper call, learning Keychain usability.
+
+        A success (including ``get_password`` returning ``None`` for a missing
+        item) marks the Keychain usable — but only flips the cache ``None -> True``,
+        never ``False -> True``: once a call has failed this run we stay in file
+        mode so one invocation can't split-brain between backends. A
+        ``KeychainError`` / ``TimeoutExpired`` / ``OSError`` (binary missing) marks
+        it unusable and re-raises so the caller can fall back. Only those three are
+        caught — a programming error propagates.
+
+        Do NOT route ``item_exists`` through here: it returns ``False`` for both
+        "absent" and "failed", so a timeout would be misread as a usable Keychain.
+        """
+        try:
+            result = fn(*args)
+        except macos_keychain.KEYCHAIN_ERRORS:
+            self._keychain_usable_cache = False
+            # Monotonic so a wall-clock jump can't expire the cooldown early/late.
+            self._keychain_disabled_until = (
+                time.monotonic() + KEYCHAIN_RECHECK_COOLDOWN_S
+            )
+            raise
+        if self._keychain_usable_cache is None:
+            self._keychain_usable_cache = True
+        return result
+
+    def _use_keychain(self) -> bool:
+        """Whether credential ops should target the macOS Keychain right now.
+
+        ``False`` off macOS. On macOS, ``True`` until a Keychain op fails, which
+        drops to file mode. That failure records a re-probe deadline
+        (``KEYCHAIN_RECHECK_COOLDOWN_S``): within one CLI invocation the deadline
+        never passes, so a command can't split-brain between backends, but a
+        long-running daemon re-probes once the cooldown elapses so a transient
+        ``security`` timeout self-heals instead of sticking for the whole process.
+        A pinned file mode with no deadline (0.0) stays sticky — see
+        :meth:`_pin_file_mode` for why a write fallback must never re-probe.
+        """
+        if self._host.platform != Platform.MACOS:
+            return False
+        if (
+            self._keychain_usable_cache is False
+            and self._keychain_disabled_until
+            and time.monotonic() >= self._keychain_disabled_until
+        ):
+            self._keychain_usable_cache = None  # cooldown elapsed → re-probe
+            self._keychain_disabled_until = 0.0
+        return self._keychain_usable_cache is not False
+
+    def _pin_file_mode(self) -> None:
+        """Pin file mode for the rest of the process — no Keychain re-probe.
+
+        A read timeout is safe to recover from (re-probe on cooldown), but an
+        active-credential *write* that falls back to the file is not: its
+        best-effort delete of the old Keychain item may have failed, leaving a
+        stale entry. Re-probing later could read that residual and show the wrong
+        account, so once a write falls back we never re-probe onto a Keychain we
+        could not verify-clear. Clears any re-probe deadline a prior read
+        scheduled, which could otherwise still be pending.
+        """
+        self._keychain_usable_cache = False
+        self._keychain_disabled_until = 0.0
+
+    def _read_credentials(self) -> str | None:
+        """Read Claude Code's active credential — OAuth *or* managed API key (value).
+
+        Thin wrapper over :meth:`_read_active_credentials` preserving the historic
+        ``str | None`` contract the switch paths rely on: credential string if
+        found, ``""`` if not found, ``None`` on a file read error.
+        """
+        return self._read_active_credentials().value
+
+    def _read_active_oauth_keychain(self) -> tuple[str | None, bool]:
+        """Read the active OAuth Keychain item with a bounded retry.
+
+        Returns ``(value, failed)``. ``value`` is the credential string, or
+        ``None`` when the item is absent (rc-44) or unreadable. ``failed`` is True
+        only when *every* attempt raised a KeychainError (locked / denied /
+        timeout); a genuinely absent item (rc-44, returned as ``None`` without
+        raising) reports ``failed=False`` and is not retried. The retry rides out
+        a transient lock/contention — it does not paper over an internal race.
+        """
+        last_error: Exception | None = None
+        for attempt in range(_ACTIVE_READ_ATTEMPTS):
+            try:
+                value = self._kc_call(
+                    macos_keychain.get_password,
+                    CLAUDE_CODE_KEYCHAIN_SERVICE,
+                    macos_keychain.keychain_account_name(),
+                )
+                return value, False
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                last_error = e
+                if attempt + 1 < _ACTIVE_READ_ATTEMPTS:
+                    time.sleep(_ACTIVE_READ_RETRY_DELAY)
+        # Every attempt failed: _kc_call has flipped routing to file mode.
+        self._host._logger.warning(
+            f"Keychain read failed after {_ACTIVE_READ_ATTEMPTS} attempt(s), "
+            f"trying file: {last_error}"
+        )
+        return None, True
+
+    def _read_active_credentials(self) -> ActiveCredentials:
+        """Read Claude Code's active credential, classifying the outcome.
+
+        Tries the OAuth credential first (Keychain "Claude Code-credentials" on
+        macOS when usable — with a bounded retry to ride out a transient
+        lock/contention — then the plaintext ``~/.claude/.credentials.json`` Claude
+        Code also falls back to), and only then the managed-key locations (macOS
+        Keychain "Claude Code", then ``~/.claude.json`` ``primaryApiKey``). Trying
+        OAuth fully first means a macOS OAuth login that only has a file fallback
+        (Keychain empty) is never misread as an API key. A returned managed key is a
+        raw ``sk-ant-api…`` string — callers distinguish it via ``looks_like_api_key``.
+        Non-mutating.
+
+        Reports ``keychain_unavailable`` when the OAuth Keychain read failed and
+        nothing else covered it, so the display layer can say "keychain unavailable"
+        rather than "no credentials" for a merely-unreadable slot — which would
+        otherwise nudge the user into an unnecessary re-login.
+        """
+        keychain_failed = False
+        # 1. OAuth Keychain (macOS, when usable), with a bounded retry.
+        if self._use_keychain():
+            val, keychain_failed = self._read_active_oauth_keychain()
+            if val:
+                return ActiveCredentials(val, False)
+        elif self._host.platform == Platform.MACOS:
+            # Keychain already known unusable this process (a prior op failed and the
+            # capability cache stuck to file mode): if nothing is found below, that
+            # absence is "keychain unavailable", not a genuinely empty slot.
+            keychain_failed = True
+
+        # 2. OAuth plaintext file (Claude Code's own fallback; every platform).
+        cred_file = get_credentials_path()
+        if cred_file.exists():
+            try:
+                text = cred_file.read_text(encoding="utf-8")
+            except Exception as e:
+                self._host._logger.error(f"Failed to read credentials file: {e}")
+                return ActiveCredentials(None, False)
+            if text.strip():
+                return ActiveCredentials(text, False)
+
+        # 3. Managed API key (Keychain "Claude Code" on macOS, then primaryApiKey).
+        key = self._read_managed_key()
+        if key:
+            return ActiveCredentials(key, False)
+        # Nothing anywhere. Flag a failed-and-uncovered OAuth Keychain read so the
+        # UI distinguishes it from a real empty slot.
+        return ActiveCredentials("", keychain_failed)
+
+    def _read_managed_key(self) -> str:
+        """Read the active managed API key, or "" when absent. Non-mutating.
+
+        macOS Keychain "Claude Code" (when usable) first, then ``~/.claude.json``
+        ``primaryApiKey`` — mirroring Claude Code's
+        ``getApiKeyFromConfigOrMacOSKeychain``.
+        """
+        if self._use_keychain():
+            try:
+                val = self._kc_call(
+                    macos_keychain.get_password,
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                    macos_keychain.keychain_account_name(),
+                )
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                self._host._logger.warning(f"Managed-key Keychain read failed: {e}")
+                val = None
+            if val:
+                return val
+        cfg = self._read_global_config()
+        if cfg:
+            key = cfg.get("primaryApiKey")
+            if isinstance(key, str) and key:
+                return key
+        return ""
+
+    def _read_global_config(self) -> dict | None:
+        """Read and parse ``~/.claude.json``, or None when absent/unreadable."""
+        path = get_global_config_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._host._logger.warning(f"Failed to read global config: {e}")
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _update_global_config(self, mutator) -> None:
+        """Atomically apply ``mutator(dict)`` to ``~/.claude.json``, key-scoped.
+
+        Reads the current config, lets ``mutator`` change only the keys it owns
+        (``primaryApiKey`` / ``customApiKeyResponses``), and writes it back
+        atomically — preserving every other key (``oauthAccount``, projects,
+        settings). 0o600 mirrors the switcher's ``_write_json``.
+        """
+        path = get_global_config_path()
+        try:
+            data = self._read_global_config() or {}
+        except Exception as e:  # pragma: no cover - defensive
+            raise CredentialWriteError(f"Failed to read global config for update: {e}")
+        mutator(data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            os.write(fd, json.dumps(data, indent=2).encode("utf-8"))
+            os.close(fd)
+            fd = -1
+            replace_with_retry(tmp_path, str(path))
+            if sys.platform != "win32":
+                os.chmod(str(path), 0o600)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _write_active_credentials_file(self, credentials: str) -> None:
+        """Atomically write Claude Code's plaintext active-credentials file."""
+        cred_dir = get_claude_config_home()
+        cred_dir.mkdir(parents=True, exist_ok=True)
+        cred_file = cred_dir / ".credentials.json"
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir=str(cred_dir), suffix=".tmp")
+        try:
+            os.write(fd, credentials.encode("utf-8"))
+            os.close(fd)
+            fd = -1
+            replace_with_retry(tmp_path, str(cred_file))
+            if sys.platform != "win32":
+                os.chmod(str(cred_file), 0o600)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _delete_active_keychain_entry(self) -> None:
+        """Best-effort removal of the active-credential Keychain item (macOS only).
+
+        Claude Code reads the Keychain before the plaintext file, so once we fall
+        back to the file we must clear any stale Keychain entry or Claude Code would
+        resurrect it (#30337). Best-effort: when the Keychain is down the delete
+        can't run, which is the documented recovery residual.
+        """
+        if self._host.platform != Platform.MACOS:
+            return
+        try:
+            macos_keychain.delete_password(
+                CLAUDE_CODE_KEYCHAIN_SERVICE, macos_keychain.keychain_account_name()
+            )
+        except Exception:
+            pass  # best-effort; a down Keychain can't be cleaned now
+
+    def _write_credentials(self, credentials: str) -> None:
+        """Write Claude Code's active credential, enforcing a single auth axis.
+
+        Detects the kind from the payload (raw ``sk-ant-api…`` key vs OAuth JSON) and
+        mirrors Claude Code's own ``saveApiKey``/``removeApiKey``: activating one axis
+        clears the other so a stale credential can't shadow the switch.
+
+        - **OAuth** → write the OAuth credential (see ``_write_oauth_credentials``),
+          then clear any managed key (Keychain "Claude Code" + ``primaryApiKey``;
+          ``approved`` left intact, as ``removeApiKey`` does).
+        - **API key** → record ``key[-20:]`` in ``approved`` and store the key (macOS
+          Keychain "Claude Code" when usable, else ``~/.claude.json`` ``primaryApiKey``),
+          then clear the OAuth credential (Keychain item + ``.credentials.json``).
+
+        Raises:
+            CredentialWriteError: If writing credentials fails.
+        """
+        if looks_like_api_key(credentials):
+            self._write_managed_credentials(credentials.strip())
+        else:
+            self._write_oauth_credentials(credentials)
+            self._clear_managed_key()
+
+    def _write_managed_credentials(self, api_key: str) -> None:
+        """Activate a managed API key, then clear OAuth (mutual exclusion).
+
+        Always records ``key[-20:]`` in ``customApiKeyResponses.approved`` (Claude
+        Code does this on every platform, even on Keychain success — otherwise it
+        re-prompts to approve the key). Stores the key in the macOS Keychain when
+        usable, else ``~/.claude.json`` ``primaryApiKey`` (matching ``saveApiKey``'s
+        keychain-then-config fallback). Finally clears the OAuth credential.
+
+        Raises:
+            CredentialWriteError: If persisting the key fails.
+        """
+        wrote_to_keychain = False
+        if self._use_keychain():
+            try:
+                self._kc_call(
+                    macos_keychain.set_password,
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                    macos_keychain.keychain_account_name(),
+                    api_key,
+                )
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                # _kc_call flipped routing to file mode; fall back to config below.
+                self._host._logger.warning(
+                    f"Managed-key Keychain write failed, falling back to config: {e}"
+                )
+            else:
+                wrote_to_keychain = True
+
+        approved = approved_form(api_key)
+
+        def _mutate(cfg: dict) -> None:
+            responses = cfg.get("customApiKeyResponses")
+            if not isinstance(responses, dict):
+                responses = {}
+            approved_list = responses.get("approved")
+            if not isinstance(approved_list, list):
+                approved_list = []
+            if approved not in approved_list:
+                approved_list.append(approved)
+            responses["approved"] = approved_list
+            responses.setdefault("rejected", [])
+            cfg["customApiKeyResponses"] = responses
+            if wrote_to_keychain:
+                # Keychain holds the key; keep it out of plaintext config.
+                cfg.pop("primaryApiKey", None)
+            else:
+                cfg["primaryApiKey"] = api_key
+
+        try:
+            self._update_global_config(_mutate)
+        except CredentialWriteError:
+            raise
+        except Exception as e:
+            raise CredentialWriteError(f"Failed to write managed API key: {e}")
+
+        # Mutual exclusion: drop the OAuth credential so it can't shadow the key.
+        self._clear_oauth_credential()
+        if self._host.platform == Platform.MACOS and not wrote_to_keychain:
+            # Same stale-Keychain resurrection guard as the OAuth path: the key
+            # fell back to plaintext ``primaryApiKey`` while a stale "Claude Code"
+            # Keychain item may remain, and managed-key reads check the Keychain
+            # before ``primaryApiKey``. Pin file mode so a cooldown re-probe can't
+            # read that residual over the fresh fallback value.
+            self._pin_file_mode()
+        self._last_active_credentials_backend = (
+            "keychain" if wrote_to_keychain else "file"
+        )
+
+    def _clear_managed_key(self) -> None:
+        """Clear any active managed API key (Claude Code ``removeApiKey`` semantics).
+
+        Deletes the macOS Keychain "Claude Code" item (best-effort) and drops
+        ``primaryApiKey`` from ``~/.claude.json``. Leaves
+        ``customApiKeyResponses.approved`` untouched — ``removeApiKey`` doesn't clear
+        it either, and removing it would force recovering ``key[-20:]`` from the
+        Keychain for no benefit. A no-op (no config rewrite) when no key is present.
+        """
+        if self._host.platform == Platform.MACOS:
+            try:
+                macos_keychain.delete_password(
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                    macos_keychain.keychain_account_name(),
+                )
+            except Exception:
+                pass  # best-effort; a down Keychain can't be cleaned now
+        cfg = self._read_global_config()
+        if cfg is not None and cfg.get("primaryApiKey") is not None:
+            def _drop(c: dict) -> None:
+                c.pop("primaryApiKey", None)
+
+            try:
+                self._update_global_config(_drop)
+            except Exception as e:
+                self._host._logger.warning(f"Failed to clear primaryApiKey: {e}")
+
+    def _clear_oauth_credential(self) -> None:
+        """Clear the active OAuth credential — Keychain item and plaintext file.
+
+        Best-effort: a down Keychain or missing file is fine. Removing
+        ``.credentials.json`` stops Claude Code from falling back to a stale OAuth
+        login over the just-activated API key.
+        """
+        self._delete_active_keychain_entry()
+        cred_file = get_credentials_path()
+        try:
+            if cred_file.exists():
+                cred_file.unlink()
+        except OSError as e:
+            self._host._logger.warning(f"Failed to remove credentials file: {e}")
+
+    def _write_oauth_credentials(self, credentials: str) -> None:
+        """Write Claude Code's active OAuth credentials.
+
+        macOS writes the Keychain when usable (recording backend ``"keychain"``). On
+        a successful Keychain write it then **rewrites an already-present**
+        ``.credentials.json`` with the same fresh creds — never *creating* one when
+        absent, never *deleting* one. This bumps the file's mtime so a running Claude
+        Code session's disk-mtime cache invalidation fires and it hot-reloads the new
+        account instead of serving its memoized token until restart (#86); it also
+        keeps the file consistent for the container ``~/.claude`` sharing consumer
+        (#1414) rather than stranding it on stale content. Keychain-only users keep
+        their fileless posture — their absent-file path already hot-reloads via the
+        ~30s Keychain TTL — and never gain a plaintext credential on disk. If the
+        Keychain write fails — or the Keychain is already known unusable — it writes
+        the plaintext file and best-effort clears any stale Keychain entry (#30337),
+        recording backend ``"file"``. Linux/WSL/Windows always write the file.
+
+        Raises:
+            CredentialWriteError: If writing credentials fails.
+        """
+        if self._use_keychain():
+            try:
+                self._kc_call(
+                    macos_keychain.set_password,
+                    CLAUDE_CODE_KEYCHAIN_SERVICE,
+                    macos_keychain.keychain_account_name(),
+                    credentials,
+                )
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                # _kc_call flipped routing to file mode; fall through to the file.
+                # (A programming error is NOT caught here — it propagates.)
+                self._host._logger.warning(f"Keychain write failed, falling back to file: {e}")
+            else:
+                # Keychain (primary) now holds the fresh credential. Bump an
+                # already-present shadow file's mtime so running sessions hot-reload
+                # (#86); best-effort, never creates one — see the helper.
+                self._refresh_stale_credentials_file(credentials)
+                self._last_active_credentials_backend = "keychain"
+                return
+
+        # File mode: non-macOS, macOS Keychain known unusable, or a Keychain write
+        # that just failed. Write the plaintext file and (macOS) best-effort clear
+        # any stale Keychain entry so Claude Code's keychain-first read can't shadow
+        # it (#30337).
+        try:
+            self._write_active_credentials_file(credentials)
+        except Exception as e:
+            raise CredentialWriteError(f"Failed to write credentials: {e}")
+        self._delete_active_keychain_entry()
+        if self._host.platform == Platform.MACOS:
+            # The delete above is best-effort; a stale Keychain item may remain.
+            # Pin file mode so a later read-timeout cooldown can't re-probe onto
+            # that residual and resurrect the wrong account (see _pin_file_mode).
+            self._pin_file_mode()
+        self._last_active_credentials_backend = "file"
+
+    def _refresh_stale_credentials_file(self, credentials: str) -> None:
+        """Bump an already-present ``.credentials.json``'s mtime after a Keychain write.
+
+        Rewrite-when-present / never-create (#86). Claude Code invalidates its
+        memoized OAuth token only when this file's mtime changes or the file is
+        absent; a Keychain-only switch leaves a *stale* file's mtime frozen, so a
+        running session serves the old token until restart. Rewriting the existing
+        file with the same fresh creds bumps the mtime (atomic ``os.replace``, so it
+        bumps even when the content is unchanged) and keeps a file-reading consumer
+        (#1414 shared ``~/.claude``) consistent. We never *create* the file when
+        absent — Keychain-only users keep their fileless posture and their absent-file
+        (~30s Keychain-TTL) path already hot-reloads.
+
+        Best-effort: the Keychain write is authoritative on macOS and already
+        succeeded, so a failure here must not fail the switch — it only means a
+        running session may lag until restart.
+        """
+        cred_file = get_credentials_path()
+        if not cred_file.exists():
+            return
+        try:
+            self._write_active_credentials_file(credentials)
+        except Exception as e:
+            self._host._logger.warning(
+                f"Could not refresh .credentials.json after Keychain write ({e}); "
+                "a running session may not hot-reload until restart"
+            )
+
+    def _uses_file_backup_backend(self) -> bool:
+        """Whether per-account backup *writes* go to files vs. the Keychain.
+
+        Linux/WSL/Windows always use base64 ``.enc`` files under ``credentials_dir``
+        (Windows moved off the Credential Manager because it rejects entries over
+        ~2,500 bytes, #45). macOS uses the Keychain while it's usable and falls back
+        to ``.enc`` files when it isn't (headless/SSH/locked); UNKNOWN platforms have
+        no Keychain, so they use files too. Backup *reads* are ``.enc``-wins
+        regardless (see ``_read_account_credentials``).
+        """
+        return not self._use_keychain()
+
+    # -- backup credential backends ---------------------------------------
+    #
+    # Two backends for per-account backups: base64 ``.enc`` files under
+    # ``credentials_dir`` and the macOS Keychain (``SECURITY_SERVICE``). On macOS
+    # reads are ``.enc``-wins: a fallback ``.enc`` (written while the Keychain was
+    # unusable) is authoritative over a possibly-stale Keychain copy, so a Keychain
+    # that recovers can't shadow a newer file. A successful Keychain write
+    # therefore reconciles the ``.enc`` away (correctness-critical, not best-effort).
+
+    def _backup_enc_path(self, account_num: str, email: str) -> Path:
+        return self._host.credentials_dir / f".creds-{account_num}-{email}.enc"
+
+    def _backup_username(self, account_num: str, email: str) -> str:
+        return f"account-{account_num}-{email}"
+
+    def _kc_read_backup(self, account_num: str, email: str) -> str:
+        """Read a per-account backup from the Keychain only (no file fallback).
+
+        Routes through ``_kc_call`` (so a failure flips the capability cache).
+        Returns ``""`` when the item is absent; raises on a Keychain failure so
+        the caller decides (normal reads swallow it; the migration defers).
+        """
+        creds = self._kc_call(
+            macos_keychain.get_password,
+            SECURITY_SERVICE,
+            self._backup_username(account_num, email),
+        )
+        return creds or ""
+
+    def _kc_write_backup(self, account_num: str, email: str, credentials: str) -> None:
+        """Write a per-account backup to the Keychain only. Raises on failure."""
+        self._kc_call(
+            macos_keychain.set_password,
+            SECURITY_SERVICE,
+            self._backup_username(account_num, email),
+            credentials,
+        )
+
+    def _kc_delete_backup(self, account_num: str, email: str) -> None:
+        """Delete a per-account backup Keychain item only. Raises on failure."""
+        self._kc_call(
+            macos_keychain.delete_password,
+            SECURITY_SERVICE,
+            self._backup_username(account_num, email),
+        )
+
+    def _kc_delete_backup_prev(self, account_num: str, email: str) -> None:
+        """Delete a slot's retained ``.prev`` Keychain item. Raises on failure."""
+        self._kc_call(
+            macos_keychain.delete_password,
+            SECURITY_SERVICE,
+            self._prev_backup_username(account_num, email),
+        )
+
+    def _delete_backup_keychain_quiet(self, account_num: str, email: str) -> None:
+        """Best-effort backup Keychain delete (never raises)."""
+        try:
+            self._kc_delete_backup(account_num, email)
+        except Exception as e:
+            self._host._logger.warning(f"Failed to delete credentials from Keychain: {e}")
+
+    def _write_backup_enc(self, account_num: str, email: str, credentials: str) -> None:
+        """Atomically write a per-account backup ``.enc`` (base64) file."""
+        self._atomic_b64_write(self._backup_enc_path(account_num, email), credentials)
+
+    def _atomic_b64_write(self, target: Path, credentials: str) -> None:
+        """Atomically write a base64-encoded credential file (0600)."""
+        self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
+        enc_file = target
+        encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir=str(self._host.credentials_dir), suffix=".tmp")
+        try:
+            os.write(fd, encoded.encode("utf-8"))
+            os.close(fd)
+            fd = -1
+            replace_with_retry(tmp_path, str(enc_file))
+            if sys.platform != "win32":
+                os.chmod(str(enc_file), 0o600)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _reconcile_enc_after_keychain_write(
+        self, account_num: str, email: str, credentials: str
+    ) -> None:
+        """Stop a leftover ``.enc`` from shadowing a just-written Keychain backup.
+
+        ``.enc``-wins reads make this correctness-critical: delete the ``.enc``; if
+        the delete fails, atomically rewrite it with the same fresh creds; if that
+        also fails, raise so the inconsistency surfaces rather than serving stale.
+        """
+        enc_file = self._backup_enc_path(account_num, email)
+        if not enc_file.exists():
+            return
+        try:
+            enc_file.unlink()
+            return
+        except Exception as e:
+            self._host._logger.warning(
+                f"Could not delete .enc after Keychain backup write ({e}); "
+                "rewriting it with the fresh credentials to keep both consistent"
+            )
+        self._write_backup_enc(account_num, email, credentials)
+
+    def _read_account_credentials(self, account_num: str, email: str) -> str:
+        """Read account credentials from backup. ``""`` when missing.
+
+        macOS is ``.enc``-wins (a fallback file beats a possibly-stale Keychain
+        copy); only an absent or corrupt ``.enc`` falls through to the Keychain.
+        Linux/WSL/Windows read the ``.enc`` only.
+        """
+        enc_file = self._backup_enc_path(account_num, email)
+        try:
+            # Python 3.12's Path.exists() raises on an unsearchable directory
+            # where 3.13+ returns False — normalize to "missing" so every
+            # version takes the same best-effort path. Failing closed on
+            # unreadable stores is the strict pre-commit clear's job, not the
+            # reader's.
+            enc_present = enc_file.exists()
+        except OSError as e:
+            self._host._logger.warning(f"Failed to read credentials file: {e}")
+            enc_present = False
+        if enc_present:
+            try:
+                encoded = enc_file.read_text(encoding="utf-8").strip()
+                # validate=True: reject non-alphabet junk (e.g. "!!!!") instead of
+                # silently discarding it to empty bytes, which would let a corrupt
+                # .enc shadow a valid Keychain copy.
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            except Exception as e:
+                # Corrupt/garbled .enc → on macOS fall through to the Keychain copy.
+                self._host._logger.warning(f"Failed to read credentials file: {e}")
+            else:
+                if decoded:
+                    return decoded
+                # Empty/whitespace .enc is not a real backup → try the Keychain.
+        if self._host.platform == Platform.MACOS:
+            try:
+                return self._kc_read_backup(account_num, email)
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                self._host._logger.warning(f"Failed to read credentials from Keychain: {e}")
+        return ""
+
+    def _write_account_credentials(
+        self, account_num: str, email: str, credentials: str
+    ) -> None:
+        """Write account credentials to backup (pure I/O — no session invalidation).
+
+        macOS writes the Keychain when usable, then reconciles the ``.enc`` away
+        (see ``_reconcile_enc_after_keychain_write``). When the Keychain is unusable
+        it writes the ``.enc`` atomically, then best-effort deletes any stale
+        Keychain copy so a recovered Keychain can't shadow the fresh file.
+        Linux/WSL/Windows write the ``.enc`` only.
+
+        Raises on a file-write failure **before** returning, so the switcher wrapper
+        runs ``_post_backup_write`` exactly once and only after a successful write.
+
+        Before overwriting, the current generation is retained as a ``.prev`` file
+        (one generation, best-effort): a refresh token exists in exactly one place,
+        giving a misclassified overwrite a best-effort chance of recovery without
+        a /login.
+        """
+        self._retain_previous_backup(account_num, email, credentials)
+        if self._use_keychain():
+            try:
+                self._kc_write_backup(account_num, email, credentials)
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                # Keychain unusable; _kc_call flipped routing to file mode.
+                # (A programming error is NOT caught here — it propagates.)
+                self._host._logger.warning(
+                    f"Keychain backup write failed, falling back to file: {e}"
+                )
+            else:
+                self._reconcile_enc_after_keychain_write(account_num, email, credentials)
+                return
+
+        # File mode: write the .enc atomically, then (macOS) best-effort drop the
+        # stale Keychain copy so a recovered Keychain can't shadow the fresh file.
+        try:
+            self._write_backup_enc(account_num, email, credentials)
+        except Exception as e:
+            self._host._logger.warning(f"Failed to write credentials file: {e}")
+            raise
+        if self._host.platform == Platform.MACOS:
+            self._delete_backup_keychain_quiet(account_num, email)
+
+    def _delete_account_credentials(self, account_num: str, email: str) -> None:
+        """Delete account credentials from backup (both backends on macOS).
+
+        Removes the ``.enc`` file(s) and, on macOS, the Keychain item(s). The
+        Keychain delete is best-effort: if it's locked the item may linger as
+        harmless unreferenced cruft (the slot is gone from sequence.json; a re-add
+        overwrites it via ``-U``; purge sweeps it). Includes the legacy
+        ``account-None-{email}`` alias.
+        """
+        nums = [account_num]
+        if str(account_num) != "None":
+            nums.append("None")
+        for num in nums:
+            enc_file = self._backup_enc_path(num, email)
+            try:
+                if enc_file.exists():
+                    enc_file.unlink()
+            except Exception as e:
+                self._host._logger.warning(f"Failed to delete credentials file: {e}")
+            if self._host.platform == Platform.MACOS:
+                self._delete_backup_keychain_quiet(num, email)
+            self.delete_previous_backup(num, email)
+
+    def delete_account_credentials_strict(
+        self, account_num: str, email: str
+    ) -> None:
+        """Clear a slot key, failing closed: raise unless emptiness is assured.
+
+        For transactional pre-commit clears (the swap/move write-or-clear
+        step and rollback restoration): a destination that must be empty but
+        may still serve material is exactly the wrong-credential state the
+        transaction exists to prevent, so backend failures must abort the
+        commit rather than be logged away. A read-back alone cannot provide
+        this: the normal reader converts Keychain errors to ``""``, which
+        conflates "absent" with "unreadable" — a locked Keychain holding a
+        stale item would pass verification and resurface on unlock. So the
+        served backends are deleted with errors propagating; absence itself
+        counts as success on both (missing ``.enc``; Keychain rc 44). The
+        Keychain delete runs even when routing says file mode, for the same
+        reason. Legacy-alias and ``.prev`` sweeps stay best-effort — reads
+        never serve them. The best-effort variant remains right for
+        post-commit cleanup, where a failure only leaks an unreferenced file.
+        """
+        # Best-effort sweep first: same cruft cleanup (legacy alias, .prev,
+        # quiet Keychain) a normal delete performs.
+        self._delete_account_credentials(account_num, email)
+        # Then assure the served key really is gone, propagating failures.
+        # Unconditional unlink: exists() returns False on an inaccessible
+        # directory, which would fail open here — missing is fine
+        # (missing_ok), permission/I/O errors must abort the commit.
+        try:
+            self._backup_enc_path(account_num, email).unlink(missing_ok=True)
+            if self._host.platform == Platform.MACOS:
+                self._kc_delete_backup(account_num, email)
+        except (OSError, *macos_keychain.KEYCHAIN_ERRORS) as e:
+            raise CredentialError(
+                f"Could not clear stored credentials for slot {account_num} "
+                f"({email}) — aborting before commit: {e}"
+            ) from e
+        # Final belt: catches any backend view the deletes above missed.
+        if self._read_account_credentials(account_num, email):
+            raise CredentialError(
+                f"Could not clear stored credentials for slot {account_num} "
+                f"({email}) — aborting before commit"
+            )
+
+    def delete_previous_backup(self, account_num: str, email: str) -> None:
+        """Drop a slot key's retained ``.prev`` generation (both backends).
+
+        Best-effort, like retention itself. Called from full-key deletion,
+        and on its own when a key's history stops belonging to its account —
+        a renumber (swap/move) writes another account's material through the
+        key, and recovery must never resurrect the displaced generation onto
+        the key's new owner.
+        """
+        prev_file = self._prev_backup_path(account_num, email)
+        try:
+            if prev_file.exists():
+                prev_file.unlink()
+        except Exception as e:
+            self._host._logger.warning(f"Failed to delete .prev file: {e}")
+        if self._host.platform == Platform.MACOS:
+            try:
+                self._kc_delete_backup_prev(account_num, email)
+            except Exception as e:
+                self._host._logger.warning(
+                    f"Failed to delete .prev from Keychain: {e}"
+                )
+
+    # -- previous-generation retention -------------------------------------
+    #
+    # One retained generation per slot, routed by the same rule as the backup
+    # itself: Keychain when the Keychain is in use, ``.enc.prev`` file
+    # otherwise. Retention must not *weaken* the user's storage posture — a
+    # Mac whose credentials live in the Keychain must not grow a plaintext
+    # copy just for recovery. Best-effort by design: the *primary* safety
+    # boundary is the switch-time provenance check + unclaimed stash (whose
+    # failure aborts); ``.prev`` is defense in depth for writes that were
+    # classified as safe but weren't.
+
+    def _prev_backup_path(self, account_num: str, email: str) -> Path:
+        return self._host.credentials_dir / f".creds-{account_num}-{email}.enc.prev"
+
+    def _prev_backup_username(self, account_num: str, email: str) -> str:
+        return f"{self._backup_username(account_num, email)}.prev"
+
+    def _retain_previous_backup(
+        self, account_num: str, email: str, new_credentials: str
+    ) -> None:
+        """Retain the slot's current backup as ``.prev`` before it is replaced."""
+        try:
+            current = self._read_account_credentials(account_num, email)
+        except Exception as e:  # pragma: no cover - _read swallows its own errors
+            self._host._logger.warning(f"Could not read backup for retention: {e}")
+            return
+        if not current or current == new_credentials:
+            return
+        try:
+            if self._use_keychain():
+                self._kc_call(
+                    macos_keychain.set_password,
+                    SECURITY_SERVICE,
+                    self._prev_backup_username(account_num, email),
+                    current,
+                )
+            else:
+                self._atomic_b64_write(
+                    self._prev_backup_path(account_num, email), current
+                )
+        except Exception as e:
+            self._host._logger.warning(
+                f"Failed to retain previous credential generation for "
+                f"account {account_num}: {e}"
+            )
+
+    def _read_previous_backup(self, account_num: str, email: str) -> str:
+        """Read the retained previous generation. ``""`` when absent/corrupt.
+
+        ``.enc.prev``-wins like the main backup read: a file written while the
+        Keychain was unusable beats a possibly-stale Keychain copy.
+        """
+        prev_file = self._prev_backup_path(account_num, email)
+        if prev_file.exists():
+            try:
+                encoded = prev_file.read_text(encoding="utf-8").strip()
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                if decoded:
+                    return decoded
+            except Exception as e:
+                self._host._logger.warning(f"Failed to read .prev file: {e}")
+        if self._host.platform == Platform.MACOS:
+            try:
+                return self._kc_call(
+                    macos_keychain.get_password,
+                    SECURITY_SERVICE,
+                    self._prev_backup_username(account_num, email),
+                ) or ""
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                self._host._logger.warning(f"Failed to read .prev from Keychain: {e}")
+        return ""
+
+    # -- internal safety copies (unclaimed credentials) ----------------------
+    #
+    # Write-only preservation for live credential bytes a switch positively
+    # attributed to someone other than the outgoing slot (invariant: never
+    # overwrite the live store without preserving what was in it — the bytes
+    # may be the only live copy of some account's refresh token). Entries are
+    # append-only base64 files with a JSON manifest carrying the
+    # classification evidence; nothing consumes them automatically — recovery
+    # is the documented /login + `tsamx add [--slot N]`, and these files are
+    # forensic material for maintainers.
+    #
+    # Deliberately 0600 files on every platform, unlike the slot backups and
+    # ``.prev``, which route to the macOS Keychain when it is in use: a failed
+    # safety-copy write aborts the switch by design, and that abort path must
+    # not inherit the Keychain's failure modes (#101/#106 — a flaky Keychain
+    # would start blocking switches). On macOS this means these rare files
+    # sit outside the Keychain, base64-encoded with owner-only permissions.
+
+    def _stash_manifest_path(self) -> Path:
+        return self._host.credentials_dir / ".unclaimed-manifest.json"
+
+    def _stash_entry_path(self, entry_id: str) -> Path:
+        return self._host.credentials_dir / f".unclaimed-{entry_id}.enc"
+
+    def _read_stash_manifest(self) -> dict:
+        path = self._stash_manifest_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entries = data.get("entries")
+            return entries if isinstance(entries, dict) else {}
+        except Exception as e:
+            self._host._logger.warning(f"Failed to read unclaimed manifest: {e}")
+            return {}
+
+    def _write_stash_manifest(self, entries: dict) -> None:
+        from tsamx.settings import atomic_write_json
+
+        self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
+        path = self._stash_manifest_path()
+        # A corrupt manifest read as {} must not be silently clobbered — the
+        # rows are classification evidence. Set it aside (the entry *bytes*
+        # are separate files and keep being listed as orphans either way).
+        # Failing closed instead would brick switching: a stash-write failure
+        # aborts the switch by design.
+        if path.exists():
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                aside = path.with_name(
+                    f"{path.name}.corrupt-{int(time.time())}"
+                )
+                try:
+                    path.rename(aside)
+                    self._host._logger.warning(
+                        f"Unreadable unclaimed manifest preserved as {aside.name}"
+                    )
+                except OSError as e:
+                    self._host._logger.warning(
+                        f"Could not preserve corrupt unclaimed manifest: {e}"
+                    )
+        atomic_write_json(path, {"schemaVersion": 1, "entries": entries})
+
+    def _write_unclaimed_credential(self, credentials: str, context: dict) -> str:
+        """Stash a credential of unknown provenance. Returns the entry id.
+
+        Raises on any failure — callers use a successful stash as the license
+        to overwrite the live store, so a failed one must be loud. The entry
+        file is written before the manifest: an entry without manifest metadata
+        is recoverable; a manifest row without bytes is not.
+        """
+        import hashlib
+        import secrets
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        digest = hashlib.sha256(credentials.encode("utf-8")).hexdigest()[:12]
+        # Nonce keeps ids unique even for identical bytes preserved in the
+        # same second — append-only means no write may ever land on an
+        # existing id.
+        entry_id = f"{ts}-{digest}-{secrets.token_hex(3)}"
+        self._atomic_b64_write(self._stash_entry_path(entry_id), credentials)
+        entries = self._read_stash_manifest()
+        entries[entry_id] = {
+            "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            **context,
+        }
+        self._write_stash_manifest(entries)
+        return entry_id
+
+    def _list_unclaimed_credentials(self) -> dict[str, dict]:
+        """Manifest entries by id, including orphaned entry files (no metadata)."""
+        entries = dict(self._read_stash_manifest())
+        try:
+            for path in self._host.credentials_dir.glob(".unclaimed-*.enc"):
+                entry_id = path.name[len(".unclaimed-"):-len(".enc")]
+                entries.setdefault(entry_id, {"createdAt": None})
+        except OSError:
+            pass
+        return entries

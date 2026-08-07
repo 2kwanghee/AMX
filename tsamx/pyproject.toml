@@ -1,0 +1,65 @@
+[project]
+name = "tsamx"
+version = "0.25.0b1"
+description = "AMX account switcher"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Windows-only: needed solely by the one-time keyring -> files migration
+    # (migrations.py) for users upgrading from <=0.10.x. macOS/Linux never
+    # import it on the hot path; the macOS migration has a security-CLI
+    # fallback and the legacy purge sweep no-ops when it's absent.
+    "keyring>=25.0.0; sys_platform == 'win32'",
+    "textual>=8.2.8,<9",
+    "truststore>=0.10.4",
+]
+authors = [{name = "Onur Cetinkol", email = "onurcetinkol@gmail.com"}]
+license = {text = "MIT"}
+keywords = ["claude", "claude-code", "account-switcher", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Utilities",
+]
+
+[project.optional-dependencies]
+menubar = ["rumps>=0.4.0"]
+
+[project.scripts]
+tsamx = "tsamx.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tsamx"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-xdist>=3.5"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+# Parallel by default. The suite is ~1900 tests of mostly-idle work (file
+# locks, subprocess fakes, Textual pilots), so wall clock was dominated by
+# doing them one at a time, not by any single slow test: 25 ms/test spread
+# across the whole suite, with the top five totalling under 7 s of a 51 s run.
+# Measured here, 48 cores: 51.0s serial -> 12.1s (-n 8) -> 7.7s (-n 16), same
+# 1929 passed / 4 skipped every time, three consecutive runs, real account
+# store hash unmoved. `auto` rather than a fixed number so CI runners (2-4
+# cores) and this box both get the cores they have.
+addopts = "-n auto --dist loadgroup"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "no_keychain_fake: opt out of the autouse in-memory Keychain guard (test mocks subprocess itself, or runs against a temp keychain on GitHub Actions)",
+]

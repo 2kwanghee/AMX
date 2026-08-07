@@ -1,0 +1,227 @@
+"""Console output formatting for Tsamx.
+
+Provides subtle, modern terminal styling with a single warm accent color,
+dim secondary text, and bold for structure. Inspired by Claude Code's
+restrained aesthetic. Falls back to plain text when colors aren't supported.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import sys
+import time
+from pathlib import Path
+
+# ANSI escape codes -- structural, theme-independent
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+
+_PALETTES: dict[str, dict[str, str]] = {
+    "dark": {
+        "accent": "\033[38;5;173m",  # warm salmon/terracotta (xterm 173)
+        "muted": "\033[38;5;250m",  # soft gray -- readable, but quieter than normal
+        "red": "\033[31m",
+        "yellow": "\033[33m",
+    },
+    "light": {
+        "accent": "\033[38;2;149;76;42m",  # #954c2a burnt sienna
+        "muted": "\033[38;2;99;93;85m",  # #635d55
+        "red": "\033[38;2;173;49;40m",  # #ad3128
+        "yellow": "\033[38;2;121;89;17m",  # #795911 deep ochre
+    },
+}
+
+_colors_enabled: bool | None = None  # lazy-initialized
+_theme: str = "dark"
+
+
+def set_theme(name: str) -> None:
+    """Select the CLI color palette. Unknown names fall back to dark."""
+    global _theme
+    _theme = name if name in _PALETTES else "dark"
+
+
+def _pal(key: str) -> str:
+    return _PALETTES[_theme][key]
+
+
+def _enable_windows_vt() -> bool:
+    """Enable VT processing on Windows console."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return True
+    except Exception:
+        return False
+
+
+def force_utf8_output() -> None:
+    """Make stdout/stderr encode UTF-8 so ● → ├ ─ └ don't crash on a legacy
+    console (cp1252 on Windows, or an ASCII/C locale). errors="replace" keeps
+    output flowing on any stream that still can't render a glyph. No-op where
+    the stream can't be reconfigured (replaced/captured streams in tests)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+def _detect_color_support() -> bool:
+    """Detect whether the terminal supports ANSI colors."""
+    # Respect NO_COLOR convention (https://no-color.org/)
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    # Respect FORCE_COLOR for CI/testing
+    if os.environ.get("FORCE_COLOR") is not None:
+        return True
+    # Not a TTY (piped output) -> no color
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    # Windows: try to enable VT processing
+    if sys.platform == "win32":
+        return _enable_windows_vt()
+    # POSIX: check TERM
+    if os.environ.get("TERM", "") == "dumb":
+        return False
+    return True
+
+
+def colors_enabled() -> bool:
+    """Return whether color output is active. Caches on first call."""
+    global _colors_enabled
+    if _colors_enabled is None:
+        _colors_enabled = _detect_color_support()
+    return _colors_enabled
+
+
+@contextlib.contextmanager
+def force_color():
+    """Temporarily force colored output on, restoring the prior cache after.
+
+    Used by the TUI when capturing CLI output into a buffer: capture redirects
+    stdout to a non-tty StringIO, which would otherwise disable color — but the
+    TUI re-renders the ANSI itself, so it wants the codes emitted.
+    """
+    global _colors_enabled
+    saved = _colors_enabled
+    _colors_enabled = True
+    try:
+        yield
+    finally:
+        _colors_enabled = saved
+
+
+def _style(text: str, *codes: str) -> str:
+    """Apply ANSI codes to text if colors are enabled."""
+    if not colors_enabled():
+        return text
+    prefix = "".join(codes)
+    return f"{prefix}{text}{_RESET}"
+
+
+# --- Inline stylers (return styled strings for composing lines) ---
+
+
+def accent(text: str) -> str:
+    """Warm accent color for important elements."""
+    return _style(text, _pal("accent"))
+
+
+def muted(text: str) -> str:
+    """Slightly dimmer than normal -- for usage stats, org tags."""
+    return _style(text, _pal("muted"))
+
+
+def dimmed(text: str) -> str:
+    """Dim for tertiary info -- tree connectors, hints."""
+    return _style(text, _DIM)
+
+
+def bolded(text: str) -> str:
+    """Bold (no color) for structure."""
+    return _style(text, _BOLD)
+
+
+def bold_accent(text: str) -> str:
+    """Bold + accent for key markers like (active)."""
+    return _style(text, _BOLD, _pal("accent"))
+
+
+def yellowed(text: str) -> str:
+    """Yellow for warning-toned text (string form; ``warning()`` prints)."""
+    return _style(text, _pal("yellow"))
+
+
+# --- Line printers (call print() internally) ---
+
+
+def error(msg: str) -> None:
+    """Print an error message (red) to stderr."""
+    print(_style(msg, _pal("red")), file=sys.stderr)
+
+
+def warning(msg: str) -> None:
+    """Print a warning message (yellow)."""
+    print(_style(msg, _pal("yellow")))
+
+
+# --- Display helpers for process detection ---
+
+_ENTRYPOINT_LABELS: dict[str, str] = {
+    "cli": "CLI",
+    "claude-vscode": "VS Code",
+    "claude-desktop": "Desktop",
+    "sdk-cli": "SDK",
+    "sdk-ts": "SDK",
+    "sdk-py": "SDK",
+    "mcp": "MCP",
+    "local-agent": "Agent",
+    "remote": "Remote",
+}
+
+_IDE_SHORT_NAMES: dict[str, str] = {
+    "Visual Studio Code": "VS Code",
+}
+
+
+def entrypoint_label(entrypoint: str) -> str:
+    """Return a human-readable label for a Claude Code entrypoint."""
+    return _ENTRYPOINT_LABELS.get(entrypoint, entrypoint)
+
+
+def ide_short_name(ide_name: str) -> str:
+    """Return a short display name for an IDE."""
+    return _IDE_SHORT_NAMES.get(ide_name, ide_name)
+
+
+def abbreviate_path(path: str) -> str:
+    """Replace the user's home directory prefix with ~."""
+    home = str(Path.home())
+    if path.startswith(home):
+        return "~" + path[len(home):]
+    return path
+
+
+def format_age(started_at_ms: int) -> str:
+    """Format a millisecond epoch timestamp as a human-readable age."""
+    elapsed = int(time.time()) - (started_at_ms // 1000)
+    if elapsed < 60:
+        return "just now"
+    if elapsed < 3600:
+        return f"{elapsed // 60}m ago"
+    if elapsed < 86400:
+        return f"{elapsed // 3600}h ago"
+    return f"{elapsed // 86400}d ago"

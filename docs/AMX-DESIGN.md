@@ -1,0 +1,573 @@
+# AMX — Account Management & eXchange 설계 문서
+
+---
+title: AMX 최종 설계 문서 (v1.1 — 정합성 교차 리뷰 반영 + tsamx 내재화 반영)
+status: reviewed-baseline
+last_updated: 2026-08-07
+author: 기획설계 세션 (tsamx 분석 + AMS/AMA 설계 에이전트 종합, 독립 리뷰어 교차 검증)
+---
+
+## 1. 개요
+
+AMX는 Claude 구독 계정(어카운트)의 **중앙 관제 + 자동 스위칭**을 제공하는 독립 프로젝트다.
+내재화한 CLI 도구 `tsamx`(claude-swap 포크, `docs/TSAMX-GUIDE.md`)가 제공하는 단일 서버 계정 자동 스위칭을,
+**멀티 테넌트 / 멀티 서버** 환경으로 고도화하여:
+
+1. (1차) ClickEye 딜리버리 서빙 러너 서버들의 계정 풀을 중앙에서 배정·회수·모니터링하고,
+2. (장기) 독립 서비스(SaaS)로 발전시킨다.
+
+ClickEye와는 **코드 결합 없음**. ClickEye는 AMX의 조회 API를 읽는 외부 소비자일 뿐이다.
+
+### 1.1 용어
+
+| 용어 | 정의 |
+|---|---|
+| **AMS** | Account Management Server. 메인 관제 서버. 모니터링 + 테넌트/계정/서버/배정 CRUD + 명령 하달 |
+| **AMA** | Account Management Agent. 하위 서버에 설치되는 에이전트 데몬(Go). tsamx 래퍼 + AMS 통신 |
+| **테넌트** | 계정 그룹의 관리 경계. 계정·서버·배정은 모두 테넌트에 귀속 (SaaS 단계의 과금 경계) |
+| **어카운트** | Claude 구독 계정 자격증명(OAuth credential 세트, §5.5). 테넌트 소유 |
+| **배정(Assignment)** | "어느 어카운트를 어느 AMA 서버에 주입하는가"의 단위. 상태기계로 수명주기 관리 |
+| **tsamx** | claude-swap v0.25.0b1의 내재화 포크 (`/tsamx`, MIT — `docs/TSAMX-GUIDE.md`). 로컬 계정 스위칭 엔진. AMA가 서브프로세스로 제어 |
+
+### 1.2 확정된 핵심 결정 (Decision Log)
+
+| # | 결정 | 내용 | 근거 |
+|---|---|---|---|
+| D1 | 독립 프로젝트 | ClickEye 내장이 아닌 별도 디렉토리/레포(AMX) | 사용자 확정 |
+| D2 | 동시성 모델 | **단일 활성 + 스위칭** (tsamx 모델 그대로). 한 시점 1계정 활성, 95% 도달 시 교체 | 사용자 확정 |
+| D3 | 자격증명 전달 | **AMS push 모델**. AMS가 중앙 OAuth 등록(§5.5)으로 획득한 **완전한 credential 세트**(access+refresh+expiresAt+전체 scopes+계정 메타)를 암호화해 gRPC로 전달 → AMA가 credential 파일 기록 + `tsamx add`로 등록. ⚠ setup-token/`add-token` 경로는 대화형 Claude Code가 로그인으로 인정하지 않아 폐기 (검증 2026-08-07) | 사용자 확정 (2026-08-07 개정) |
+| D4 | 레포 형태 | 단일 모노레포 (contracts SSOT) | 사용자 확정 |
+| D5 | AMS 스택 | FastAPI + PostgreSQL + Next.js 콘솔 | 사용자 확정 |
+| D6 | AMA 스택 | **Go** (정적 바이너리 배포, gRPC/암호화 표준 지원) | 사용자 확정 |
+| D7 | tsamx 재사용 | **CLI 서브프로세스 래핑** (Go 전환으로 라이브러리 import 불가) | D6 파급 |
+| D8 | 스위칭 구동 | `tsamx auto` 상시 데몬 금지. **AMA가 `tsamx auto --once`를 틱 호출** (결정자 단일화) | D7 파급 |
+| D9 | 통신 | gRPC bidi 스트림 1차, transport 인터페이스로 추상화(교체 가능). **AMA outbound-only** | 요구사항 5 |
+| D10 | 임계치 | 자동 스위칭 95% (`tsamx config set autoswitch.threshold 95`) | 요구사항 AMA-3 |
+| D11 | tsamx 배포 | 별도 레포 분리 없이 **모노레포 서브디렉터리 git 설치**: `uv tool install "git+<AMX 레포 주소>@<태그>#subdirectory=tsamx"` (D4 모노레포 SSOT 유지) | 사용자 확정 (2026-08-07) |
+
+---
+
+## 2. 선행 분석 — tsamx 엔진 (claude-swap 포크)
+
+> 본 분석은 claude-swap v0.24.1 기준으로 수행했고, 내재화된 tsamx는 v0.25.0b1 기반이다.
+> 동작 메커니즘·CLI 표면은 동일하나 **소스 라인 번호 인용은 v0.24.1 기준 근사치**다.
+
+### 2.1 정체
+
+- 모노레포에 내재화된 Python CLI 패키지 (`/tsamx`, uv tool로 설치). Claude Code 플러그인/훅이 **아님**.
+- 소스 규모 ~17.6k LOC: `cli.py`, `autoswitch.py`, `switcher.py`, `credentials.py`,
+  `usage_store.py`, `oauth.py`, `settings.py`, `poll_policy.py`, `paths.py`, `tui/`
+- 통상 systemd user service(`tsamx auto`)로 상시 구동되나, **AMX에서는 이 데몬을 쓰지 않는다** (D8).
+
+### 2.2 핵심 동작 메커니즘
+
+- **데이터 루트**: `~/.local/share/tsamx/` (XDG, `CLAUDE_CONFIG_DIR`/`XDG_DATA_HOME` env로 재지정 가능)
+  - `sequence.json` — 슬롯 순서 + 계정 메타(email, uuid, organization 등)
+  - `credentials/.creds-<slot>-<email>.enc` — 계정별 자격증명 사본.
+    **⚠ Linux에서는 base64 인코딩일 뿐 암호화가 아님** (`credentials.py:800`). macOS만 Keychain.
+  - `configs/.claude-config-<slot>-<email>.json` — 계정별 `~/.claude.json` 사본
+  - `autoswitch_state.json` — `{lastSwitchAt, lastSwitchTo, quarantine{}}` (스위칭 이벤트 감지 포인트)
+  - `cache/usage.json` — 사용량 캐시 (schemaVersion 2)
+- **limit 감지**: OAuth 토큰으로 `api.anthropic.com/api/oauth/usage` 폴링 →
+  5시간/7일 윈도우 사용률의 최댓값(binding-window utilization) 산출
+- **스위칭 절차**: utilization ≥ threshold → 후보 랭킹(strategy: best / next-available) →
+  현재 계정 백업 → 대상 계정 credential/config를 `~/.claude/.credentials.json`, `~/.claude.json`에 복원
+- **안정화 장치**: 히스테리시스(임계선 진동 방지), 쿨다운, 실패 계정 격리(quarantine),
+  적응형 폴링 주기, 파일락
+
+### 2.3 AMX가 사용하는 CLI 표면 (제어 계약)
+
+| AMX 동작 | tsamx 명령 |
+|---|---|
+| 어카운트 등록 (D3 push 수신 후) | `tsamx add` — 현재 활성 credential을 슬롯으로 가져오기(`switcher.py:2114`). 슬롯 번호는 tsamx가 자동 할당하며 AMS는 관여하지 않는다(매핑 키는 email/uuid, §2.4-3). 전체 절차는 **§6.3 deliver가 SSOT** |
+| 어카운트 회수 | `tsamx remove <num\|email>` |
+| 활성화 (로테이션 복귀) | `tsamx enable <num\|email>` |
+| 비활성화 (로테이션 제외) | `tsamx disable <num\|email>` |
+| 수동 스위칭 | `tsamx switch <num\|email>` / `tsamx switch --strategy best` |
+| 자동 스위칭 1틱 (D8) | `tsamx auto --once` |
+| 사용량/상태 조회 (JSON) | `tsamx list --json`, `tsamx status --json` |
+| 임계치 설정 (D10) | `tsamx config set autoswitch.threshold 95` |
+
+### 2.4 설계에 반영한 tsamx의 한계
+
+1. **로컬 암호화 부재**(Linux) → AMA가 자체 암호화 계층 제공 (§6.2)
+2. **단일 활성 크레덴셜 모델** → D2로 수용 (병렬 실행은 비범위)
+3. slot 번호는 remove 시 변동 → AMS↔AMA 계정 매핑 키는 slot이 아닌 **email/uuid** 사용
+4. 스위칭 이벤트 콜백을 CLI로는 받을 수 없음 → 틱 전후 상태 비교 + `autoswitch_state.json` 감시로 대체 (§5.4)
+5. **`add-token`은 등록 경로로 부적합** (실측 2026-08-07): setup-token을
+   `{"claudeAiOauth": {accessToken, scopes: ["user:inference"]}}` 형태로만 저장
+   (`switcher.py:101, 2409-2414`) — refreshToken/expiresAt/`user:profile` scope/계정 메타 부재로
+   대화형 Claude Code가 스위칭 직후 로그인을 요구한다. → 완전한 credential 세트 기록 + `tsamx add` 사용 (D3)
+
+---
+
+## 3. 전체 아키텍처
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  AMS (관제면, 클라우드/사내 서버)                              │
+│  ┌──────────────┐  ┌──────────────────────────────────┐    │
+│  │ ams-web       │  │ ams-server (FastAPI)             │    │
+│  │ Next.js 콘솔  │──│  REST API (관리 CRUD)             │    │
+│  │ 모니터링/CRUD │  │  gRPC bidi 서버 (AMA 세션)         │    │
+│  └──────────────┘  │  정책/배정 엔진 + 재조정(reconcile) │    │
+│                    └───────────┬──────────────────────┘    │
+│                    PostgreSQL ─┘  (테넌트/계정/서버/배정/사용량)│
+└────────────────────────┬───────────────────────────────────┘
+                         │  gRPC bidi 스트림 (TLS, 443)
+                         │  ← AMA가 outbound로 다이얼 (인바운드 포트 불필요)
+                         │  ↓ 하향: 명령 (deliver/recall/activate/…)
+                         │  ↑ 상향: 등록/하트비트/사용량 보고/이벤트/ack
+        ┌────────────────┼────────────────┐
+        ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ AMA 서버 A    │ │ AMA 서버 B    │ │ AMA 서버 C    │   (테넌트:서버 = 1:N)
+│ 어카운트 3개  │ │ 어카운트 5개  │ │ 어카운트 2개  │   (배정 예: 10개 중 3/5/2)
+│ ┌──────────┐ │ │              │ │              │
+│ │ama-agent  │ │ │      …       │ │      …       │
+│ │(Go 데몬)  │ │ │              │ │              │
+│ │ ├ gRPC 클라이언트 (재연결·백오프)                │
+│ │ ├ 명령 핸들러 (멱등)                            │
+│ │ ├ 암호화 로컬 스토어 (매니페스트)                │
+│ │ ├ tsamx 브리지 (서브프로세스)                    │
+│ │ └ 리포터 (5분 폴링 + 즉시 이벤트)                │
+│ └────┬─────┘ │
+│      ▼ CLI    │
+│ ┌──────────┐ │
+│ │ tsamx     │ │  add / remove / enable / disable
+│ │ (Python)  │ │  switch / auto --once / list --json
+│ └────┬─────┘ │
+│      ▼        │
+│ ~/.claude/.credentials.json  ← 단일 활성 크레덴셜 (D2)
+│ (Claude Code / 러너가 이 자격증명으로 실행)
+└──────────────┘
+```
+
+**신뢰 모델 요약**
+- 명령 권위: AMS만 계정 변경을 지시할 수 있다. AMA는 AMS Ed25519 서명을 검증한 명령만 수행한다.
+- AMA는 스스로 계정 구성을 바꾸지 않는다(예외: `auto --once`에 의한 스위칭 — 이는 AMS가 지정한
+  모드(auto) 안에서의 동작이며 즉시 AMS에 보고된다).
+- 사용자가 root인 서버에서 "임의 변경 절대 불가"는 원리적으로 달성 불가 →
+  실질 보장선: 오프박스 사본 무용화 + 변조 탐지 + **AMS의 desired-vs-actual 재조정**(§6.4).
+
+---
+
+## 4. 프로젝트 구조 (모노레포)
+
+```
+AMX/
+├── AMX-DESIGN.md            # 본 문서 (설계 SSOT)
+├── contracts/               # 계약 SSOT — 여기가 항상 먼저 바뀐다
+│   ├── proto/
+│   │   └── amx.proto        # gRPC 서비스/메시지 정의
+│   ├── schemas/             # 보고 JSON 스키마 (usage-report, switch-event)
+│   └── gen/                 # 생성 코드 (go / python / typescript)
+├── ams-server/              # FastAPI + PostgreSQL
+│   ├── app/
+│   │   ├── api/v1/          # REST 라우터 (tenants, accounts, servers, assignments)
+│   │   ├── grpc/            # gRPC bidi 서버 + 세션 레지스트리
+│   │   ├── models/          # SQLAlchemy 모델
+│   │   ├── schemas/         # Pydantic 스키마
+│   │   ├── services/        # 배정 엔진, 재조정(reconcile), 사용량 인제스트
+│   │   ├── transport/       # AmaTransport 포트 + gRPC 어댑터 (교체 가능 지점)
+│   │   └── core/            # 암호화(AMX_ENCRYPTION_KEY), Ed25519 서명, 인증
+│   ├── alembic/             # DB 마이그레이션
+│   └── tests/
+├── ams-web/                 # Next.js 관제 콘솔
+│   └── src/
+│       ├── app/(dashboard)/ # 테넌트/계정/서버/배정 CRUD + 모니터링 대시보드
+│       └── lib/api-client/  # contracts 생성 타입 사용
+├── ama-agent/               # Go 데몬
+│   ├── cmd/ama/             # main
+│   ├── internal/
+│   │   ├── transport/       # gRPC 클라이언트 (다이얼·재연결·백오프) — 포트 인터페이스
+│   │   ├── command/         # 명령 핸들러 (멱등, cmdId 처리로그)
+│   │   ├── store/           # 암호화 매니페스트 (AES-256-GCM)
+│   │   ├── tsamx/           # tsamx CLI 브리지 (exec + JSON 파싱 + state 감시)
+│   │   ├── reporter/        # 5분 폴링 리포트 + 즉시 이벤트 + 오프라인 아웃박스
+│   │   └── crypto/          # 복호화, Ed25519 검증
+│   └── installer/           # 설치 스크립트 (내재화 tsamx 패키지 설치 포함)
+├── tsamx/                   # 내재화 스위칭 엔진 (claude-swap 포크, docs/TSAMX-GUIDE.md)
+├── vendor/
+│   └── claude-swap-upstream/ # 업스트림 원본 스냅샷 (v0.25.0b1, 향후 diff 병합용)
+└── infra/                   # docker-compose (postgres, ams-server, ams-web), 배포 설정
+```
+
+**계약 우선 원칙**: API/프로토콜 변경은 반드시 `contracts/` 먼저 → 코드 생성 → 각 모듈 반영.
+
+---
+
+## 5. AMS 설계 (관제면)
+
+### 5.1 도메인 모델 / ERD
+
+```
+Tenant ──1:N──► Account      ──┐
+   │                            │
+   ├──1:N──► Server (AMA)    ──┼──► Assignment (Account × Server, 테넌트 내부에서만)
+   │                            │
+   └──1:N──► UsageSnapshot ◄───┘   (보고 수집 원장)
+```
+
+```sql
+-- 핵심 스키마 (요지)
+tenants (
+  id UUID PK, name, status, created_at, updated_at
+)
+
+accounts (
+  id UUID PK,
+  tenant_id UUID FK → tenants,
+  email TEXT,                          -- tsamx 매핑 키 (slot 아님, §2.4-3)
+  credential_type TEXT,                -- oauth | api_key  (setup_token 폐기, D3)
+  encrypted_secret TEXT,               -- credential 세트 JSON 봉투 전체를 Fernet(AMX_ENCRYPTION_KEY)로 암호화 (§5.5의 access+refresh+expiresAt+scopes+계정 메타 일체)
+  status TEXT,                         -- available | assigned | disabled | quarantined
+  last_switched_at TIMESTAMPTZ,
+  UNIQUE (id, tenant_id)               -- ★ 격리 앵커
+)
+
+servers (
+  id UUID PK,
+  tenant_id UUID FK → tenants,         -- 테넌트:서버 = 1:N (요구 AMS-4)
+  name, hostname,
+  enroll_token_hash TEXT,              -- 1회성 등록 토큰 (해시만 저장)
+  server_cred_hash TEXT,               -- 장수명 서버 자격증명 (교환 후)
+  switch_mode TEXT,                    -- auto | manual  (서버 단위 — tsamx auto가 풀 단위이므로)
+  status TEXT,                         -- online | offline | degraded
+  last_seen_at TIMESTAMPTZ,
+  UNIQUE (id, tenant_id)               -- ★ 격리 앵커
+)
+
+assignments (
+  id UUID PK,
+  tenant_id UUID NOT NULL,
+  account_id UUID, server_id UUID,
+  state TEXT,                          -- §5.2 상태기계
+  pinned BOOLEAN DEFAULT false,        -- auto 로테이션 개별 제외
+  delivered_at, acked_at, last_error,
+  FOREIGN KEY (account_id, tenant_id) REFERENCES accounts (id, tenant_id),  -- ★
+  FOREIGN KEY (server_id,  tenant_id) REFERENCES servers  (id, tenant_id),  -- ★
+  UNIQUE (tenant_id, account_id) WHERE state != 'detached'  -- 한 계정 = 동시 1서버
+)
+
+usage_snapshots (
+  id UUID PK, tenant_id, server_id, account_id NULL,
+  report_type TEXT,                    -- usage | switch_event
+  payload JSONB,                       -- 보고 원문 보존
+  reported_at TIMESTAMPTZ
+)
+```
+
+**★ 테넌트 격리 불변식 (요구 AMS-7)**
+Account·Server의 `UNIQUE(id, tenant_id)`를 앵커로, Assignment가 **복합 FK 2개**로 참조한다.
+Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로 다른 테넌트면
+두 FK를 동시에 만족할 수 없어 **INSERT가 DB 수준에서 거부된다**.
+애플리케이션 검증에 의존하지 않는 구조적 불변식이며, 서비스 계층 검증은 이중 방어로 추가한다.
+
+### 5.2 배정(Assignment) 상태기계 (요구 AMS-6)
+
+```
+                    deliver          ack.ok
+        pending ──────────► delivering ──────► active
+           ▲                    │                │ ▲
+           └────────────────────┘                │ │ activate
+             ack.fail / timeout (재시도)  deactivate │
+                                                 ▼ │
+                                              inactive
+        active ◄──── recover ──── quarantined ◄── AMA 이벤트(소진/실패)
+
+        {active, inactive, quarantined} ── recall ──► recalling ── ack.ok ──► detached
+                                                                              (감사용 행 유지)
+```
+
+| 상태 | 의미 | AMA 측 대응 |
+|---|---|---|
+| pending | 생성됨, 미하달 | — |
+| delivering | deliver 명령 전송, ack 대기 | credential 기록 + `tsamx add` 수행 중 |
+| active | 하달·확인 완료, 스위칭 후보 | `tsamx enable` 상태 |
+| inactive | 하달됐으나 로테이션 제외 | `tsamx disable` 상태 |
+| quarantined | AMA가 소진/실패 보고 | tsamx quarantine 반영 |
+| recalling | 회수 명령 전송, 제거 확인 대기 | `tsamx remove` 수행 중 |
+| detached | 종말 상태 (행은 감사용 유지) | 로컬 흔적 없음 |
+
+- **스위칭 모드**는 서버 단위 속성(`servers.switch_mode`), 계정 단위 제외는 `pinned`로.
+- **비상태 명령**: `switch_now`/`set_mode`/`req_report`는 배정 상태를 전이시키지 않는다
+  (switch-now는 `last_switched_at`만 갱신, set_mode는 `servers.switch_mode`만 변경).
+- **recover 전이**: REST `POST …/assignments/{id}:recover`(§5.3)가 트리거 →
+  AMA에 `set_active(activate)` 하달 → ack 시 quarantined → active.
+
+### 5.3 REST API 표면 (관리 CRUD — 요구 AMS-1~4, 6)
+
+| 메서드·경로 | 용도 |
+|---|---|
+| `POST/GET /api/v1/tenants` · `GET/PATCH/DELETE /api/v1/tenants/{tid}` | 테넌트 CRUD |
+| `POST/GET /api/v1/tenants/{tid}/accounts` · `GET/PATCH/DELETE …/{aid}` | 어카운트 CRUD (secret은 write-only, 응답 항상 마스킹) |
+| `POST /api/v1/tenants/{tid}/accounts:oauth-start` / `:oauth-complete` | 중앙 OAuth 등록 플로우 (§5.5): authorize URL 발급 / 코드 교환·저장 |
+| `POST/GET /api/v1/tenants/{tid}/servers` · `GET/PATCH/DELETE …/{sid}` | AMA 서버 CRUD |
+| `POST /api/v1/tenants/{tid}/servers/{sid}/enroll-token` | 1회성 등록 토큰 발급 |
+| `POST/GET /api/v1/tenants/{tid}/assignments` | 배정 생성·목록 (예: 10개 중 A:3 / B:5 / C:2) |
+| `POST …/assignments/{id}:deliver` / `:recall` / `:activate` / `:deactivate` / `:recover` | 상태 전이 (`:recover`는 quarantined → active 복귀, §5.2) |
+| `POST …/assignments/{id}:switch-now` | 수동 스위칭 (특정 계정으로) |
+| `POST …/servers/{sid}:switch-mode` | auto ↔ manual 전환 |
+| `GET …/servers/{sid}/usage` | 최신 사용량 조회 (DB 캐시) |
+| `POST …/servers/{sid}:refresh-usage` | AMA에 즉시 보고 요청 (요구 AMA-2 수동 조회) |
+
+### 5.4 AMS↔AMA 통신 (요구 AMS-5)
+
+**방향**: AMA가 AMS로 **outbound 다이얼**(TLS, 443)하여 장수명 gRPC bidi 스트림을 연다.
+AMS는 그 스트림으로 명령을 하달한다. 고객 방화벽/NAT에서 인바운드 포트가 불필요하다.
+
+**추상화**: AMS 도메인 로직은 `AmaTransport` 포트(명령 push / 보고 ingest)에만 의존.
+gRPC는 어댑터 1개일 뿐이며, WebSocket 등 다른 어댑터로 교체 가능(요구사항의 "다른 통신 프로토콜" 대비).
+
+```proto
+// contracts/proto/amx.proto (스케치)
+service AmxControlPlane {
+  // AMA가 개설하는 단일 장수명 스트림: 상향=보고, 하향=명령
+  rpc Session(stream AmaMessage) returns (stream AmsCommand);
+  // 스트림 미가용 환경 폴백
+  rpc ReportUsage(UsageReport) returns (Ack);
+}
+
+message AmsCommand {
+  string command_id = 1;              // 멱등키
+  bytes  signature  = 2;              // AMS Ed25519 서명 (AMA가 내장 공개키로 검증)
+  oneof cmd {
+    DeliverAccount   deliver     = 10;  // 암호화 credential 세트 포함 (D3). slot 필드 없음 — AMA 로컬 자동 할당
+    RecallAccount    recall      = 11;
+    SetAccountActive set_active  = 12;  // activate / deactivate
+    SetSwitchMode    set_mode    = 13;  // auto / manual
+    SwitchNow        switch_now  = 14;  // 수동 스위칭 대상 지정
+    RequestReport    req_report  = 15;  // 즉시 사용량 보고 요청
+  }
+}
+
+message AmaMessage {
+  oneof msg {
+    Register    register = 10;  // 연결 직후: server credential 제시
+    Heartbeat   hb       = 11;
+    UsageReport usage    = 12;  // 5분 폴링 or req_report 응답
+    CommandAck  ack      = 13;  // 명령 결과 = "수렴 상태" 회신
+    AccountEvent event   = 14;  // 스위칭 / 전체소진 / 격리 (즉시)
+  }
+}
+```
+
+**재조정(Reconcile) 루프**: AMS는 배정 테이블(desired)과 AMA 보고(actual)를 주기 비교.
+불일치(드리프트) 감지 시 경보 + 교정 명령 재하달. 이것이 "AMA 임의 변경 불가"의 실질 집행자다.
+
+**다중 AMS 인스턴스**: gRPC 스트림은 특정 인스턴스에 붙으므로, 수평 확장 시
+세션 레지스트리(어느 AMA가 어느 인스턴스에 연결됐는지) + 내부 라우팅 필요. P1은 단일 인스턴스.
+
+### 5.5 어카운트 등록 — AMS 중앙 OAuth 플로우
+
+계정당 필요한 브라우저 로그인 1회를 **AMS 콘솔에서** 수행한다. AMA 서버에서는 로그인 0회.
+OAuth authorize URL은 CLI가 아니라 누구든 생성 가능한 값이며, tsamx조차 동일 상수로
+직접 HTTP 호출한다(`oauth.py:18-19` — token URL `https://platform.claude.com/v1/oauth/token`,
+client_id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`).
+
+```
+1. 관리자: ams-web "어카운트 추가" 클릭
+2. AMS: PKCE 쌍(verifier/challenge) 생성 → authorize URL 표시
+   (verifier는 서버 세션에 보관 — URL 생성자만 코드 교환 가능)
+3. 관리자: 브라우저 로그인 → 발급된 코드를 콘솔에 붙여넣기
+4. AMS: 코드 + verifier로 토큰 교환 → 완전한 credential 세트 획득
+   (accessToken + refreshToken + expiresAt + 전체 scopes + 계정 UUID/조직 메타)
+5. AMS: `accounts.encrypted_secret`에 암호화 저장 → 이후 D3 push로 배정
+```
+
+이 credential은 실제 `claude login` 산출물과 동일 형태이므로, 주입받은 서버의
+Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패한 이유는 §2.4-5.
+
+---
+
+## 6. AMA 설계 (에이전트면, Go)
+
+### 6.1 프로세스 구성
+
+단일 Go 데몬(systemd service). 내부 컴포넌트:
+
+| 컴포넌트 | 역할 |
+|---|---|
+| transport | AMS gRPC 다이얼, 지수백오프 재연결, 스트림 유지 |
+| command | 명령 수신 → 서명 검증 → 멱등 처리(cmdId 처리로그) → tsamx 브리지 호출 → 수렴 상태 ack |
+| store | 암호화 매니페스트 (AMS 권위 할당표) 관리 |
+| tsamx 브리지 | tsamx CLI exec + `--json` 파싱 + `autoswitch_state.json` fsnotify 감시 |
+| reporter | 5분 폴링 리포트, 즉시 이벤트 push, 오프라인 아웃박스(재연결 시 dedupe 플러시) |
+| scheduler | `tsamx auto --once` 틱 구동 (D8), 리포트 주기 관리 |
+
+**설치 전제**: AMA installer가 내재화 tsamx 패키지 설치까지 수행 (D11):
+`uv tool install "git+<AMX 레포 주소>@<태그>#subdirectory=tsamx"` — 운영 배포는 태그 핀 필수.
+tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영은 O6 절차를 따른다.
+
+### 6.2 로컬 어카운트 스토어 (요구 AMA-1, 4)
+
+- **매니페스트 파일 1개** (암호화 JSON): AMS 권위 할당표 + **로컬 권위 credential 사본**.
+  - 내용: `amsAccountId ↔ email` 매핑, 할당 상태(active/inactive), **암호화된 credential 세트 레코드**
+    (재주입·정합 동기화의 재료), AMS 서명, 수신 시각.
+  - tsamx의 `sequence.json`/`.creds-*`는 tsamx 소유의 **파생 사본**으로 취급한다 —
+    Linux에서 base64뿐이라(§2.2) 실질 at-rest 보호는 매니페스트가 담당하고,
+    파생 사본이 훼손·유실되면 매니페스트에서 재주입한다(아래 정합 동기화).
+- **암호화**: 레코드별 **AES-256-GCM**, 유니크 nonce,
+  AAD = `(amsAccountId + agentId)` 바인딩(다른 에이전트로 레코드 복사·스왑 차단).
+  키(KEK)는 AMS가 세션 수립 시 전달하고 **메모리에만 보관** → 오프박스 파일 사본은 복호 불가,
+  무인 재부팅 시 AMS 재연결 없이는 로컬 계정 정보를 열 수 없다("AMS 없이는 변경 불가" 부합).
+  (대안: TPM/systemd-cred 봉인 — §8 미해결 항목)
+- **권위 강제는 암호화가 아니라 서명**: 매니페스트와 모든 명령에 AMS Ed25519 서명,
+  AMA는 빌드에 내장된 공개키로 검증 후에만 적용. 위조 매니페스트는 검증 실패.
+- **정합 동기화 (등록분만 사용 강제)**: 매 리포트 틱마다 `tsamx list --json`과 매니페스트를 대조.
+  - tsamx에는 있는데 매니페스트에 없음 → `tsamx remove` (미등록 계정 사용 차단)
+  - 매니페스트에는 있는데 tsamx에 없음 → 보관된 credential 세트를 파일 기록 + `tsamx add` 재주입 (§6.3 deliver와 동일 절차)
+- **현실 한계 (명시)**: root 사용자의 자기 서버에서 완전한 변조 방지는 불가능
+  (메모리 덤프, 바이너리 패치). 실질 보장선은 §3 신뢰 모델 + AMS reconcile 드리프트 경보.
+
+### 6.3 명령 처리 (요구 AMA-4) — 전부 멱등
+
+| AMS 명령 | 로컬 절차 | 재전송 시 |
+|---|---|---|
+| deliver | 서명 검증 → credential 세트 복호 → 매니페스트 upsert → 이전 활성 계정 기록 → credential 파일 기록(`~/.claude/.credentials.json` + `~/.claude.json` oauthAccount) → `tsamx add` (슬롯 자동 할당) → 필요 시 `tsamx switch <이전 활성>` 복귀 → 평문 메모리 소거 | 이미 존재하면 no-op, 수렴 상태 회신 |
+| recall | 대상이 활성이면 먼저 `tsamx switch <타계정>` → `tsamx remove` → 매니페스트 삭제 | 부재 시 성공 no-op |
+| activate | `tsamx enable` + 매니페스트 상태 갱신 | 동일 상태면 no-op |
+| deactivate | `tsamx disable` (크레덴셜 유지, 로테이션만 제외) | no-op |
+| switch_now | `tsamx switch <num\|email>` (또는 `--strategy best`) | 이미 활성이면 no-op |
+| set_mode | auto: scheduler 틱 시작 / manual: 틱 중지 | 값 동일 no-op |
+| req_report | 즉시 §6.5 리포트 생성·전송 | 항상 수행 (조회는 멱등) |
+
+- ⚠ **deliver 크리티컬 섹션**: "credential 파일 기록 → add → switch 복귀" 동안 활성
+  credential이 잠시 신규 계정으로 바뀐다. 이 창(수 초)에서 러너가 요청을 보내면 의도치 않은
+  계정으로 과금된다. AMA는 이 구간을 단일 크리티컬 섹션으로 묶어 최소화하고, 러너 무중단
+  요건은 O5(배포 설계)에서 함께 다룬다.
+- ack는 단순 성공/실패가 아니라 **수렴 상태**(현재 로컬 실상)를 회신 → AMS reconcile 입력.
+- **AMS 연결 두절 시**: 현행 로스터로 스위칭 엔진 **계속 가동**(무인 운영 유지),
+  로컬발 계정 변경은 거부, 이벤트는 암호화 아웃박스에 큐잉 → 재연결 시 dedupe 플러시.
+
+### 6.4 자동 스위칭 (요구 AMA-3, D8)
+
+```
+scheduler 틱 (적응 주기, 기본 60s)
+  → tsamx status --json      (틱 전 활성 계정 기록)
+  → tsamx auto --once        (tsamx 엔진이 95% 판정·스위칭·격리 수행)
+  → tsamx status --json      (틱 후 비교)
+  → 활성 계정 변경 감지 시   → AccountEvent(switch) 즉시 AMS 전송
+  + autoswitch_state.json fsnotify 감시 (이중 감지: lastSwitchAt/lastSwitchTo, quarantine)
+```
+
+- 임계치 95%는 AMA 초기화 시 `tsamx config set autoswitch.threshold 95`로 주입.
+- 히스테리시스·쿨다운·quarantine·후보 랭킹은 tsamx 엔진 그대로 활용 (재구현 없음).
+- **전 계정 소진**(all-exhausted, 전부 95%↑) 감지 시 → 크리티컬 이벤트 전송
+  → AMS가 경보 + 추가 계정 배정 판단.
+
+### 6.5 보고 스키마 (요구 AMA-2) — 5분 폴링 + 수동 조회 공용
+
+AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`)를 재직렬화만 한다
+(이중 폴링·레이트리밋 회피).
+
+```jsonc
+// UsageReport
+{
+  "schemaVersion": 1,
+  "reportType": "usage",              // usage | switch_event
+  "agentId": "ama_...",
+  "generatedAt": "2026-08-07T09:00:00Z",
+  "trigger": "schedule",              // schedule | ams_query | switch
+  "activeAccount": { "amsAccountId": "acc_3", "email": "a@x.io" },
+  "poolSummary": {
+    "total": 5, "active": 1, "eligible": 4, "quarantined": 0,
+    "allExhausted": false, "maxUtilizationPct": 61.2
+  },
+  "accounts": [
+    {
+      "amsAccountId": "acc_3",
+      "email": "a@x.io",
+      "allocationStatus": "active",   // AMS 할당 상태
+      "isCurrent": true,              // 현재 활성 크레덴셜 여부
+      "usage": {
+        "fiveHour": { "pct": 61.2, "resetsAt": "2026-08-07T12:30:00Z" },
+        "sevenDay": { "pct": 44.0, "resetsAt": "2026-08-11T00:00:00Z" }
+      },
+      "usageFetchedAt": "2026-08-07T08:59:48Z"
+    }
+  ]
+}
+```
+
+```jsonc
+// AccountEvent (스위칭 즉시 통지)
+{
+  "schemaVersion": 1,
+  "reportType": "switch_event",
+  "agentId": "ama_...",
+  "eventId": "evt_...",               // 아웃박스 dedupe 키
+  "occurredAt": "2026-08-07T09:12:00Z",
+  "event": {
+    "kind": "switch",                 // switch | quarantine | all_exhausted
+    "trigger": "at-limit",            // at-limit | manual | failover
+    "from": { "email": "b@x.io" },
+    "to":   { "email": "a@x.io" }
+  },
+  "poolSummary": { "allExhausted": false, "maxUtilizationPct": 95.3 }
+}
+```
+
+---
+
+## 7. 보안 설계
+
+| 계층 | 설계 |
+|---|---|
+| At-rest (AMS) | `accounts.encrypted_secret`을 전용 `AMX_ENCRYPTION_KEY`(Fernet 또는 AES-GCM)로 암호화. 인증용 시크릿과 **분리**(키 로테이션 독립). SaaS 단계: 테넌트별 DEK를 KEK(KMS)로 감싸는 봉투암호화 |
+| In-transit | gRPC TLS 필수 + 앱 계층 Ed25519 명령 서명. credential 세트는 deliver/재주입 시에만 스트림에 실리고 채널·로그에 저장되지 않음. **토큰/credential은 절대 로깅 금지** |
+| 등록 플로우 (§5.5) | PKCE verifier는 서버 세션 보관·**1회용**(교환 성공/실패 시 즉시 폐기). authorize 코드는 짧은 TTL 내 교환, 미사용 시 폐기. `:oauth-start`/`:oauth-complete`는 관리자 인증 + 테넌트 RBAC 필수 |
+| At-rest (AMA) | AES-256-GCM 매니페스트 + AAD 바인딩 + KEK 메모리 보관 (§6.2) |
+| AMA 인증 | 1회성 enroll-token(발급 시 해시만 DB 저장) → 최초 등록 시 장수명 server credential 교환 → 이후 세션은 credential 제시. credential은 서버측에서 tenant_id에 바인딩 |
+| 테넌트 격리 | DB 복합 FK 불변식(§5.1) + 서비스 계층 검증 + 명령 하달 시 서버 등록 tenant로 필터(클라이언트 제공 tenant 불신) — 삼중 방어 |
+| 변조 대응 | AMS reconcile(desired vs actual) + 드리프트 경보. 로컬 완전 방지는 불가함을 전제(§6.2) |
+| REST 인증 | AMS 콘솔/API는 관리자 인증 + 테넌트 RBAC (P1은 단일 관리자로 시작 가능) |
+
+---
+
+## 8. 미해결 / 후속 결정 항목
+
+| # | 항목 | 선택지 | 시점 |
+|---|---|---|---|
+| O1 | AMA KEK 보관 | 메모리 전용(기밀성↑, 재부팅 시 AMS 필요) vs TPM/systemd-cred 봉인(자가 복구) | P2 착수 전 |
+| O2 | recall 시맨틱 | 로컬 크레덴셜 완전 삭제(현 설계) vs disable만(빠른 재배정) | P2 착수 전 |
+| O3 | API-key 계정 | 구독 쿼터 없어 95% 임계 무의미 — 관리 대상 포함 여부. 포함 시 등록 경로는 `tsamx add-token`이 여전히 유효 (api_key는 대화형 로그인 불필요, §2.4-5의 폐기는 oauth 한정) | P1 중 |
+| O4 | 스위칭 정책 소유권 | threshold/쿨다운을 AMS 중앙 관리·하달 vs tsamx 로컬 기본값 유지(현 설계: 95만 하달) | P3 |
+| O5 | 러너 config 공유 | AMA 서버의 실행 러너(Claude Code)가 같은 `~/.claude`를 읽는지 배포 시 보장 필요. deliver 크리티컬 섹션(§6.3) 동안 러너 무중단(또는 일시 정지) 방안 포함 | P2 배포 설계 |
+| O6 | tsamx 업스트림 동기화 절차 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 검증 체크리스트 + 소유자 | P1 이후 운영 |
+| O7 | 다중 AMS 인스턴스 | 세션 레지스트리 + 내부 라우팅 (P1은 단일 인스턴스로 미룸) | SaaS 단계 |
+| O8 | ClickEye 연동 형태 | ClickEye가 AMS 조회 API를 읽는 방식·범위 (기존 seat_quota_ingest 대체 여부 포함) | P3 이후 |
+| O9 | refresh token 회전 | 전달 후 로컬 갱신 주체가 **둘**(tsamx `oauth.py`의 refresh + Claude Code 자체 갱신)이라 AMS 보관본이 구본화됨. refresh token이 1회용 회전이면 재배정 시 보관본 무효 가능 → AMA가 갱신 credential을 AMS로 역동기화 vs 재배정 시 재인증(§5.5 재수행) 허용. **판별법**: 실토큰으로 refresh 엔드포인트 2회 호출 — 첫 refresh 후 구 refresh token이 거부되면 회전형 | P2 착수 전 |
+| O10 | tsamx 설치 인증 (D11 파급) | 프라이빗 레포 git 설치에 필요한 서버측 인증. 1차: 읽기 전용 deploy key 공용(만료 없음·최소 권한) → 서버 증가/조직 이전 시 서버별 키 또는 machine user → P2 이후 AMS 아티팩트 서빙(wheel)으로 GitHub 의존 제거 검토 | P2 배포 설계 |
+
+---
+
+## 9. 구현 로드맵 (Phase)
+
+| Phase | 산출물 | 완료 판정 |
+|---|---|---|
+| **P0 계약** | `contracts/proto/amx.proto` + 보고 JSON 스키마 + REST openapi 초안, 코드 생성 파이프라인 | 3개 언어(go/py/ts) 생성 코드 컴파일 통과 |
+| **P1 인벤토리** | DB 스키마 + REST CRUD(테넌트/계정/서버/배정) + **§5.5 중앙 OAuth 등록**(`:oauth-start`/`:oauth-complete`) + 격리 불변식 테스트, 통신 없음 | 교차 테넌트 배정 INSERT가 DB에서 거부되는 테스트 통과 + 실계정 1개를 OAuth 플로우로 등록해 `encrypted_secret` 복호 시 완전한 credential 세트 확인 (P2 E2E의 "계정 10개" 전제 충족 경로) |
+| **P2 채널** | gRPC bidi 세션 + enroll → deliver/recall/activate/deactivate 왕복 + 사용량 인제스트 + AMA 암호화 스토어 | 계정 10개 → A:3/B:5/C:2 배정·하달·회수 E2E 통과 |
+| **P3 스위칭 제어** | auto/manual 모드, switch-now, `auto --once` 틱, 스위칭/소진 이벤트, reconcile 루프 | 95% 도달 시 자동 스위칭 + AMS 이벤트 수신 E2E 통과 |
+| **P4 콘솔·운영** | ams-web 대시보드(모니터링/CRUD), 경보, ClickEye 조회 연동 | 콘솔에서 전 수명주기 조작 가능 |
+| **P5 SaaS 준비** | 테넌트 RBAC, 봉투암호화, 다중 인스턴스, 과금 훅 | (장기) |
+
+---
+
+## 부록 A. 요구사항 ↔ 설계 대응표
+
+| 요구 | 설계 반영 위치 |
+|---|---|
+| AMS-1 테넌트 CRUD | §5.1 tenants, §5.3 |
+| AMS-2 테넌트 내 어카운트 CRUD | §5.1 accounts, §5.3, §5.5 (중앙 OAuth 등록) |
+| AMS-3 RDBMS 관리 | §5.1 (PostgreSQL) |
+| AMS-4 테넌트:서버 1:N + 주입 CRUD | §5.1 servers/assignments, §5.3 |
+| AMS-5 배정 하달 + 프로토콜 교체 가능 | §5.4 (gRPC bidi + AmaTransport 포트) |
+| AMS-6 활성/비활성·회수/전달·자동/수동 스위칭 | §5.2 상태기계, §5.3 액션, §6.3 |
+| AMS-7 테넌트 격리 (임의 연결 불가) | §5.1 복합 FK 불변식, §7 삼중 방어 |
+| AMA-1 수신 계정 파일 관리 + 등록분만 사용 | §6.2 매니페스트 + 정합 동기화 |
+| AMA-2 5분 폴링 + 수동 조회 보고 | §6.5, §5.3 refresh-usage |
+| AMA-3 95% 자동 스위칭 (tsamx 활용) | §6.4, D8/D10 |
+| AMA-4 AMS 명령만 수용 + 암호화 | §6.2 서명·암호화, §6.3, §3 신뢰 모델 |
