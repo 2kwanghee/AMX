@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amx.io/contracts/schemas/v1/common.schema.json",
+  "title": "AMX common report definitions",
+  "description": "Shapes shared by the AMA -> AMS report schemas (docs/AMX-DESIGN.md §6.5). Definitions here deliberately declare NO `required` list — each consuming schema states its own, because the same shape carries different obligations per report (a switch event names accounts by email alone, a usage report always has the AMS id too). Reference these with a sibling `required`, e.g. {\"$ref\": \"common.schema.json#/$defs/accountRef\", \"required\": [\"email\"]}.",
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "agentId": {
+      "description": "Stable agent identifier assigned at enrollment.",
+      "type": "string",
+      "pattern": "^ama_[A-Za-z0-9_-]{1,64}$"
+    },
+    "accountRef": {
+      "description": "Account identity. The AMS<->AMA mapping key is email/uuid, never a tsamx slot number (§2.4-3).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "amsAccountId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        },
+        "accountUuid": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "poolSummary": {
+      "description": "Aggregate pool health.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eligible": {
+          "description": "Active accounts below the switching threshold, i.e. usable switch candidates.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "quarantined": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allExhausted": {
+          "description": "Every account is at or above the threshold (D10: 95%). Critical — AMS alerts and considers assigning more accounts (§6.4).",
+          "type": "boolean"
+        },
+        "maxUtilizationPct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    }
+  }
+}

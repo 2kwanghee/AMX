@@ -1,0 +1,20 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # The design SSOT (§4) fixes the layout as contracts/proto/amx.proto, so the
+    # directory does not mirror the `amx.v1` package.
+    - PACKAGE_DIRECTORY_MATCH
+    # Request/response types are shared across RPCs by design (the Session stream
+    # carries AmaMessage / AmsCommand, not per-RPC wrappers).
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    # The service name is fixed by the design SSOT (§5.4 sketch).
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

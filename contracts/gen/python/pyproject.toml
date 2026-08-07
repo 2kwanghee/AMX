@@ -1,0 +1,11 @@
+[project]
+# Generator environment only — it pins the protoc/grpc toolchain used to produce
+# amx_pb2*.py. Consumers (ams-server) import the generated modules directly and
+# depend on grpcio/protobuf themselves.
+name = "amx-contracts-gen"
+version = "0.1.0"
+description = "Toolchain pin for generating AMX Python contract stubs."
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio-tools>=1.83.0",
+]

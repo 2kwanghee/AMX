@@ -1,0 +1,489 @@
+// AMX — Account Management & eXchange
+// AMS <-> AMA control-plane contract.
+//
+// SSOT: docs/AMX-DESIGN.md (§5.2 assignment state machine, §5.4 transport,
+// §6.2 local store / crypto, §6.3 command table, §6.5 report schema).
+// Contract-first: this file changes before any implementation.
+syntax = "proto3";
+
+package amx.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/amx/amx/contracts/gen/go;amxv1";
+option java_multiple_files = true;
+option java_package = "io.amx.v1";
+option csharp_namespace = "Amx.V1";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+// AMA dials AMS outbound over TLS/443 (D9). AMS never dials AMA, so no inbound
+// port is required on the customer network.
+service AmxControlPlane {
+  // Single long-lived stream opened by AMA.
+  //   upstream   (AmaMessage): register / heartbeat / usage / ack / event
+  //   downstream (AmsCommand): deliver / recall / activate / mode / switch / report
+  // The first upstream message MUST be Register; AMS closes the stream otherwise.
+  rpc Session(stream AmaMessage) returns (stream AmsCommand);
+
+  // Fallback for environments where the bidi stream is unavailable
+  // (proxy that buffers streams, restricted egress). Report-only: commands
+  // cannot be delivered over this path.
+  //
+  // Takes an envelope rather than a bare UsageReport so the caller's credential
+  // stays outside the report body: the report is persisted verbatim as
+  // usage_snapshots.payload (§5.1) and must never carry a secret.
+  rpc ReportUsage(ReportEnvelope) returns (Ack);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums
+// -----------------------------------------------------------------------------
+
+// Credential kind held by an account (§5.1 accounts.credential_type).
+// setup_token is deliberately absent — it is retired by D3 / §2.4-5.
+enum CredentialType {
+  CREDENTIAL_TYPE_UNSPECIFIED = 0;
+  CREDENTIAL_TYPE_OAUTH = 1;    // full claude login credential set (§5.5)
+  CREDENTIAL_TYPE_API_KEY = 2;  // O3 — no subscription quota, 95% threshold is moot
+}
+
+// AMS-authoritative allocation status of one account on one agent.
+// Projection of §5.2 assignment states onto what AMA can observe locally.
+enum AllocationStatus {
+  ALLOCATION_STATUS_UNSPECIFIED = 0;
+  ALLOCATION_STATUS_DELIVERING = 1;   // credential write + `tsamx add` in flight
+  ALLOCATION_STATUS_ACTIVE = 2;       // `tsamx enable` — rotation candidate
+  ALLOCATION_STATUS_INACTIVE = 3;     // `tsamx disable` — credential kept, rotation excluded
+  ALLOCATION_STATUS_QUARANTINED = 4;  // tsamx quarantine (exhausted / repeated failure)
+  ALLOCATION_STATUS_RECALLING = 5;    // `tsamx remove` in flight
+  ALLOCATION_STATUS_ABSENT = 6;       // not present locally (detached, or never delivered)
+}
+
+// Server-scoped switching mode (§5.2 — mode is a server property because
+// `tsamx auto` operates on the whole local pool, not per account).
+enum SwitchMode {
+  SWITCH_MODE_UNSPECIFIED = 0;
+  SWITCH_MODE_AUTO = 1;    // scheduler runs `tsamx auto --once` ticks (D8)
+  SWITCH_MODE_MANUAL = 2;  // ticks stopped; switching only on explicit SwitchNow
+}
+
+// Symmetric AEAD used for the credential envelope (§6.2).
+enum EncryptionAlgorithm {
+  ENCRYPTION_ALGORITHM_UNSPECIFIED = 0;
+  ENCRYPTION_ALGORITHM_AES_256_GCM = 1;
+}
+
+// -----------------------------------------------------------------------------
+// Shared messages
+// -----------------------------------------------------------------------------
+
+// Stable identity of an account across AMS and AMA.
+// The mapping key is email/uuid, never a tsamx slot number (§2.4-3).
+message AccountRef {
+  string ams_account_id = 1;  // AMS accounts.id (UUID string)
+  string email = 2;           // tsamx mapping key
+  string account_uuid = 3;    // Claude account UUID from the credential metadata (optional)
+}
+
+// AES-256-GCM envelope carrying a complete OAuth credential set (D3, §5.5):
+// accessToken + refreshToken + expiresAt + full scopes + account/org metadata.
+//
+// Plaintext is the credential-set JSON exactly as `claude login` would produce,
+// so the receiving box's Claude Code cannot distinguish it from a real login.
+//
+// Key: the KEK is handed to AMA by SessionSetup and held in memory only
+// (§6.2, open item O1) — an off-box copy of the manifest cannot be decrypted.
+// `key_id` selects which delivered KEK to use.
+//
+// AAD binding (§6.2): the additional authenticated data is the canonical
+// concatenation of (ams_account_id, agent_id) of the intended recipient. This
+// prevents a record from being copied or swapped into another agent's manifest:
+// decryption on the wrong agent fails authentication rather than yielding data.
+//
+// ⚠ The aad_* fields below are for COMPARISON ONLY. AMA MUST construct the AAD
+// from values it already holds — its own agent_id, and the ams_account_id of the
+// command being processed — and MUST NOT feed these received field values into
+// the AEAD. Using the attacker-supplied copy as AAD would let a relocated record
+// authenticate anywhere, defeating the binding. Treat a mismatch between the
+// received aad_* values and the locally derived ones as a rejected command.
+//
+// Never log ciphertext, nonce, or plaintext (§7 in-transit row).
+message EncryptedCredential {
+  EncryptionAlgorithm algorithm = 1;
+  bytes ciphertext = 2;     // AEAD output, includes the GCM tag
+  bytes nonce = 3;          // 96-bit, unique per record under a given key
+  string key_id = 4;        // selects a KEK delivered by SessionSetup
+
+  // Cross-check copies. MUST equal the locally derived AAD components; never
+  // used as the AAD input itself (see the warning above).
+  string aad_ams_account_id = 5;  // expected == DeliverAccount.account.ams_account_id
+  string aad_agent_id = 6;        // expected == this agent's own agent_id
+}
+
+// One binding window's utilization (§2.2 — max of 5h / 7d is the switch driver).
+message UsageWindow {
+  double pct = 1;                              // 0.0 – 100.0
+  google.protobuf.Timestamp resets_at = 2;
+}
+
+message AccountUsage {
+  AccountRef account = 1;
+  AllocationStatus allocation_status = 2;
+  bool is_current = 3;  // holds ~/.claude/.credentials.json right now (D2 single active)
+  UsageWindow five_hour = 4;
+  UsageWindow seven_day = 5;
+  google.protobuf.Timestamp usage_fetched_at = 6;  // freshness of the tsamx cache entry
+}
+
+// Aggregate pool health (§6.5 poolSummary).
+message PoolSummary {
+  uint32 total = 1;
+  uint32 active = 2;
+  uint32 eligible = 3;      // active and below threshold, i.e. switch candidates
+  uint32 quarantined = 4;
+  bool all_exhausted = 5;   // every account >= threshold — critical, AMS must react (§6.4)
+  double max_utilization_pct = 6;
+}
+
+// Ack for the unary ReportUsage fallback. Transport-level receipt only;
+// command convergence is reported via CommandAck.
+message Ack {
+  bool accepted = 1;
+  string message = 2;
+  google.protobuf.Timestamp received_at = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Downstream: AMS -> AMA commands (§6.3 — all commands are idempotent)
+// -----------------------------------------------------------------------------
+
+message AmsCommand {
+  // Idempotency key. AMA keeps a processed-command log; a repeat MUST be a no-op
+  // that re-emits the current convergence state rather than re-running the effect.
+  string command_id = 1;
+
+  // Ed25519 signature by AMS over the canonical serialization of this message
+  // with `signature` cleared. AMA verifies with the public key baked into its
+  // build and executes nothing that fails verification (§3 trust model, §6.2:
+  // authority is enforced by signature, not by encryption).
+  bytes signature = 2;
+
+  // Issue time, carried inside the signed payload so AMA can reject stale
+  // replays outside its acceptance window.
+  google.protobuf.Timestamp issued_at = 3;
+
+  oneof cmd {
+    DeliverAccount deliver = 10;
+    RecallAccount recall = 11;
+    SetAccountActive set_active = 12;
+    SetSwitchMode set_mode = 13;
+    SwitchNow switch_now = 14;
+    RequestReport req_report = 15;
+    SessionSetup session_setup = 16;
+  }
+
+  // Reserved for future commands.
+  reserved 17 to 29;
+}
+
+// Session establishment layer, sent by AMS at the start of a session and again
+// whenever material must be rotated. It carries two things:
+//
+//   1. Enrollment promotion — when the agent registered with a one-shot
+//      enroll_token, AMS issues the long-lived server_credential here. The agent
+//      persists it and presents it on every later Register (§7 AMA 인증).
+//   2. KEK delivery (§6.2) — the key-encryption keys that open manifest records
+//      and DeliverAccount envelopes. Held in memory only, so they must be
+//      re-delivered after every agent restart; that is what makes local account
+//      data unreadable without a live AMS session.
+//
+// This is an AmsCommand like any other, so it is covered by the Ed25519
+// signature in AmsCommand.signature and MUST be rejected if verification fails.
+// An agent that cannot verify it has no keys and therefore no working manifest.
+message SessionSetup {
+  // Set only on the enroll -> enrolled promotion; empty on ordinary sessions.
+  // Replaces any credential the agent currently holds.
+  string server_credential = 1;
+
+  // One or more KEKs. Multiple entries let a rotation overlap: records written
+  // under the old key_id stay readable while new records use the new one.
+  // An empty list means "keep the keys you already have".
+  repeated WrappedKey keys = 2;
+
+  // The key_id AMA should use when it needs to write a new record itself.
+  // Must name one of `keys`, or a key already held.
+  string active_key_id = 3;
+
+  // key_ids AMA must drop from memory now (completed rotation).
+  repeated string revoked_key_ids = 4;
+
+  message WrappedKey {
+    string key_id = 1;
+
+    // The KEK, wrapped for this agent in transit. Plaintext KEK material never
+    // touches disk on the agent (§6.2) and is never logged (§7).
+    bytes wrapped_key = 2;
+
+    EncryptionAlgorithm algorithm = 3;
+    google.protobuf.Timestamp not_after = 4;  // advisory expiry, for rotation planning
+  }
+}
+
+// Push a complete credential set to the agent (D3).
+//
+// slot 없음 — AMA 로컬 자동 할당, 매핑 키 email/uuid.
+// There is intentionally NO slot field: `tsamx add` assigns the slot number
+// locally and slot numbers shift on `remove` (§2.4-3), so AMS never names one.
+//
+// Local procedure (§6.3 deliver, single critical section):
+//   verify signature -> decrypt credential set -> manifest upsert
+//   -> record previously active account -> write ~/.claude/.credentials.json
+//      and ~/.claude.json oauthAccount -> `tsamx add` -> switch back to the
+//      previously active account if needed -> wipe plaintext from memory.
+message DeliverAccount {
+  string assignment_id = 1;  // AMS assignments.id — ack correlates back to this row
+  AccountRef account = 2;
+  CredentialType credential_type = 3;
+  EncryptedCredential encrypted_credential = 4;
+
+  // Allocation the agent should converge to once the credential is installed.
+  // ACTIVE -> `tsamx enable`, INACTIVE -> `tsamx disable`.
+  //
+  // This is the only rotation control on the wire. `assignments.pinned` (§5.2)
+  // is an AMS-internal scheduling flag and is deliberately NOT sent: AMS
+  // translates a pinned assignment into desired_status = INACTIVE before issuing
+  // the command. Shipping both would give the agent two sources of truth for one
+  // decision and a convergence loop when they disagree.
+  AllocationStatus desired_status = 5;
+
+  reserved 6;  // was `pinned` — AMS-internal, translated into desired_status
+
+  // Credential-set metadata AMS already holds, echoed so AMA can populate
+  // ~/.claude.json oauthAccount without decrypting for display purposes.
+  string organization_name = 7;
+  google.protobuf.Timestamp credential_expires_at = 8;
+}
+
+// Remove an account from the agent (§6.3 recall).
+// If the target is currently active, AMA switches away first, then removes.
+message RecallAccount {
+  string assignment_id = 1;
+  AccountRef account = 2;
+
+  // O2 (open item): true = delete the local credential copy entirely (current
+  // design), false = keep the manifest record and only disable it for fast
+  // re-assignment. AMS decides; AMA obeys.
+  bool purge_local_copy = 3;
+}
+
+// activate / deactivate (§6.3). Also the mechanism behind REST `:recover`
+// (§5.2 — quarantined -> active is driven by set_active(activate)).
+message SetAccountActive {
+  string assignment_id = 1;
+  AccountRef account = 2;
+  bool active = 3;  // true -> `tsamx enable`, false -> `tsamx disable`
+  bool clear_quarantine = 4;  // recover path: also clear tsamx quarantine for this account
+}
+
+// Server-scoped auto/manual switch (§5.2 — non-state command, does not advance
+// any assignment state; it only changes servers.switch_mode).
+message SetSwitchMode {
+  SwitchMode mode = 1;
+}
+
+// Manual switch (§6.3 switch_now). Non-state command: only last_switched_at moves.
+message SwitchNow {
+  oneof target {
+    // Switch to this specific account: `tsamx switch <email>`.
+    AccountRef account = 1;
+    // Let tsamx rank candidates: `tsamx switch --strategy best`.
+    SwitchStrategy strategy = 2;
+  }
+
+  // Assignment the request originated from, for correlation and the audit trail.
+  // Symmetric with the other account-scoped commands. Empty when `strategy` is
+  // used, since no single assignment is named.
+  string assignment_id = 3;
+
+  enum SwitchStrategy {
+    SWITCH_STRATEGY_UNSPECIFIED = 0;
+    SWITCH_STRATEGY_BEST = 1;
+    SWITCH_STRATEGY_NEXT_AVAILABLE = 2;
+  }
+}
+
+// Ask for an immediate report (§6.3 req_report, REST `:refresh-usage`).
+// Always executed — reading is idempotent.
+message RequestReport {
+  ReportType report_type = 1;
+  string reason = 2;  // free-form, for the audit trail (e.g. "console refresh")
+
+  enum ReportType {
+    REPORT_TYPE_UNSPECIFIED = 0;
+    REPORT_TYPE_USAGE = 1;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Upstream: AMA -> AMS messages
+// -----------------------------------------------------------------------------
+
+message AmaMessage {
+  oneof msg {
+    Register register = 10;
+    Heartbeat hb = 11;
+    UsageReport usage = 12;
+    CommandAck ack = 13;
+    AccountEvent event = 14;
+  }
+}
+
+// First message on every stream. Presents the agent's credential (§7 AMA 인증):
+// one-shot enroll_token on first contact, long-lived server_credential after.
+// AMS binds the session to the tenant recorded for that server — a tenant id
+// supplied by the client is never trusted (§7 tenant isolation, triple defense).
+message Register {
+  string agent_id = 1;   // stable agent identifier, "ama_..."
+  string server_id = 2;  // AMS servers.id, known after enrollment
+  oneof auth {
+    string enroll_token = 3;        // one-shot, hash-only on the AMS side
+    string server_credential = 4;   // long-lived, exchanged during enrollment
+  }
+  string hostname = 5;
+  string agent_version = 6;
+  string tsamx_version = 7;
+
+  // Local reality at connect time, so AMS can reconcile immediately (§5.4)
+  // instead of waiting for the first scheduled report.
+  SwitchMode switch_mode = 8;
+  repeated AccountUsage accounts = 9;
+
+  // Command ids AMA has already applied, so AMS can suppress redundant redelivery
+  // after a reconnect. Bounded: the 128 most recent ids, newest first. It is a
+  // reconnect optimization, not an authoritative log — every command is
+  // idempotent anyway (§6.3), so a redelivery beyond the window is harmless.
+  repeated string applied_command_ids = 10;
+}
+
+message Heartbeat {
+  string agent_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  AccountRef active_account = 3;
+  SwitchMode switch_mode = 4;
+  bool tsamx_healthy = 5;
+  uint32 outbox_depth = 6;  // queued events pending flush (§6.3 offline outbox)
+}
+
+// §6.5 usage report — schedule (5 min), ams_query (RequestReport), or switch.
+// AMA does NOT poll the usage API itself; it re-serializes the tsamx cache
+// exposed by `tsamx list --json` (avoids double polling / rate limits).
+message UsageReport {
+  uint32 schema_version = 1;  // == 1, matches contracts/schemas/usage-report.schema.json
+  string agent_id = 2;
+  google.protobuf.Timestamp generated_at = 3;
+  Trigger trigger = 4;
+  AccountRef active_account = 5;
+  PoolSummary pool_summary = 6;
+  repeated AccountUsage accounts = 7;
+
+  // Set when trigger == AMS_QUERY, correlating back to the RequestReport.
+  string in_response_to_command_id = 8;
+
+  reserved 9;  // was `server_credential` — moved to ReportEnvelope
+
+  enum Trigger {
+    TRIGGER_UNSPECIFIED = 0;
+    TRIGGER_SCHEDULE = 1;    // 5-minute poll
+    TRIGGER_AMS_QUERY = 2;   // RequestReport / REST :refresh-usage
+    TRIGGER_SWITCH = 3;      // emitted alongside a switch event
+  }
+}
+
+// Request wrapper for the unary ReportUsage fallback, which has no
+// authenticated stream to carry identity.
+//
+// The credential lives here and not inside UsageReport on purpose: AMS stores
+// the report verbatim in usage_snapshots.payload (§5.1), so anything embedded in
+// it is persisted and surfaced by `GET …/servers/{sid}/usage`. Keeping the
+// secret in the envelope means the stored payload is identical whether it
+// arrived over the stream or over this fallback.
+message ReportEnvelope {
+  // Long-lived server credential, same value the agent presents in Register.
+  // Authenticates the caller and binds the report to a tenant. Never logged (§7).
+  string server_credential = 1;
+
+  UsageReport report = 2;
+}
+
+// Command result as a CONVERGENCE STATE, not success/failure (§6.3).
+// AMA reports the local reality it converged to; that report is the input to the
+// AMS reconcile loop (§5.4 desired vs actual). A repeated command that was
+// already applied still returns CONVERGED — the effect is a no-op, the answer
+// is not.
+message CommandAck {
+  string command_id = 1;
+  string agent_id = 2;
+  google.protobuf.Timestamp observed_at = 3;
+
+  Convergence convergence = 4;
+
+  // Observed local state after processing. AMS compares this against the
+  // assignment row; a mismatch is drift and triggers a corrective re-issue.
+  AccountUsage account_state = 5;   // set for account-scoped commands
+  SwitchMode switch_mode = 6;       // set for set_mode, and echoed otherwise
+  PoolSummary pool_summary = 7;
+
+  // Populated when convergence is PENDING, DIVERGED or REJECTED. Diagnostic
+  // only — MUST NOT contain credential material (§7).
+  string detail = 8;
+  string error_code = 9;
+
+  enum Convergence {
+    CONVERGENCE_UNSPECIFIED = 0;
+    // Local state matches what the command asked for (including no-op repeats).
+    CONVERGENCE_CONVERGED = 1;
+    // Accepted, still working (e.g. inside the deliver critical section).
+    // A further ack follows.
+    CONVERGENCE_PENDING = 2;
+    // Applied what it could; local state still differs from the request.
+    // AMS reconcile decides whether to retry (§5.2 ack.fail -> pending).
+    CONVERGENCE_DIVERGED = 3;
+    // Not executed: signature verification failed, stale issued_at, unknown
+    // command, or the account does not belong to this agent's tenant.
+    CONVERGENCE_REJECTED = 4;
+  }
+}
+
+// §6.5 switch_event — pushed immediately, independent of the 5-minute cadence.
+// Detected by comparing `tsamx status --json` around each `auto --once` tick and
+// by watching autoswitch_state.json (§6.4 dual detection).
+message AccountEvent {
+  uint32 schema_version = 1;  // == 1, matches contracts/schemas/switch-event.schema.json
+  string agent_id = 2;
+  string event_id = 3;  // outbox dedupe key — AMS MUST ignore a repeated event_id
+  google.protobuf.Timestamp occurred_at = 4;
+
+  Kind kind = 5;
+  Trigger trigger = 6;
+  AccountRef from = 7;  // unset for the first activation and for all_exhausted
+  AccountRef to = 8;    // unset for quarantine and all_exhausted
+  PoolSummary pool_summary = 9;
+  string detail = 10;
+
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_SWITCH = 1;
+    KIND_QUARANTINE = 2;
+    KIND_ALL_EXHAUSTED = 3;  // critical — AMS alerts and considers extra assignment (§6.4)
+  }
+
+  enum Trigger {
+    TRIGGER_UNSPECIFIED = 0;
+    TRIGGER_AT_LIMIT = 1;  // utilization crossed the 95% threshold (D10)
+    TRIGGER_MANUAL = 2;    // SwitchNow
+    TRIGGER_FAILOVER = 3;  // previous account failed / was quarantined
+  }
+}

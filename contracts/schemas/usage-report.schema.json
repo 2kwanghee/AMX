@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amx.io/contracts/schemas/v1/usage-report.schema.json",
+  "title": "AMX UsageReport",
+  "description": "AMA -> AMS usage report (docs/AMX-DESIGN.md §6.5). Emitted on the 5-minute schedule, on an AMS RequestReport / REST :refresh-usage, or alongside a switch. AMA does not poll the usage API directly; this is a re-serialization of the tsamx cache read via `tsamx list --json`. JSON mirror of amx.v1.UsageReport in contracts/proto/amx.proto.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "reportType",
+    "agentId",
+    "generatedAt",
+    "trigger",
+    "poolSummary",
+    "accounts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "description": "Report envelope version. Incremented only on breaking changes.",
+      "type": "integer",
+      "const": 1
+    },
+    "reportType": {
+      "type": "string",
+      "const": "usage"
+    },
+    "agentId": {
+      "$ref": "common.schema.json#/$defs/agentId"
+    },
+    "generatedAt": {
+      "description": "When AMA built this report (UTC, RFC 3339).",
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "trigger": {
+      "description": "schedule = 5-minute poll; ams_query = RequestReport / :refresh-usage; switch = emitted with a switch event.",
+      "type": "string",
+      "enum": ["schedule", "ams_query", "switch"]
+    },
+    "inResponseToCommandId": {
+      "description": "AmsCommand.command_id being answered. Required in practice when trigger is ams_query.",
+      "type": "string",
+      "minLength": 1
+    },
+    "activeAccount": {
+      "description": "Account currently holding ~/.claude/.credentials.json (D2: exactly one active). Absent when the pool is empty or no credential is installed.",
+      "$ref": "common.schema.json#/$defs/accountRef",
+      "required": ["amsAccountId", "email"]
+    },
+    "poolSummary": {
+      "$ref": "common.schema.json#/$defs/poolSummary",
+      "required": ["total", "allExhausted", "maxUtilizationPct"]
+    },
+    "accounts": {
+      "description": "Every account present on this agent, whatever its allocation status.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/accountUsage"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "trigger": {
+            "const": "ams_query"
+          }
+        },
+        "required": ["trigger"]
+      },
+      "then": {
+        "required": ["inResponseToCommandId"]
+      }
+    }
+  ],
+  "$defs": {
+    "allocationStatus": {
+      "description": "AMS-authoritative allocation status projected onto local reality (§5.2).",
+      "type": "string",
+      "enum": [
+        "delivering",
+        "active",
+        "inactive",
+        "quarantined",
+        "recalling",
+        "absent"
+      ]
+    },
+    "usageWindow": {
+      "description": "One binding window's utilization. The switch decision uses the max of the two windows (§2.2).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pct"],
+      "properties": {
+        "pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "resetsAt": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        }
+      }
+    },
+    "accountUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["amsAccountId", "email", "allocationStatus", "isCurrent"],
+      "properties": {
+        "amsAccountId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        },
+        "accountUuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "allocationStatus": {
+          "$ref": "#/$defs/allocationStatus"
+        },
+        "isCurrent": {
+          "description": "True for the single account whose credential is installed right now.",
+          "type": "boolean"
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fiveHour": {
+              "$ref": "#/$defs/usageWindow"
+            },
+            "sevenDay": {
+              "$ref": "#/$defs/usageWindow"
+            }
+          }
+        },
+        "usageFetchedAt": {
+          "description": "Age of the tsamx cache entry this row was read from, not the time of this report.",
+          "$ref": "common.schema.json#/$defs/timestamp"
+        }
+      }
+    }
+  }
+}
