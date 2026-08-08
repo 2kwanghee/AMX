@@ -330,7 +330,17 @@ export interface AmsCommand {
    * Issue time, carried inside the signed payload so AMA can reject stale
    * replays outside its acceptance window.
    */
-  issuedAt: Date | undefined;
+  issuedAt:
+    | Date
+    | undefined;
+  /**
+   * Intended recipient. AMS fills this with the authenticated agent_id of the
+   * session it is writing to, and — being part of this message — it is covered
+   * by `signature`. AMA MUST reject any command whose target_agent_id is not its
+   * own AMX_AGENT_ID, so a command signed for one agent cannot be re-injected
+   * into another (cross-agent / cross-tenant replay). SessionSetup included.
+   */
+  targetAgentId: string;
   deliver?: DeliverAccount | undefined;
   recall?: RecallAccount | undefined;
   setActive?: SetAccountActive | undefined;
@@ -1682,6 +1692,7 @@ function createBaseAmsCommand(): AmsCommand {
     commandId: "",
     signature: new Uint8Array(0),
     issuedAt: undefined,
+    targetAgentId: "",
     deliver: undefined,
     recall: undefined,
     setActive: undefined,
@@ -1702,6 +1713,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
     }
     if (message.issuedAt !== undefined) {
       Timestamp.encode(toTimestamp(message.issuedAt), writer.uint32(26).fork()).join();
+    }
+    if (message.targetAgentId !== "") {
+      writer.uint32(34).string(message.targetAgentId);
     }
     if (message.deliver !== undefined) {
       DeliverAccount.encode(message.deliver, writer.uint32(82).fork()).join();
@@ -1756,6 +1770,14 @@ export const AmsCommand: MessageFns<AmsCommand> = {
           }
 
           message.issuedAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.targetAgentId = reader.string();
           continue;
         }
         case 10: {
@@ -1836,6 +1858,11 @@ export const AmsCommand: MessageFns<AmsCommand> = {
         : isSet(object.issued_at)
         ? fromJsonTimestamp(object.issued_at)
         : undefined,
+      targetAgentId: isSet(object.targetAgentId)
+        ? globalThis.String(object.targetAgentId)
+        : isSet(object.target_agent_id)
+        ? globalThis.String(object.target_agent_id)
+        : "",
       deliver: isSet(object.deliver) ? DeliverAccount.fromJSON(object.deliver) : undefined,
       recall: isSet(object.recall) ? RecallAccount.fromJSON(object.recall) : undefined,
       setActive: isSet(object.setActive)
@@ -1877,6 +1904,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
     if (message.issuedAt !== undefined) {
       obj.issuedAt = message.issuedAt.toISOString();
     }
+    if (message.targetAgentId !== "") {
+      obj.targetAgentId = message.targetAgentId;
+    }
     if (message.deliver !== undefined) {
       obj.deliver = DeliverAccount.toJSON(message.deliver);
     }
@@ -1909,6 +1939,7 @@ export const AmsCommand: MessageFns<AmsCommand> = {
     message.commandId = object.commandId ?? "";
     message.signature = object.signature ?? new Uint8Array(0);
     message.issuedAt = object.issuedAt ?? undefined;
+    message.targetAgentId = object.targetAgentId ?? "";
     message.deliver = (object.deliver !== undefined && object.deliver !== null)
       ? DeliverAccount.fromPartial(object.deliver)
       : undefined;

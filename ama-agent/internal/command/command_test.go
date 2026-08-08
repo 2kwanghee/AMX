@@ -74,6 +74,9 @@ func (hn *harness) sign(t *testing.T, cmd *amxv1.AmsCommand) *amxv1.AmsCommand {
 	if cmd.IssuedAt == nil {
 		cmd.IssuedAt = timestamppb.New(time.Now())
 	}
+	if cmd.TargetAgentId == "" {
+		cmd.TargetAgentId = testAgentID
+	}
 	sig, err := crypto.SignCommand(hn.priv, cmd)
 	if err != nil {
 		t.Fatal(err)
@@ -248,9 +251,10 @@ func TestAADAgentMismatchRejected(t *testing.T) {
 func TestStaleCommandRejected(t *testing.T) {
 	hn := newHarness(t)
 	cmd := &amxv1.AmsCommand{
-		CommandId: "d1",
-		IssuedAt:  timestamppb.New(time.Now().Add(-2 * DefaultAcceptanceWindow)),
-		Cmd:       &amxv1.AmsCommand_ReqReport{ReqReport: &amxv1.RequestReport{}},
+		CommandId:     "d1",
+		TargetAgentId: testAgentID,
+		IssuedAt:      timestamppb.New(time.Now().Add(-2 * DefaultAcceptanceWindow)),
+		Cmd:           &amxv1.AmsCommand_ReqReport{ReqReport: &amxv1.RequestReport{}},
 	}
 	sig, _ := crypto.SignCommand(hn.priv, cmd)
 	cmd.Signature = sig
@@ -275,6 +279,146 @@ func TestSetActiveTogglesStatus(t *testing.T) {
 	}
 	if disabled, _ := hn.fake.Disabled("a@x.io"); !disabled {
 		t.Fatal("deactivate did not disable the account")
+	}
+}
+
+// TestWrongRecipientRejected: a command validly signed by AMS but addressed to a
+// different agent_id must be REJECTED and have no effect (recipient binding).
+func TestWrongRecipientRejected(t *testing.T) {
+	hn := newHarness(t)
+	cmd := hn.sign(t, &amxv1.AmsCommand{
+		CommandId:     "d1",
+		TargetAgentId: "someOtherAgent",
+		Cmd: &amxv1.AmsCommand_Deliver{Deliver: &amxv1.DeliverAccount{
+			Account: &amxv1.AccountRef{AmsAccountId: "acc-1", Email: "a@x.io"},
+		}},
+	})
+	ack := hn.apply(t, cmd)
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_REJECTED {
+		t.Fatalf("wrong-recipient convergence = %v, want REJECTED", ack.Convergence)
+	}
+	if ack.ErrorCode != "wrong_recipient" {
+		t.Fatalf("error_code = %q, want wrong_recipient", ack.ErrorCode)
+	}
+	if hn.fake.Has("a@x.io") {
+		t.Fatal("command addressed to another agent still had an effect")
+	}
+}
+
+// TestIssuedAtRequiredRejected: a command with no issued_at is REJECTED — absent
+// freshness must not be a bypass (ADVERSARY).
+func TestIssuedAtRequiredRejected(t *testing.T) {
+	hn := newHarness(t)
+	cmd := &amxv1.AmsCommand{
+		CommandId:     "d1",
+		TargetAgentId: testAgentID,
+		Cmd:           &amxv1.AmsCommand_ReqReport{ReqReport: &amxv1.RequestReport{}},
+	}
+	sig, _ := crypto.SignCommand(hn.priv, cmd)
+	cmd.Signature = sig
+	ack := hn.apply(t, cmd)
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_REJECTED {
+		t.Fatalf("missing issued_at convergence = %v, want REJECTED", ack.Convergence)
+	}
+}
+
+// TestRecallReplayNoSecondEffect: replaying a recall with the same command_id
+// inside the freshness window must not re-run the purge on a since-redelivered
+// account (§3 replay gate).
+func TestRecallReplayNoSecondEffect(t *testing.T) {
+	hn := newHarness(t)
+	hn.apply(t, hn.deliverCmd(t, "d1", "acc-1", "a@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	recall := hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "r1",
+		Cmd: &amxv1.AmsCommand_Recall{Recall: &amxv1.RecallAccount{
+			Account:        &amxv1.AccountRef{AmsAccountId: "acc-1", Email: "a@x.io"},
+			PurgeLocalCopy: true,
+		}},
+	})
+	hn.apply(t, recall) // first purge removes the account
+	if hn.fake.Has("a@x.io") {
+		t.Fatal("purge did not remove the account")
+	}
+	// Operator re-delivers the same account under a new command_id.
+	hn.apply(t, hn.deliverCmd(t, "d2", "acc-1", "a@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if !hn.fake.Has("a@x.io") {
+		t.Fatal("re-deliver did not restore the account")
+	}
+	removesBefore := countPrefix(hn.fake.Calls, "remove ")
+
+	ack := hn.apply(t, recall) // replay the captured recall
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("replay convergence = %v, want CONVERGED", ack.Convergence)
+	}
+	if got := countPrefix(hn.fake.Calls, "remove "); got != removesBefore {
+		t.Fatalf("replay re-ran the purge: remove calls %d -> %d", removesBefore, got)
+	}
+	if !hn.fake.Has("a@x.io") {
+		t.Fatal("replay purged the re-delivered account")
+	}
+}
+
+// TestServerCredentialPersistsAcrossRestart: the credential minted in
+// SessionSetup is written to the sidecar and recovered by a fresh handler, so a
+// restart re-authenticates over path B without the (burned) enroll_token.
+func TestServerCredentialPersistsAcrossRestart(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	build := func() *Handler {
+		keks := store.NewKEKHolder()
+		st, err := store.Open(dir, testAgentID, keks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		appl, err := store.OpenAppliedLog(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		creds, err := store.OpenCredentialSidecar(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := New(Config{
+			AgentID: testAgentID, PublicKey: pub, Store: st, KEKs: keks,
+			Applied: appl, Bridge: tsamx.NewFake(), Creds: creds, Now: time.Now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	h1 := build()
+	cmd := &amxv1.AmsCommand{
+		CommandId:     "setup-1",
+		TargetAgentId: testAgentID,
+		IssuedAt:      timestamppb.New(time.Now()),
+		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
+			ServerCredential: "cred-xyz",
+			Keys:             []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: bytes.Repeat([]byte{0x33}, crypto.KEKSize)}},
+			ActiveKeyId:      testKeyID,
+		}},
+	}
+	sig, err := crypto.SignCommand(priv, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Signature = sig
+	if ack := h1.Handle(context.Background(), cmd); ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("session setup convergence = %v detail=%q", ack.Convergence, ack.Detail)
+	}
+	if h1.ServerCredential() != "cred-xyz" {
+		t.Fatalf("in-memory credential = %q, want cred-xyz", h1.ServerCredential())
+	}
+
+	// Simulated restart: a brand-new handler over the same state dir, with no
+	// SessionSetup applied, must still present the credential.
+	h2 := build()
+	if got := h2.ServerCredential(); got != "cred-xyz" {
+		t.Fatalf("credential after restart = %q, want cred-xyz", got)
 	}
 }
 

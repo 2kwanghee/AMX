@@ -8,11 +8,13 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"os"
 	"sync"
 	"time"
 
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -20,6 +22,38 @@ const (
 	backoffMin = 1 * time.Second
 	backoffMax = 30 * time.Second
 )
+
+// Transport-security environment (SSOT §5.4 / §7 in-transit).
+const (
+	// EnvTLSCA points at a PEM bundle of CA certs trusted for the AMS server.
+	// Setting it enables TLS; without it, transport is plaintext.
+	EnvTLSCA = "AMX_AMS_TLS_CA"
+	// EnvTLSServerName overrides the SNI / certificate name verified against
+	// EnvTLSCA (defaults to the dial host).
+	EnvTLSServerName = "AMX_AMS_TLS_SERVER_NAME"
+	// EnvAllowInsecure must be "1" to permit a plaintext dial when no TLS CA is
+	// configured. Without it the agent refuses to connect rather than leak the
+	// KEK to an eavesdropper (ADVERSARY).
+	EnvAllowInsecure = "AMX_GRPC_ALLOW_INSECURE"
+)
+
+// SecurityDialOption chooses transport credentials from the environment: TLS
+// when EnvTLSCA is set, otherwise an explicit insecure opt-in via
+// EnvAllowInsecure. It errors when neither is configured, so a misconfigured
+// deployment fails closed instead of dialing in plaintext by default.
+func SecurityDialOption() (grpc.DialOption, error) {
+	if ca := os.Getenv(EnvTLSCA); ca != "" {
+		creds, err := credentials.NewClientTLSFromFile(ca, os.Getenv(EnvTLSServerName))
+		if err != nil {
+			return nil, err
+		}
+		return grpc.WithTransportCredentials(creds), nil
+	}
+	if os.Getenv(EnvAllowInsecure) == "1" {
+		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+	}
+	return nil, errors.New("transport: no TLS configured; set " + EnvTLSCA + " or opt in with " + EnvAllowInsecure + "=1")
+}
 
 // Client dials AMS and exposes Send/Recv channels over the reconnecting Session
 // stream.
@@ -38,16 +72,12 @@ type Client struct {
 	closed    chan struct{}
 }
 
-// Dial constructs a Client for addr.
-//
-// TODO(P2): TLS is mandatory in production (SSOT §5.4 / §7 in-transit). P2 allows
-// insecure transport for local E2E only; a deployment MUST supply TLS creds via
-// WithDialOptions and this insecure default must not ship.
+// Dial constructs a Client for addr. Transport credentials are NOT injected
+// here: the caller passes them (typically from SecurityDialOption), so the
+// security choice is explicit and a plaintext dial cannot slip in by default
+// (SSOT §5.4 / §7 in-transit).
 func Dial(addr string, extra ...grpc.DialOption) *Client {
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()), // TODO(P2): replace with TLS
-	}
-	opts = append(opts, extra...)
+	opts := append([]grpc.DialOption(nil), extra...)
 	return &Client{
 		addr:   addr,
 		opts:   opts,

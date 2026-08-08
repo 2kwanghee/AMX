@@ -32,12 +32,17 @@ type Handler struct {
 	keks    *store.KEKHolder
 	applied *store.AppliedLog
 	bridge  tsamx.Bridge
+	creds   *store.CredentialSidecar // nil -> memory-only (tests)
 
 	window time.Duration
 	now    func() time.Time
 
-	mu               sync.Mutex
-	serverCredential string // persisted from SessionSetup; presented on Register
+	mu sync.Mutex
+	// serverCredential is the long-lived credential minted by AMS during enroll
+	// promotion. It is presented on the next Register; it is persisted to the
+	// credential sidecar (when configured) so a restart re-authenticates over
+	// path B — AMS has already burned the one-shot enroll_token by then.
+	serverCredential string
 	switchMode       amxv1.SwitchMode
 }
 
@@ -49,7 +54,8 @@ type Config struct {
 	KEKs             *store.KEKHolder
 	Applied          *store.AppliedLog
 	Bridge           tsamx.Bridge
-	AcceptanceWindow time.Duration // 0 -> DefaultAcceptanceWindow
+	Creds            *store.CredentialSidecar // optional; nil keeps the credential in memory only
+	AcceptanceWindow time.Duration            // 0 -> DefaultAcceptanceWindow
 	Now              func() time.Time
 }
 
@@ -72,16 +78,25 @@ func New(cfg Config) (*Handler, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Handler{
+	h := &Handler{
 		agentID: cfg.AgentID,
 		pub:     cfg.PublicKey,
 		store:   cfg.Store,
 		keks:    cfg.KEKs,
 		applied: cfg.Applied,
 		bridge:  cfg.Bridge,
+		creds:   cfg.Creds,
 		window:  w,
 		now:     now,
-	}, nil
+	}
+	// Recover a credential persisted by a previous run so the first Register
+	// after a restart authenticates over path B (§7 enroll handshake).
+	if cfg.Creds != nil {
+		if sc, err := cfg.Creds.Load(); err == nil && sc != "" {
+			h.serverCredential = sc
+		}
+	}
+	return h, nil
 }
 
 // ServerCredential returns the long-lived credential last delivered by
@@ -111,7 +126,15 @@ func (h *Handler) Handle(ctx context.Context, cmd *amxv1.AmsCommand) *amxv1.Comm
 	if err := crypto.VerifyCommand(h.pub, cmd); err != nil {
 		return reject(ack, "signature_invalid", err)
 	}
-	// 2. Freshness (replay defense).
+	// 2. Recipient binding. target_agent_id is inside the signed payload; a
+	// command minted for another agent (or an unbound one) must never execute
+	// here, even with a valid AMS signature — this blocks cross-agent /
+	// cross-tenant re-injection of a captured command. Applies to every command,
+	// SessionSetup included.
+	if cmd.GetTargetAgentId() != h.agentID {
+		return reject(ack, "wrong_recipient", fmt.Errorf("target_agent_id %q is not this agent", cmd.GetTargetAgentId()))
+	}
+	// 3. Freshness (replay defense).
 	if err := h.checkFreshness(cmd); err != nil {
 		return reject(ack, "stale_command", err)
 	}
@@ -139,8 +162,10 @@ func (h *Handler) Handle(ctx context.Context, cmd *amxv1.AmsCommand) *amxv1.Comm
 func (h *Handler) checkFreshness(cmd *amxv1.AmsCommand) error {
 	issued := cmd.GetIssuedAt()
 	if issued == nil {
-		// Nothing to evaluate; a stricter deployment may require issued_at.
-		return nil
+		// issued_at is mandatory: without it there is no freshness bound, so a
+		// captured command could be replayed indefinitely. Reject rather than
+		// skip the check (ADVERSARY: absent issued_at bypassed freshness).
+		return errors.New("issued_at is required")
 	}
 	t := issued.AsTime()
 	skew := h.now().UTC().Sub(t)
@@ -176,6 +201,16 @@ func diverged(ack *amxv1.CommandAck, code string, err error) *amxv1.CommandAck {
 func converged(ack *amxv1.CommandAck) *amxv1.CommandAck {
 	ack.Convergence = amxv1.CommandAck_CONVERGENCE_CONVERGED
 	return ack
+}
+
+// alreadyApplied reports whether cmdID is already recorded in the applied log
+// with a CONVERGED result. A replay of such a command — a valid signature reused
+// inside the freshness window — MUST re-emit the prior convergence WITHOUT
+// re-running a non-idempotent effect (recall-purge, or a deactivate the operator
+// has since reversed). ADVERSARY: an in-window replay otherwise re-ran the effect.
+func (h *Handler) alreadyApplied(cmdID string) bool {
+	entry, seen := h.applied.Lookup(cmdID)
+	return seen && entry.Convergence == amxv1.CommandAck_CONVERGENCE_CONVERGED.String()
 }
 
 // record logs the command in the applied.log sidecar (idempotency + Register).

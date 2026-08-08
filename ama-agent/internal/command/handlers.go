@@ -27,11 +27,18 @@ func tsamxAddRequest(ref *amxv1.AccountRef, organizationName string, plaintext [
 // Per design note §3 rule 1, SessionSetup is NEVER suppressed by the applied
 // log — AMS re-issues it every session, and AMA always applies it.
 func (h *Handler) handleSessionSetup(_ context.Context, cmd *amxv1.AmsCommand, ss *amxv1.SessionSetup, ack *amxv1.CommandAck) *amxv1.CommandAck {
-	// Enrollment promotion: store the long-lived credential for later Register.
+	// Enrollment promotion: persist the long-lived credential for later Register.
+	// It MUST reach disk before we ack — AMS burns the one-shot enroll_token on
+	// mint, so losing this to a crash would lock the agent out permanently.
 	if sc := ss.GetServerCredential(); sc != "" {
 		h.mu.Lock()
 		h.serverCredential = sc
 		h.mu.Unlock()
+		if h.creds != nil {
+			if err := h.creds.Save(sc); err != nil {
+				return diverged(ack, "credential_persist", err)
+			}
+		}
 	}
 	// Install KEKs (memory only, §6.2).
 	for _, wk := range ss.GetKeys() {
@@ -165,6 +172,17 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 	amsID := ref.GetAmsAccountId()
 	email := ref.GetEmail()
 
+	// Replay gate (§3): a previously-CONVERGED command_id is a no-op that
+	// re-emits the convergence, so an in-window resend cannot re-purge/re-disable.
+	if h.alreadyApplied(cmd.GetCommandId()) {
+		status := amxv1.AllocationStatus_ALLOCATION_STATUS_INACTIVE
+		if r.GetPurgeLocalCopy() {
+			status = amxv1.AllocationStatus_ALLOCATION_STATUS_ABSENT
+		}
+		h.setAccountState(ctx, ack, ref, status)
+		return converged(ack)
+	}
+
 	if r.GetPurgeLocalCopy() {
 		if err := h.bridge.Remove(ctx, email); err != nil {
 			out := diverged(ack, "tsamx_remove", err)
@@ -208,14 +226,23 @@ func (h *Handler) handleSetActive(ctx context.Context, cmd *amxv1.AmsCommand, sa
 	}
 	amsID := ref.GetAmsAccountId()
 	email := ref.GetEmail()
-	var status amxv1.AllocationStatus
+	status := amxv1.AllocationStatus_ALLOCATION_STATUS_INACTIVE
+	if sa.GetActive() {
+		status = amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE
+	}
+
+	// Replay gate (§3): re-emit a previously-CONVERGED result without toggling
+	// the pool again, so a resend cannot flip a state the operator has changed.
+	if h.alreadyApplied(cmd.GetCommandId()) {
+		h.setAccountState(ctx, ack, ref, status)
+		return converged(ack)
+	}
+
 	var err error
 	if sa.GetActive() {
 		err = h.bridge.Enable(ctx, email)
-		status = amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE
 	} else {
 		err = h.bridge.Disable(ctx, email)
-		status = amxv1.AllocationStatus_ALLOCATION_STATUS_INACTIVE
 	}
 	if err != nil {
 		out := diverged(ack, "tsamx_set_active", err)

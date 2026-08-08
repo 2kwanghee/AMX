@@ -231,6 +231,9 @@ def grpc_server(app_env: str, signing_keys: dict[str, str], workdir: Path):
             "AMX_SIGNING_KEY": signing_keys["signing_key"],
             "AMX_GRPC_PORT": str(port),
             "AMX_GRPC_POLL_INTERVAL": "0.2",
+            # Local E2E runs plaintext; opt in explicitly since the server now
+            # refuses to start without TLS otherwise (§7 in-transit).
+            "AMX_GRPC_ALLOW_INSECURE": "1",
             "PYTHONUNBUFFERED": "1",
         }
     )
@@ -301,6 +304,9 @@ class AgentHost:
                 "CLAUDE_CONFIG_DIR": str(self.config_dir),
                 "XDG_DATA_HOME": str(self.data_home),
                 "AMX_TSAMX_BIN": str(self.tsamx_bin),
+                # The agent dials plaintext locally; opt in explicitly since the
+                # transport now fails closed without TLS (§7 in-transit).
+                "AMX_GRPC_ALLOW_INSECURE": "1",
             }
         )
         return env

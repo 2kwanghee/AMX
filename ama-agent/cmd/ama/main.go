@@ -49,6 +49,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	creds, err := store.OpenCredentialSidecar(stateDir)
+	if err != nil {
+		return err
+	}
 
 	bridge := tsamx.NewExecBridge()
 
@@ -59,6 +63,7 @@ func run() error {
 		KEKs:      keks,
 		Applied:   applied,
 		Bridge:    bridge,
+		Creds:     creds,
 	})
 	if err != nil {
 		return err
@@ -68,7 +73,11 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	client := transport.Dial(amsAddr)
+	secOpt, err := transport.SecurityDialOption()
+	if err != nil {
+		return err
+	}
+	client := transport.Dial(amsAddr, secOpt)
 	defer client.Close()
 
 	// On (re)connect, send Register first (SSOT §5.4). The auth is the enroll

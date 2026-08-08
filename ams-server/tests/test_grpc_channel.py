@@ -138,6 +138,70 @@ def test_enroll_promotes_and_sends_signed_session_setup(app_env):
         assert server.agent_id == AGENT_ID
 
 
+def test_commands_are_bound_to_the_authenticated_agent(app_env):
+    """Every command AMS emits carries target_agent_id == the session's agent
+    (recipient binding). SessionSetup and the deliver both."""
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("bind@example.com")
+    token = _issue_enroll(tenant_id, server_id)
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            stub = pb_grpc.AmxControlPlaneStub(channel)
+            call = stub.Session()
+            await call.write(
+                pb.AmaMessage(register=pb.Register(agent_id=AGENT_ID, enroll_token=token))
+            )
+            setup = await _read(call)
+            assert setup.WhichOneof("cmd") == "session_setup"
+            assert setup.target_agent_id == AGENT_ID
+
+            await asyncio.to_thread(_rest_deliver, tenant_id, assignment_id)
+            cmd = await _read(call)
+            assert cmd.WhichOneof("cmd") == "deliver"
+            assert cmd.target_agent_id == AGENT_ID
+            await call.done_writing()
+
+    asyncio.run(scenario())
+
+
+def test_configure_port_refuses_insecure_without_optin(monkeypatch):
+    """configure_port fails closed: no TLS and no explicit opt-in -> refuse."""
+    from app.grpc.server import configure_port
+
+    monkeypatch.delenv("AMX_GRPC_TLS_CERT", raising=False)
+    monkeypatch.delenv("AMX_GRPC_TLS_KEY", raising=False)
+    monkeypatch.delenv("AMX_GRPC_ALLOW_INSECURE", raising=False)
+
+    class _StubServer:
+        def add_insecure_port(self, _addr):  # pragma: no cover - must not be called
+            raise AssertionError("bound insecurely without opt-in")
+
+        def add_secure_port(self, _addr, _creds):  # pragma: no cover
+            raise AssertionError("bound TLS without cert/key")
+
+    with pytest.raises(RuntimeError):
+        configure_port(_StubServer(), 50051)
+
+
+def test_configure_port_insecure_optin_binds_plaintext(monkeypatch):
+    from app.grpc.server import configure_port
+
+    monkeypatch.delenv("AMX_GRPC_TLS_CERT", raising=False)
+    monkeypatch.delenv("AMX_GRPC_TLS_KEY", raising=False)
+    monkeypatch.setenv("AMX_GRPC_ALLOW_INSECURE", "1")
+
+    bound: list[str] = []
+
+    class _StubServer:
+        def add_insecure_port(self, addr):
+            bound.append(addr)
+
+    assert configure_port(_StubServer(), 50051) == "insecure"
+    assert bound == ["[::]:50051"]
+
+
 def test_deliver_roundtrip_converges_assignment_to_active(app_env):
     signer = signing.Signer.from_env_or_generate()
     tenant_id, account_id, server_id = _seed_tenant_account_server("deliver@example.com")

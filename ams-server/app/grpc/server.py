@@ -114,7 +114,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
 
         kek = signing.new_kek()
         key_id = signing.new_key_id()
-        setup = self._build_session_setup(server_credential, kek, key_id)
+        setup = self._build_session_setup(server_credential, kek, key_id, agent_id)
         write_lock = asyncio.Lock()
         async with write_lock:
             await context.write(setup)
@@ -274,7 +274,12 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             email=account.email,
             account_uuid=account.account_uuid or "",
         )
-        cmd = pb.AmsCommand(command_id=row.command_id, issued_at=_now_ts())
+        # Bind the command to the authenticated recipient. target_agent_id is
+        # inside the signed payload, so the agent rejects any command not minted
+        # for it — a captured command cannot be re-injected into another agent.
+        cmd = pb.AmsCommand(
+            command_id=row.command_id, issued_at=_now_ts(), target_agent_id=agent_id
+        )
         if row.command_type == "deliver":
             cmd.deliver.CopyFrom(
                 self._build_deliver(account, assignment, account_ref, row, agent_id, kek, key_id)
@@ -347,7 +352,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         return deliver
 
     def _build_session_setup(
-        self, server_credential: str, kek: bytes, key_id: str
+        self, server_credential: str, kek: bytes, key_id: str, agent_id: str
     ) -> pb.AmsCommand:
         setup = pb.SessionSetup(
             server_credential=server_credential or "",
@@ -361,7 +366,9 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             active_key_id=key_id,
         )
         cmd = pb.AmsCommand(
-            command_id="setup_" + uuid.uuid4().hex, issued_at=_now_ts()
+            command_id="setup_" + uuid.uuid4().hex,
+            issued_at=_now_ts(),
+            target_agent_id=agent_id,
         )
         cmd.session_setup.CopyFrom(setup)
         sign_command(self._signer, cmd)
@@ -489,15 +496,59 @@ def create_server(
     return server, servicer
 
 
+def configure_port(server, port: int) -> str:
+    """Bind ``port`` on ``server``, choosing TLS from the environment (§7).
+
+    * ``AMX_GRPC_TLS_CERT`` + ``AMX_GRPC_TLS_KEY`` (PEM paths) -> ``add_secure_port``.
+      ``AMX_GRPC_TLS_CA`` additionally enables mutual TLS (client-cert required).
+    * otherwise the server refuses to start unless ``AMX_GRPC_ALLOW_INSECURE=1``
+      is set as an explicit opt-in, and logs a plaintext-exposure warning. This
+      closes the ADVERSARY finding where a plaintext port leaked the KEK.
+
+    Returns ``"tls"`` or ``"insecure"``.
+    """
+    cert = os.environ.get("AMX_GRPC_TLS_CERT")
+    key = os.environ.get("AMX_GRPC_TLS_KEY")
+    if cert and key:
+        with open(key, "rb") as fh:
+            key_bytes = fh.read()
+        with open(cert, "rb") as fh:
+            cert_bytes = fh.read()
+        ca_path = os.environ.get("AMX_GRPC_TLS_CA")
+        if ca_path:
+            with open(ca_path, "rb") as fh:
+                ca_bytes = fh.read()
+            creds = grpc.ssl_server_credentials(
+                [(key_bytes, cert_bytes)],
+                root_certificates=ca_bytes,
+                require_client_auth=True,
+            )
+        else:
+            creds = grpc.ssl_server_credentials([(key_bytes, cert_bytes)])
+        server.add_secure_port(f"[::]:{port}", creds)
+        return "tls"
+    if os.environ.get("AMX_GRPC_ALLOW_INSECURE") != "1":
+        raise RuntimeError(
+            "refusing to start without TLS: set AMX_GRPC_TLS_CERT and "
+            "AMX_GRPC_TLS_KEY, or explicitly opt in with AMX_GRPC_ALLOW_INSECURE=1"
+        )
+    _logger.warning(
+        "AMS gRPC starting WITHOUT TLS (AMX_GRPC_ALLOW_INSECURE=1) — the KEK is "
+        "exposed to anyone who can read the wire; do not use in production (§7)"
+    )
+    server.add_insecure_port(f"[::]:{port}")
+    return "insecure"
+
+
 async def serve(port: int = DEFAULT_PORT) -> None:
     from app.config import get_settings
 
     get_settings()  # fail fast on missing configuration (§7)
     signer = signing.Signer.from_env_or_generate()
     server, _ = create_server(signer)
-    server.add_insecure_port(f"[::]:{port}")
+    mode = configure_port(server, port)
     await server.start()
-    _logger.info("AMS gRPC control plane listening on :%s", port)
+    _logger.info("AMS gRPC control plane listening on :%s (%s)", port, mode)
     await server.wait_for_termination()
 
 
