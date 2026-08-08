@@ -18,6 +18,7 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/command"
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
+	"github.com/2kwanghee/AMX/ama-agent/internal/resync"
 	"github.com/2kwanghee/AMX/ama-agent/internal/scheduler"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/transport"
@@ -124,6 +125,29 @@ func run() error {
 	client := transport.Dial(amsAddr, secOpt)
 	defer client.Close()
 
+	// O9 credential re-sync (§5.7): watch the active account's live credential for
+	// a local refresh-token rotation and push the refreshed set back to AMS. The
+	// credential file is CLAUDE_CONFIG_DIR/.credentials.json (the home the bridge
+	// stages and tsamx refreshes in place). Empty config home disables re-sync.
+	var credPath string
+	if cfgDir := os.Getenv("CLAUDE_CONFIG_DIR"); cfgDir != "" {
+		credPath = filepath.Join(cfgDir, ".credentials.json")
+	}
+	resyncer := resync.New(resync.Config{
+		AgentID:          agentID,
+		Store:            st,
+		KEKs:             keks,
+		Bridge:           bridge,
+		Engine:           engine,
+		CredentialsPath:  credPath,
+		ServerCredential: handler.ServerCredential,
+		Send: func(u *amxv1.CredentialUpdate) bool {
+			return client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_CredUpdate{CredUpdate: u}})
+		},
+		Now:  time.Now,
+		Logf: log.Printf,
+	})
+
 	// On (re)connect, send Register first (SSOT §5.4). The auth is the enroll
 	// token on first contact, else the server credential from a prior SessionSetup.
 	client.OnConnect = func(send func(*amxv1.AmaMessage) error) error {
@@ -172,6 +196,10 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				// Credential re-sync detection shares this cadence (§5.7): rotation is
+				// rare and cross-server re-assignment is not latency-critical, so a
+				// 5-minute detection window is ample and adds no extra goroutine.
+				resyncer.Tick(ctx)
 				r, rerr := rep.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
 				if rerr != nil {
 					log.Printf("usage report: %v", rerr)

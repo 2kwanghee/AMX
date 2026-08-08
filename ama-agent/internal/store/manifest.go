@@ -51,6 +51,13 @@ type Record struct {
 	Nonce            []byte    `json:"nonce"`
 	Ciphertext       []byte    `json:"ciphertext"` // sealed credential-set JSON — never logged
 	ReceivedAt       time.Time `json:"receivedAt"`
+	// Fingerprint is the stable identity hash of the sealed credential set (the
+	// refresh-token hash when present, else a content hash — CredentialFingerprint,
+	// mirroring tsamx oauth.credential_fingerprint). It is a one-way hash, NOT the
+	// credential, so it lives in the plaintext metadata: the O9 credential re-sync
+	// (§5.7) compares the live on-disk fingerprint against this baseline to detect
+	// a local refresh-token rotation without decrypting the record every tick.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // Store is the in-memory + on-disk manifest, guarded by a mutex.
@@ -155,6 +162,9 @@ func (s *Store) Upsert(rec Record, plaintextCred []byte) error {
 	rec.KeyID = keyID
 	rec.Nonce = nonce
 	rec.Ciphertext = ct
+	// Stamp the identity fingerprint from the plaintext being sealed so every
+	// writer (deliver AND re-sync) leaves a correct detection baseline (§5.7).
+	rec.Fingerprint = CredentialFingerprint(plaintextCred)
 	if rec.ReceivedAt.IsZero() {
 		rec.ReceivedAt = time.Now().UTC()
 	}
@@ -189,6 +199,23 @@ func (s *Store) Get(amsAccountID string) (Record, bool) {
 		return Record{}, false
 	}
 	return *r, true
+}
+
+// FindByEmail returns a shallow copy of the record whose Email matches (the O9
+// re-sync maps the live active account, known only by email, back to its
+// ams_account_id and fingerprint baseline). Absent -> ok=false.
+func (s *Store) FindByEmail(email string) (Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if email == "" {
+		return Record{}, false
+	}
+	for _, r := range s.records {
+		if r.Email == email {
+			return *r, true
+		}
+	}
+	return Record{}, false
 }
 
 // SetStatus updates a record's allocation status (e.g. recall=disable keeps the
