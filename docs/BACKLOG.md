@@ -14,7 +14,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 
 | # | 항목 | 출처 | 내용 | 의존성 |
 |---|---|---|---|---|
-| A1 | **O9 refresh 토큰 회전 판별** | §8 O9 · P2 | 현재 폴백(재배정 시 §5.5 재인증 허용)으로 구현됨. 회전형이면 AMA→AMS 역동기화 경로가 더 나음. **판별에 실계정 토큰으로 refresh 2회 호출 실험 필요** — 사용자만 가능 | 실계정. E2E는 mock이라 무관 |
+| A1 | ~~O9 refresh 회전 판별~~ → **credential 역동기화 구현** | §8 O9 · §5.7 · P2 | **판별 완료(회전형 확정, 2026-08-08 `tools/o9_refresh_probe.py`)** + 방향 결정(역동기화 채택). 이제 **구현 항목**: AMA가 refresh 갱신본을 AMS로 역전송(신규 proto `CredentialUpdate`, AMA 감지, AMS `encrypted_secret` 갱신, credential_version 단조성). 크로스서버 재배정 자동화. **R3**(credential 흐름·서명·경합), P2 채널 확장 | 착수 대기 (사용자 우선순위) |
 | A2 | **O8 ClickEye 연동 형태** | §8 O8 · P4 | P4에서 건너뜀. ClickEye가 AMS 조회 API를 읽는 방식·범위. 권장 = 신규 read-only 엔드포인트 + ClickEye 전용 API 키(관리자 토큰과 분리) | ClickEye 요구 확정 시 |
 | A3 | **O3 API-key 계정 관리 포함 범위** | §8 O3 · P1 | P1에서 api_key 계정은 POST accounts 암호화 경로로 저장 가능하게 구현됨. 다만 구독 쿼터가 없어 95% 임계가 무의미 — 스위칭 풀에 포함할지 정책 미확정 | P3 스위칭 정책과 연동 |
 
