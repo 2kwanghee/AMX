@@ -107,6 +107,13 @@ class Account(Base):
         DateTime(timezone=True), nullable=True
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="available")
+    # O9 credential re-sync monotonicity (§5.7). The agent's local observation
+    # time of the last accepted refresh. An upstream CredentialUpdate only wins
+    # when its observed_at is strictly newer (or this is NULL), so a delayed or
+    # duplicated re-sync cannot roll encrypted_secret back.
+    credential_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_switched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
