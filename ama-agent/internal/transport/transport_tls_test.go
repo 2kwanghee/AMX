@@ -402,6 +402,23 @@ func TestTLSInsecureClientRejected(t *testing.T) {
 	}
 }
 
+// TestTLSOneWayRejectsTLS11Server: the one-way path pins MinVersion TLS 1.2, so
+// a server that only offers TLS 1.1 is rejected regardless of the gRPC default.
+func TestTLSOneWayRejectsTLS11Server(t *testing.T) {
+	certs := makeCerts(t)
+	addr, _ := startTLSServer(t, &tls.Config{
+		Certificates: []tls.Certificate{serverKeyPair(t, certs.serverCert, certs.serverKey)},
+		MaxVersion:   tls.VersionTLS11,
+	})
+
+	clearTLSEnv(t)
+	t.Setenv(EnvTLSCA, certs.caFile) // one-way, no client cert
+
+	if err := rawDialExpectFail(t, addr); err == nil {
+		t.Fatal("one-way client negotiated TLS 1.1 despite MinVersion 1.2")
+	}
+}
+
 // TestSecurityDialOptionHalfClientCertFailsClosed: setting only one half of the
 // client-cert pair is a misconfiguration that must fail closed rather than
 // silently degrade to anonymous one-way TLS.

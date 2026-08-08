@@ -66,15 +66,9 @@ func SecurityDialOption() (grpc.DialOption, error) {
 				"transport: set both %s and %s for mutual TLS, or neither for one-way TLS",
 				EnvTLSClientCert, EnvTLSClientKey)
 		}
-		if clientCert == "" {
-			// One-way TLS: verify the server against the CA, present no cert.
-			creds, err := credentials.NewClientTLSFromFile(ca, os.Getenv(EnvTLSServerName))
-			if err != nil {
-				return nil, err
-			}
-			return grpc.WithTransportCredentials(creds), nil
-		}
-		// Mutual TLS: verify the server against the CA and present our own cert.
+		// Both paths share one tls.Config so the TLS floor (MinVersion) and server
+		// verification are identical; only the client certificate differs.
+		// ServerName empty => gRPC fills it from the dial host (prior behaviour).
 		caPEM, err := os.ReadFile(ca)
 		if err != nil {
 			return nil, fmt.Errorf("transport: read TLS CA %q: %w", ca, err)
@@ -83,15 +77,18 @@ func SecurityDialOption() (grpc.DialOption, error) {
 		if !pool.AppendCertsFromPEM(caPEM) {
 			return nil, fmt.Errorf("transport: no certificates parsed from TLS CA %q", ca)
 		}
-		cert, err := tls.LoadX509KeyPair(clientCert, clientKey)
-		if err != nil {
-			return nil, fmt.Errorf("transport: load client key pair: %w", err)
-		}
 		cfg := &tls.Config{
-			RootCAs:      pool,
-			Certificates: []tls.Certificate{cert},
-			ServerName:   os.Getenv(EnvTLSServerName),
-			MinVersion:   tls.VersionTLS12,
+			RootCAs:    pool,
+			ServerName: os.Getenv(EnvTLSServerName),
+			MinVersion: tls.VersionTLS12,
+		}
+		if clientCert != "" {
+			// Mutual TLS: additionally present our own cert.
+			cert, err := tls.LoadX509KeyPair(clientCert, clientKey)
+			if err != nil {
+				return nil, fmt.Errorf("transport: load client key pair: %w", err)
+			}
+			cfg.Certificates = []tls.Certificate{cert}
 		}
 		return grpc.WithTransportCredentials(credentials.NewTLS(cfg)), nil
 	}
