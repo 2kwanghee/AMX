@@ -58,6 +58,23 @@ def _add_server(tenant_id: uuid.UUID, name: str) -> uuid.UUID:
         return server.id
 
 
+def _assign(tenant_id, account_id, server_id, state: str = "active"):
+    """Create an assignment and force it into ``state`` (default ``active``).
+
+    Ownership for re-sync requires a state where the credential is resident
+    locally (active/inactive/quarantined); the bare create leaves it ``pending``.
+    """
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_assignment_state(tenant_id, assignment_id, state)
+    return assignment_id
+
+
+def _set_assignment_state(tenant_id, assignment_id, state: str) -> None:
+    with get_sessionmaker()() as db:
+        inventory.get_assignment(db, tenant_id, assignment_id).state = state
+        db.commit()
+
+
 def _add_account(tenant_id: uuid.UUID, email: str, refresh_token: str) -> uuid.UUID:
     with get_sessionmaker()() as db:
         account = inventory.create_account(
@@ -145,7 +162,7 @@ def test_cred_update_reencrypts_and_stores_latest(app_env):
     tenant_id, account_id, server_id = _seed_tenant_account_server("resync@example.com")
     # The account must be installed on THIS server for a re-sync to be accepted
     # (ownership, §5.7): the agent only re-seals a credential it legitimately holds.
-    _create_assignment(tenant_id, account_id, server_id)
+    _assign(tenant_id, account_id, server_id)
     token = _issue_enroll(tenant_id, server_id)
     observed = datetime.now(UTC)
     new_rt = "rt-refreshed-" + uuid.uuid4().hex
@@ -176,8 +193,8 @@ def test_cred_update_monotonic_ignores_stale(app_env):
     sentinel_id = _add_account(tenant_id, "sentinel@example.com", "rt-sentinel-orig")
     # Both accounts are installed on this server so the ownership gate lets the
     # re-syncs through; the test isolates monotonicity, not ownership.
-    _create_assignment(tenant_id, account_id, server_id)
-    _create_assignment(tenant_id, sentinel_id, server_id)
+    _assign(tenant_id, account_id, server_id)
+    _assign(tenant_id, sentinel_id, server_id)
     token = _issue_enroll(tenant_id, server_id)
 
     t1 = datetime.now(UTC)
@@ -220,7 +237,7 @@ def test_cred_update_cross_tenant_account_rejected(app_env):
     tenant_b, account_b, _server_b = _seed_tenant_account_server("b@ex.com")
     # A owns account_a on server_a; account_b is never assigned to server_a, so the
     # cross-tenant push fails the ownership gate as well as the tenant gate.
-    _create_assignment(tenant_a, account_a, server_a)
+    _assign(tenant_a, account_a, server_a)
     original_b_rt = _decrypt_rt(tenant_b, account_b)
     token = _issue_enroll(tenant_a, server_a)
 
@@ -255,8 +272,8 @@ def test_cred_update_bad_aad_not_applied(app_env):
     tenant_id, account_id, server_id = _seed_tenant_account_server("aad@example.com")
     original_rt = _decrypt_rt(tenant_id, account_id)
     sentinel_id = _add_account(tenant_id, "aad-sentinel@example.com", "rt-sentinel-orig")
-    _create_assignment(tenant_id, account_id, server_id)
-    _create_assignment(tenant_id, sentinel_id, server_id)
+    _assign(tenant_id, account_id, server_id)
+    _assign(tenant_id, sentinel_id, server_id)
     token = _issue_enroll(tenant_id, server_id)
 
     t = datetime.now(UTC)
@@ -290,7 +307,8 @@ def test_deliver_after_resync_sends_latest(app_env):
     signer = signing.Signer.from_env_or_generate()
     tenant_id, account_id, server_id = _seed_tenant_account_server("deliver-latest@example.com")
     token = _issue_enroll(tenant_id, server_id)
-    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    # Active while owned so the re-sync push is accepted (ownership gate).
+    assignment_id = _assign(tenant_id, account_id, server_id)
     observed = datetime.now(UTC)
     new_rt = "rt-latest-" + uuid.uuid4().hex
 
@@ -304,7 +322,11 @@ def test_deliver_after_resync_sends_latest(app_env):
             await call.write(_cred_update(account_id, enc, "", observed))
             await asyncio.to_thread(_wait_observed, tenant_id, account_id, observed)
 
-            # Now a cross-server style deliver must carry the refreshed copy.
+            # A fresh (re)deliver requires a 'pending' assignment; move it back so the
+            # deliver command re-reads and carries the just-re-synced copy.
+            await asyncio.to_thread(
+                _set_assignment_state, tenant_id, assignment_id, "pending"
+            )
             await asyncio.to_thread(_rest_deliver, tenant_id, assignment_id)
             cmd = await _read(call)
             assert cmd.WhichOneof("cmd") == "deliver"
@@ -332,11 +354,11 @@ def test_cred_update_foreign_server_account_rejected(app_env):
     tenant_id, account_id, server_own = _seed_tenant_account_server("owner@ex.com")
     server_other = _add_server(tenant_id, "s-other-" + uuid.uuid4().hex[:8])
     # The account lives on the OTHER server, never on this session's server.
-    _create_assignment(tenant_id, account_id, server_other)
+    _assign(tenant_id, account_id, server_other)
     original_rt = _decrypt_rt(tenant_id, account_id)
     # A sentinel account owned by THIS server fences the rejected push.
     sentinel_id = _add_account(tenant_id, "owner-sentinel@ex.com", "rt-sentinel-orig")
-    _create_assignment(tenant_id, sentinel_id, server_own)
+    _assign(tenant_id, sentinel_id, server_own)
     token = _issue_enroll(tenant_id, server_own)
 
     t = datetime.now(UTC)
@@ -374,7 +396,7 @@ def test_cred_update_future_observed_at_rejected_no_lockin(app_env):
     """
     signer = signing.Signer.from_env_or_generate()
     tenant_id, account_id, server_id = _seed_tenant_account_server("future@ex.com")
-    _create_assignment(tenant_id, account_id, server_id)
+    _assign(tenant_id, account_id, server_id)
     original_rt = _decrypt_rt(tenant_id, account_id)
     token = _issue_enroll(tenant_id, server_id)
 
@@ -425,10 +447,10 @@ def test_cred_update_non_utf8_rejected_session_survives(app_env):
     """
     signer = signing.Signer.from_env_or_generate()
     tenant_id, account_id, server_id = _seed_tenant_account_server("utf8@ex.com")
-    _create_assignment(tenant_id, account_id, server_id)
+    _assign(tenant_id, account_id, server_id)
     original_rt = _decrypt_rt(tenant_id, account_id)
     sentinel_id = _add_account(tenant_id, "utf8-sentinel@ex.com", "rt-sentinel-orig")
-    _create_assignment(tenant_id, sentinel_id, server_id)
+    _assign(tenant_id, sentinel_id, server_id)
     token = _issue_enroll(tenant_id, server_id)
 
     t = datetime.now(UTC)
@@ -463,6 +485,50 @@ def test_cred_update_non_utf8_rejected_session_survives(app_env):
 
     asyncio.run(scenario())
     # Bad push rejected, account intact; sentinel processed => session alive.
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    assert _stored(tenant_id, account_id).credential_observed_at is None
+    assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
+
+
+def test_cred_update_pending_assignment_rejected(app_env):
+    """Fix 1 (narrowed): a still-``pending`` assignment does not confer ownership.
+
+    A pending assignment means the account is targeted at this server but the
+    credential has not been delivered yet — the server holds no local copy, so a
+    re-sync for it is not legitimate and is refused. A live (active) sentinel on
+    the same server fences the push and proves the gate is state-, not merely
+    server-, scoped.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("pending@ex.com")
+    # Bare create leaves the assignment in 'pending' (pre-deliver, no local copy).
+    _create_assignment(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    sentinel_id = _add_account(tenant_id, "pending-sentinel@ex.com", "rt-sentinel-orig")
+    _assign(tenant_id, sentinel_id, server_id)  # active -> owned
+    token = _issue_enroll(tenant_id, server_id)
+
+    t = datetime.now(UTC)
+    ts = t + timedelta(seconds=5)
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            enc = _seal(
+                kek, key_id, account_id, AGENT_ID,
+                _oauth_secret("pending@ex.com", "rt-premature"),
+            )
+            await call.write(_cred_update(account_id, enc, "", t))
+            enc_s = _seal(
+                kek, key_id, sentinel_id, AGENT_ID,
+                _oauth_secret("pending-sentinel@ex.com", "rt-sentinel-new"),
+            )
+            await call.write(_cred_update(sentinel_id, enc_s, "", ts))
+            await asyncio.to_thread(_wait_observed, tenant_id, sentinel_id, ts)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    # Pending account not updatable; the active sentinel was.
     assert _decrypt_rt(tenant_id, account_id) == original_rt
     assert _stored(tenant_id, account_id).credential_observed_at is None
     assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"

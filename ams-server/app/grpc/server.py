@@ -794,16 +794,19 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             # actually holds. Without this, a session could push a set sealed under
             # its KEK for a sibling server's account (AAD re-derives from the
             # session agent_id, so it authenticates) and overwrite that account's
-            # at-rest secret. Require a live (non-detached) assignment of this
-            # account to THIS session's server — the same "installed here" predicate
-            # used elsewhere (§5.2). A missing assignment is refused opaquely, so an
-            # unowned account is indistinguishable from an unknown one (§7).
+            # at-rest secret. Require an assignment of this account to THIS session's
+            # server in a state where the credential is actually resident locally
+            # (§5.2): active (enable), inactive (disable, O2-preserved), quarantined
+            # (exhausted). pending is pre-deliver (no local copy yet), recalling is
+            # mid-removal, detached is terminal — none legitimately hold it, so all
+            # are excluded. A missing assignment is refused opaquely, so an unowned
+            # account is indistinguishable from an unknown one (§7).
             owns = db.scalar(
                 select(Assignment.id).where(
                     Assignment.account_id == account.id,
                     Assignment.server_id == server_id,
                     Assignment.tenant_id == tenant_id,
-                    Assignment.state != "detached",
+                    Assignment.state.in_(("active", "inactive", "quarantined")),
                 )
             )
             if owns is None:
