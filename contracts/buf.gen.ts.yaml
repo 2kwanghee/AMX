@@ -1,0 +1,16 @@
+version: v2
+
+# TypeScript types via ts-proto, resolved from the generated workspace's
+# node_modules (`npm install` in contracts/gen/typescript).
+plugins:
+  - local: gen/typescript/node_modules/.bin/protoc-gen-ts_proto
+    out: gen/typescript/src
+    opt:
+      # Map google.protobuf.Timestamp to Date, so the output has no dependency
+      # on generated well-known-type modules.
+      - useDate=true
+      - esModuleInterop=true
+      # Transport-agnostic service definitions: no @grpc/grpc-js or nice-grpc
+      # dependency in the generated code.
+      - outputServices=generic-definitions
+      - useExactTypes=false

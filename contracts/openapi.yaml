@@ -1,0 +1,1315 @@
+openapi: 3.1.0
+
+# AMX — AMS management REST surface (docs/AMX-DESIGN.md §5.3).
+# Contract-first draft for P0: paths, methods, tags and the core request/response
+# shapes. The AMS<->AMA control plane is NOT here — it is gRPC, defined in
+# contracts/proto/amx.proto (§5.4).
+info:
+  title: AMX — Account Management Server API
+  version: 0.1.0
+  summary: Tenant, account, server and assignment management for AMX.
+  description: |
+    Management plane of AMX (Account Management & eXchange). Everything is scoped
+    to a tenant: accounts, servers and assignments all belong to exactly one, and
+    the tenant boundary is a structural database invariant, not an application
+    check (§5.1 composite foreign keys). A cross-tenant assignment is rejected by
+    the database itself.
+
+    **Credential secrets are write-only.** `accounts.encrypted_secret` holds a
+    complete OAuth credential set (access + refresh + expiry + scopes + account
+    metadata, §5.5) encrypted with `AMX_ENCRYPTION_KEY`. No response on this API
+    ever returns it — account responses expose only masked metadata
+    (`secretMasked`, `credentialExpiresAt`). Tokens must never be logged (§7).
+
+    **Action endpoints** use the `:verb` suffix (`…/{id}:deliver`). They are
+    non-RESTful on purpose: they move an assignment through the state machine of
+    §5.2, or issue a non-state command (`:switch-now`, `:switch-mode`,
+    `:refresh-usage`) that changes no assignment state. All of them are
+    asynchronous — the response reports the state AMS has recorded, and
+    convergence arrives later as a `CommandAck` over the gRPC session.
+  license:
+    name: Proprietary
+  contact:
+    name: AMX
+    url: https://amx.io
+
+servers:
+  - url: https://{host}/api/v1
+    description: AMS API root
+    variables:
+      host:
+        default: ams.example.com
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: tenants
+    description: Tenant CRUD (AMS-1).
+  - name: accounts
+    description: Account CRUD and the central OAuth enrollment flow (AMS-2, §5.5).
+  - name: servers
+    description: AMA server CRUD, enrollment tokens, switch mode and usage (AMS-4).
+  - name: assignments
+    description: Account-to-server assignment lifecycle (AMS-6, §5.2).
+
+paths:
+  # ---------------------------------------------------------------------------
+  # Tenants
+  # ---------------------------------------------------------------------------
+  /tenants:
+    get:
+      tags: [tenants]
+      operationId: listTenants
+      summary: List tenants
+      parameters:
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of tenants.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantPage'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [tenants]
+      operationId: createTenant
+      summary: Create a tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantCreate'
+      responses:
+        '201':
+          description: Tenant created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tenants/{tenantId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [tenants]
+      operationId: getTenant
+      summary: Get a tenant
+      responses:
+        '200':
+          description: Tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [tenants]
+      operationId: updateTenant
+      summary: Update a tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantUpdate'
+      responses:
+        '200':
+          description: Updated tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [tenants]
+      operationId: deleteTenant
+      summary: Delete a tenant
+      description: Rejected while the tenant still owns accounts, servers or non-detached assignments.
+      responses:
+        '204':
+          description: Deleted.
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------------------
+  # Accounts
+  # ---------------------------------------------------------------------------
+  /tenants/{tenantId}/accounts:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [accounts]
+      operationId: listAccounts
+      summary: List accounts
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AccountStatus'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of accounts, secrets masked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPage'
+    post:
+      tags: [accounts]
+      operationId: createAccount
+      summary: Create an account
+      description: |
+        Direct creation, for an account whose credential set is already in hand
+        (import, or an `api_key` account — O3). The normal path for an OAuth
+        subscription account is `:oauth-start` / `:oauth-complete`, which obtains
+        the complete credential set centrally so no AMA server ever performs a
+        browser login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountCreate'
+      responses:
+        '201':
+          description: Account created. The submitted secret is not echoed back.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tenants/{tenantId}/accounts/{accountId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [accounts]
+      operationId: getAccount
+      summary: Get an account
+      responses:
+        '200':
+          description: Account, secret masked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [accounts]
+      operationId: updateAccount
+      summary: Update an account
+      description: |
+        `secret` is write-only. Supplying it replaces the stored credential set;
+        it is never returned by any response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountUpdate'
+      responses:
+        '200':
+          description: Updated account, secret masked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [accounts]
+      operationId: deleteAccount
+      summary: Delete an account
+      description: Rejected while a non-detached assignment references the account; recall it first.
+      responses:
+        '204':
+          description: Deleted.
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tenants/{tenantId}/accounts:oauth-start:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    post:
+      tags: [accounts]
+      operationId: startAccountOauth
+      summary: Begin central OAuth enrollment
+      description: |
+        Step 1 of §5.5. AMS generates a PKCE verifier/challenge pair, keeps the
+        verifier in the server-side session, and returns the authorize URL for the
+        administrator to open. Only the session that generated the verifier can
+        complete the exchange. The verifier is single-use and is destroyed on
+        completion, failure or expiry (§7).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OauthStartRequest'
+      responses:
+        '201':
+          description: Authorize URL issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OauthStartResponse'
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /tenants/{tenantId}/accounts:oauth-complete:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    post:
+      tags: [accounts]
+      operationId: completeAccountOauth
+      summary: Complete central OAuth enrollment
+      description: |
+        Step 2 of §5.5. AMS exchanges the pasted authorization code together with
+        the stored verifier for a complete credential set (access + refresh +
+        expiry + full scopes + account/organization metadata), encrypts it into
+        `accounts.encrypted_secret`, and returns the created account with the
+        secret masked. The code has a short TTL and is discarded if unused.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OauthCompleteRequest'
+      responses:
+        '201':
+          description: Account created from the exchanged credential set, secret masked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          description: Code rejected or expired, or the verifier session is gone.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ---------------------------------------------------------------------------
+  # Servers
+  # ---------------------------------------------------------------------------
+  /tenants/{tenantId}/servers:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [servers]
+      operationId: listServers
+      summary: List AMA servers
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ServerStatus'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of servers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerPage'
+    post:
+      tags: [servers]
+      operationId: createServer
+      summary: Register an AMA server
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerCreate'
+      responses:
+        '201':
+          description: Server created. No credential is issued yet — see `/enroll-token`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tenants/{tenantId}/servers/{serverId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [servers]
+      operationId: getServer
+      summary: Get an AMA server
+      responses:
+        '200':
+          description: Server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [servers]
+      operationId: updateServer
+      summary: Update an AMA server
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerUpdate'
+      responses:
+        '200':
+          description: Updated server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [servers]
+      operationId: deleteServer
+      summary: Delete an AMA server
+      description: Rejected while accounts are still assigned to it; recall them first.
+      responses:
+        '204':
+          description: Deleted.
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tenants/{tenantId}/servers/{serverId}/enroll-token:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [servers]
+      operationId: issueEnrollToken
+      summary: Issue a one-shot enrollment token
+      description: |
+        The plaintext token is returned exactly once and cannot be retrieved
+        again — only its hash is stored (§7). The agent presents it on its first
+        `Register` and exchanges it for a long-lived server credential bound to
+        this tenant.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollTokenRequest'
+      responses:
+        '201':
+          description: Token issued. Shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollTokenResponse'
+
+  /tenants/{tenantId}/servers/{serverId}/usage:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [servers]
+      operationId: getServerUsage
+      summary: Get the latest usage snapshot
+      description: |
+        Served from the AMS database cache, which is fed by the agent's 5-minute
+        reports. This never reaches out to the agent — use `:refresh-usage` for
+        that. The payload conforms to
+        `contracts/schemas/usage-report.schema.json`.
+      responses:
+        '200':
+          description: Most recent usage report recorded for this server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSnapshot'
+        '404':
+          description: No report has been received from this server yet.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tenants/{tenantId}/servers/{serverId}:refresh-usage:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [servers]
+      operationId: refreshServerUsage
+      summary: Ask the agent to report now
+      description: |
+        Sends `RequestReport` over the gRPC session (AMA-2 manual query). Returns
+        as soon as the command is queued; the report arrives asynchronously and
+        then shows up on `GET /usage`.
+      responses:
+        '202':
+          description: Command queued for the agent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '409':
+          description: The agent has no live session.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tenants/{tenantId}/servers/{serverId}:switch-mode:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [servers]
+      operationId: setSwitchMode
+      summary: Switch between auto and manual
+      description: |
+        Mode is a server property, not an account property, because
+        `tsamx auto` operates on the whole local pool (§5.2). `auto` starts the
+        agent's `tsamx auto --once` tick loop; `manual` stops it. No assignment
+        state changes. To exclude a single account from rotation, use
+        `:deactivate` or the assignment's `pinned` flag instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwitchModeRequest'
+      responses:
+        '202':
+          description: Command queued for the agent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '409':
+          description: The agent has no live session.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ---------------------------------------------------------------------------
+  # Assignments
+  # ---------------------------------------------------------------------------
+  /tenants/{tenantId}/assignments:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [assignments]
+      operationId: listAssignments
+      summary: List assignments
+      parameters:
+        - name: serverId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: accountId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: state
+          in: query
+          schema:
+            $ref: '#/components/schemas/AssignmentState'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of assignments.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentPage'
+    post:
+      tags: [assignments]
+      operationId: createAssignment
+      summary: Create an assignment
+      description: |
+        Creates the row in `pending`; nothing is sent to the agent until
+        `:deliver`. An account and a server from different tenants cannot be
+        assigned to each other — the composite foreign keys of §5.1 make the
+        insert fail in the database, independently of any service-layer check.
+        One account can be assigned to at most one server at a time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignmentCreate'
+      responses:
+        '201':
+          description: Assignment created in `pending`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '409':
+          description: The account is already assigned, or the account and server belong to different tenants.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tenants/{tenantId}/assignments/{assignmentId}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AssignmentId'
+    get:
+      tags: [assignments]
+      operationId: getAssignment
+      summary: Get an assignment
+      responses:
+        '200':
+          description: Assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [assignments]
+      operationId: updateAssignment
+      summary: Update assignment scheduling flags
+      description: |
+        Currently only `pinned`. That flag is AMS-internal and is never put on
+        the wire as such — AMS translates it into the agent's desired allocation
+        (pinned means the account stays installed but out of rotation, i.e.
+        `tsamx disable`). Changing it therefore issues a `SetAccountActive`
+        command, and the assignment converges on the agent's ack exactly as
+        `:activate` / `:deactivate` do.
+
+        `state` is not settable here; use the action endpoints for transitions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignmentUpdate'
+      responses:
+        '200':
+          description: Updated assignment. A command may still be in flight — see `pendingCommandId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tenants/{tenantId}/assignments/{assignmentId}:deliver:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AssignmentId'
+    post:
+      tags: [assignments]
+      operationId: deliverAssignment
+      summary: Push the account to its agent
+      description: |
+        `pending` → `delivering`. AMS decrypts the stored credential set,
+        re-encrypts it for the target agent (AES-256-GCM, AAD bound to
+        account + agent, §6.2) and sends `DeliverAccount`. The agent writes the
+        credential files and runs `tsamx add`; the slot number is assigned
+        locally and AMS never sees or names it (§2.4-3). On the agent's ack the
+        state becomes `active`.
+      responses:
+        '202':
+          description: Command queued; assignment moved to `delivering`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '409': { $ref: '#/components/responses/InvalidStateTransition' }
+
+  /tenants/{tenantId}/assignments/{assignmentId}:recall:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AssignmentId'
+    post:
+      tags: [assignments]
+      operationId: recallAssignment
+      summary: Withdraw the account from its agent
+      description: |
+        `{active, inactive, quarantined}` → `recalling` → `detached` on ack. If
+        the account is the live credential, the agent switches away first, then
+        runs `tsamx remove`. The row is kept after detaching, for audit.
+      responses:
+        '202':
+          description: Command queued; assignment moved to `recalling`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '409': { $ref: '#/components/responses/InvalidStateTransition' }
+
+  /tenants/{tenantId}/assignments/{assignmentId}:activate:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AssignmentId'
+    post:
+      tags: [assignments]
+      operationId: activateAssignment
+      summary: Return the account to rotation
+      description: '`inactive` → `active`. Agent runs `tsamx enable`.'
+      responses:
+        '202':
+          description: Command queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '409': { $ref: '#/components/responses/InvalidStateTransition' }
+
+  /tenants/{tenantId}/assignments/{assignmentId}:deactivate:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AssignmentId'
+    post:
+      tags: [assignments]
+      operationId: deactivateAssignment
+      summary: Exclude the account from rotation
+      description: |
+        `active` → `inactive`. Agent runs `tsamx disable`; the credential stays
+        installed, only rotation skips it.
+      responses:
+        '202':
+          description: Command queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '409': { $ref: '#/components/responses/InvalidStateTransition' }
+
+  /tenants/{tenantId}/assignments/{assignmentId}:recover:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AssignmentId'
+    post:
+      tags: [assignments]
+      operationId: recoverAssignment
+      summary: Bring a quarantined account back
+      description: |
+        `quarantined` → `active` (§5.2). Implemented as
+        `SetAccountActive(active, clear_quarantine)` to the agent; the state
+        moves on the ack, not on this call.
+      responses:
+        '202':
+          description: Command queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Assignment'
+        '409': { $ref: '#/components/responses/InvalidStateTransition' }
+
+  /tenants/{tenantId}/assignments/{assignmentId}:switch-now:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AssignmentId'
+    post:
+      tags: [assignments]
+      operationId: switchNow
+      summary: Switch to this account immediately
+      description: |
+        Manual switch (`tsamx switch <email>`). A non-state command: no
+        assignment state changes, only `accounts.last_switched_at` is updated
+        when the agent confirms (§5.2).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwitchNowRequest'
+      responses:
+        '202':
+          description: Command queued for the agent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandAccepted'
+        '409':
+          description: The agent has no live session, or the assignment is not installed on it.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Administrator session token. Tenant RBAC is enforced per request (§7).
+
+  parameters:
+    TenantId:
+      name: tenantId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AssignmentId:
+      name: assignmentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    PageToken:
+      name: pageToken
+      in: query
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Authenticated but not permitted for this tenant.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No such resource in this tenant.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Conflicts with current state.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InvalidStateTransition:
+      description: Not a legal transition from the assignment's current state (§5.2).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      description: RFC 9457 problem detail.
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          default: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri
+        code:
+          description: Stable machine-readable code, e.g. `assignment.invalid_transition`.
+          type: string
+
+    PageInfo:
+      type: object
+      properties:
+        nextPageToken:
+          description: Absent on the last page.
+          type: string
+        totalSize:
+          type: integer
+
+    # -- Tenant ---------------------------------------------------------------
+    TenantStatus:
+      type: string
+      enum: [active, suspended]
+
+    Tenant:
+      type: object
+      required: [id, name, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/TenantStatus'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    TenantCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+
+    TenantUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/TenantStatus'
+
+    TenantPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tenant'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    # -- Account --------------------------------------------------------------
+    CredentialType:
+      description: '`setup_token` is retired — it produces an incomplete credential set that interactive Claude Code does not accept as a login (§2.4-5, D3).'
+      type: string
+      enum: [oauth, api_key]
+
+    AccountStatus:
+      type: string
+      enum: [available, assigned, disabled, quarantined]
+
+    Account:
+      description: |
+        Read model. `encrypted_secret` is never exposed — `secretMasked` carries a
+        non-reversible hint only, for the console to show which credential is
+        stored.
+      type: object
+      required: [id, tenantId, email, credentialType, status, secretMasked]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        email:
+          description: The AMS↔AMA mapping key, together with the account UUID. Never a tsamx slot number (§2.4-3).
+          type: string
+          format: email
+        credentialType:
+          $ref: '#/components/schemas/CredentialType'
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        secretMasked:
+          description: 'Masked placeholder, e.g. `sk-ant-oat01-…AB3F`. Always masked; the plaintext credential set never leaves AMS except inside an encrypted DeliverAccount envelope.'
+          type: string
+          readOnly: true
+          examples: ['oauth:…AB3F']
+        accountUuid:
+          type: string
+          format: uuid
+          readOnly: true
+        organizationName:
+          type: string
+          readOnly: true
+        scopes:
+          description: Scopes present in the stored credential set. Metadata only.
+          type: array
+          readOnly: true
+          items:
+            type: string
+        credentialExpiresAt:
+          description: Access-token expiry from the stored credential set. Refresh-token rotation is open item O9.
+          type: string
+          format: date-time
+          readOnly: true
+        lastSwitchedAt:
+          type: string
+          format: date-time
+          readOnly: true
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    AccountCreate:
+      type: object
+      required: [email, credentialType, secret]
+      properties:
+        email:
+          type: string
+          format: email
+        credentialType:
+          $ref: '#/components/schemas/CredentialType'
+        secret:
+          description: |
+            Write-only. For `oauth`, the complete credential set JSON
+            (accessToken, refreshToken, expiresAt, scopes, account metadata) —
+            the same shape `claude login` writes. For `api_key`, the raw key.
+            Encrypted at rest with `AMX_ENCRYPTION_KEY` and never returned.
+          type: string
+          writeOnly: true
+
+    AccountUpdate:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        secret:
+          description: Write-only; replaces the stored credential set.
+          type: string
+          writeOnly: true
+
+    AccountPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Account'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    OauthStartRequest:
+      type: object
+      properties:
+        label:
+          description: Optional note shown in the console while the flow is pending.
+          type: string
+
+    OauthStartResponse:
+      type: object
+      required: [flowId, authorizeUrl, expiresAt]
+      properties:
+        flowId:
+          description: Identifies the pending flow. Pass it back to `:oauth-complete`.
+          type: string
+        authorizeUrl:
+          description: Open in a browser, log in, then paste the returned code into `:oauth-complete`.
+          type: string
+          format: uri
+        expiresAt:
+          description: After this the verifier is destroyed and the flow must be restarted.
+          type: string
+          format: date-time
+
+    OauthCompleteRequest:
+      type: object
+      required: [flowId, code]
+      properties:
+        flowId:
+          type: string
+        code:
+          description: Authorization code pasted by the administrator. Short-lived, single-use.
+          type: string
+          writeOnly: true
+        email:
+          description: Overrides the email derived from the exchanged credential set, when they differ.
+          type: string
+          format: email
+
+    # -- Server ---------------------------------------------------------------
+    ServerStatus:
+      type: string
+      enum: [online, offline, degraded]
+
+    SwitchMode:
+      type: string
+      enum: [auto, manual]
+
+    Server:
+      type: object
+      required: [id, tenantId, name, switchMode, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        hostname:
+          type: string
+        switchMode:
+          $ref: '#/components/schemas/SwitchMode'
+        status:
+          $ref: '#/components/schemas/ServerStatus'
+        agentId:
+          description: Set once the agent has enrolled.
+          type: string
+          readOnly: true
+        agentVersion:
+          type: string
+          readOnly: true
+        tsamxVersion:
+          type: string
+          readOnly: true
+        enrolled:
+          description: True once a long-lived server credential has been exchanged.
+          type: boolean
+          readOnly: true
+        lastSeenAt:
+          type: string
+          format: date-time
+          readOnly: true
+        assignedAccountCount:
+          type: integer
+          readOnly: true
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    ServerCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        switchMode:
+          $ref: '#/components/schemas/SwitchMode'
+
+    ServerUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        status:
+          $ref: '#/components/schemas/ServerStatus'
+
+    ServerPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Server'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    EnrollTokenRequest:
+      type: object
+      properties:
+        ttlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 604800
+          default: 3600
+
+    EnrollTokenResponse:
+      type: object
+      required: [token, expiresAt]
+      properties:
+        token:
+          description: Plaintext, returned once and never again — only its hash is stored (§7).
+          type: string
+          readOnly: true
+        expiresAt:
+          type: string
+          format: date-time
+        amsEndpoint:
+          description: gRPC endpoint the agent should dial (outbound only, TLS/443).
+          type: string
+
+    SwitchModeRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          $ref: '#/components/schemas/SwitchMode'
+
+    UsageSnapshot:
+      description: Stored usage report. `payload` is the agent's report verbatim, validated against contracts/schemas/usage-report.schema.json.
+      type: object
+      required: [serverId, reportType, reportedAt, payload]
+      properties:
+        id:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        reportType:
+          type: string
+          enum: [usage, switch_event]
+        reportedAt:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: true
+
+    # -- Assignment -----------------------------------------------------------
+    AssignmentState:
+      description: §5.2 state machine. `detached` is terminal; the row is retained for audit.
+      type: string
+      enum:
+        - pending
+        - delivering
+        - active
+        - inactive
+        - quarantined
+        - recalling
+        - detached
+
+    Assignment:
+      type: object
+      required: [id, tenantId, accountId, serverId, state]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/AssignmentState'
+        pinned:
+          description: |
+            Excluded from auto rotation while installed (§5.2). AMS-internal:
+            it is translated into the agent's desired allocation rather than
+            sent as its own field, so the agent has a single source of truth for
+            whether an account rotates.
+          type: boolean
+          default: false
+        deliveredAt:
+          type: string
+          format: date-time
+          readOnly: true
+        ackedAt:
+          type: string
+          format: date-time
+          readOnly: true
+        lastError:
+          description: Last failure detail from the agent. Never contains credential material (§7).
+          type: string
+          readOnly: true
+        pendingCommandId:
+          description: Command awaiting convergence; the state advances on the agent's CommandAck.
+          type: string
+          readOnly: true
+
+    AssignmentUpdate:
+      type: object
+      properties:
+        pinned:
+          description: Exclude from (or return to) auto rotation without recalling the credential.
+          type: boolean
+
+    AssignmentCreate:
+      type: object
+      required: [accountId, serverId]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        pinned:
+          type: boolean
+          default: false
+        deliverImmediately:
+          description: Create and deliver in one call, skipping a separate `:deliver`.
+          type: boolean
+          default: false
+
+    AssignmentPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Assignment'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    SwitchNowRequest:
+      type: object
+      properties:
+        strategy:
+          description: Omit to switch to this assignment's own account. `best` / `next_available` delegate candidate ranking to the tsamx engine instead.
+          type: string
+          enum: [best, next_available]
+
+    CommandAccepted:
+      description: |
+        A command was queued on the agent's session. Convergence is reported later
+        by the agent's CommandAck and is not part of this response.
+      type: object
+      required: [commandId, acceptedAt]
+      properties:
+        commandId:
+          description: Idempotency key carried to the agent; a repeat is a no-op there.
+          type: string
+        acceptedAt:
+          type: string
+          format: date-time
+        serverId:
+          type: string
+          format: uuid

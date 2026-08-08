@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amx.io/contracts/schemas/v1/switch-event.schema.json",
+  "title": "AMX AccountEvent (switch event)",
+  "description": "AMA -> AMS immediate account event (docs/AMX-DESIGN.md §6.5). Pushed as soon as it is detected, independent of the 5-minute report cadence. Detection is dual (§6.4): comparing `tsamx status --json` around each `tsamx auto --once` tick, plus fsnotify on autoswitch_state.json. While AMS is unreachable, events queue in the encrypted outbox and are flushed on reconnect, deduplicated by eventId. JSON mirror of amx.v1.AccountEvent in contracts/proto/amx.proto.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "reportType",
+    "agentId",
+    "eventId",
+    "occurredAt",
+    "event"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "reportType": {
+      "type": "string",
+      "const": "switch_event"
+    },
+    "agentId": {
+      "$ref": "common.schema.json#/$defs/agentId"
+    },
+    "eventId": {
+      "description": "Outbox dedupe key. AMS MUST ignore a repeated eventId — offline flush can resend.",
+      "type": "string",
+      "pattern": "^evt_[A-Za-z0-9_-]{1,64}$"
+    },
+    "occurredAt": {
+      "description": "When the event happened locally, not when it was transmitted (they differ after an offline queue flush).",
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "switch = active credential changed; quarantine = tsamx isolated an account; all_exhausted = every account is at or above the threshold.",
+          "type": "string",
+          "enum": ["switch", "quarantine", "all_exhausted"]
+        },
+        "trigger": {
+          "description": "at-limit = utilization crossed the 95% threshold (D10); manual = AMS SwitchNow; failover = previous account failed.",
+          "type": "string",
+          "enum": ["at-limit", "manual", "failover"]
+        },
+        "from": {
+          "description": "Account that was active before. Absent on the first activation and on all_exhausted. Identified by email alone — a quarantine detected from tsamx state may not carry the AMS id.",
+          "$ref": "common.schema.json#/$defs/accountRef",
+          "required": ["email"]
+        },
+        "to": {
+          "description": "Account that became active. Absent on quarantine and all_exhausted.",
+          "$ref": "common.schema.json#/$defs/accountRef",
+          "required": ["email"]
+        },
+        "detail": {
+          "description": "Human-readable context for the audit trail. MUST NOT contain credential material (§7).",
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "switch"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "required": ["trigger", "to"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "quarantine"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "required": ["from"]
+          }
+        }
+      ]
+    },
+    "poolSummary": {
+      "$ref": "common.schema.json#/$defs/poolSummary",
+      "required": ["allExhausted", "maxUtilizationPct"]
+    }
+  }
+}
