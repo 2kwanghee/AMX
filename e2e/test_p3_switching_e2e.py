@@ -136,9 +136,12 @@ class Server:
     def deliver(self, email: str) -> None:
         """Assign then deliver one account and wait for it to go active.
 
-        Sequential (waits for active) so tsamx's slot numbering follows the
-        delivery order deterministically: the first delivered account is slot 1,
-        the second slot 2, and the last delivered is the active one.
+        Sequential (waits for the assignment to reach ``active``) so tsamx's slot
+        numbering follows delivery order deterministically: the first delivered
+        account is slot 1, the second slot 2, and so on. Note (B1a): deliver no
+        longer changes which account is *live* — the first delivered account stays
+        active and later deliveries restore it, so tests that need a specific live
+        account deliver it first.
         """
         response = self.client.post(
             self.base("/assignments"),
@@ -267,17 +270,21 @@ def test_threshold_delivery_drives_a_switch_event(make_server):
     and the policy is delivered; flipping to auto then starts the scheduler.
     """
     server = make_server("switch", switch_mode="manual")
-    low = "cand@p3.e2e.example"     # slot 1 (delivered first): the switch target
-    high = "active@p3.e2e.example"  # slot 2 (delivered last): active, over limit
+    high = "active@p3.e2e.example"  # slot 1 (delivered first): active, over limit
+    low = "cand@p3.e2e.example"     # slot 2 (delivered last): the switch target
 
-    server.add_account(low, with_token=True)
     server.add_account(high, with_token=True)
-    server.deliver(low)
+    server.add_account(low, with_token=True)
+    # B1a: deliver no longer activates the last-delivered account — it restores the
+    # previously-active one. Deliver the over-limit account FIRST so it stays active
+    # (no prior active to restore to); delivering the candidate second restores the
+    # runner's active back to `high`. Slot numbers still follow delivery order.
     server.deliver(high)
+    server.deliver(low)
     assert server.active_email() == high, _report(server.host, "high account is not active pre-tick")
 
-    # Preseed usage: active (slot 2) at 91%, candidate (slot 1) at 5%.
-    preseed_usage(server.host, [("1", low, 5.0), ("2", high, 91.0)])
+    # Preseed usage: active (slot 1) at 91%, candidate (slot 2) at 5%.
+    preseed_usage(server.host, [("1", high, 91.0), ("2", low, 5.0)])
 
     # Deliver the policy, then start the scheduler. Both are queued in order, so
     # the threshold is applied before the first tick evaluates it.
@@ -308,11 +315,14 @@ def test_all_accounts_exhausted_emits_critical_event(make_server):
     b = "b@p3ex.e2e.example"
     server.add_account(a, with_token=True)
     server.add_account(b, with_token=True)
-    server.deliver(a)
+    # B1a: deliver `b` first so it stays active (no prior active to restore to);
+    # delivering `a` second restores the runner's active back to `b`. Slots follow
+    # delivery order, so b=slot 1 and a=slot 2.
     server.deliver(b)
+    server.deliver(a)
 
     # Both accounts pinned at 100%: nothing to switch to.
-    preseed_usage(server.host, [("1", a, 100.0), ("2", b, 100.0)])
+    preseed_usage(server.host, [("1", b, 100.0), ("2", a, 100.0)])
     server.set_policy(threshold_pct=90.0, default_strategy="best")
     server.set_mode("auto")
 
@@ -337,10 +347,13 @@ def test_manual_mode_never_ticks(make_server):
     high = "high@p3man.e2e.example"
     server.add_account(low, with_token=True)
     server.add_account(high, with_token=True)
-    server.deliver(low)
+    # B1a: deliver `high` first so it stays active; `low` second restores active to
+    # `high`. deliver's restore uses the bridge switch directly and emits NO switch
+    # AccountEvent, so the "no switch event" assertion below still holds.
     server.deliver(high)
+    server.deliver(low)
 
-    preseed_usage(server.host, [("1", low, 5.0), ("2", high, 91.0)])
+    preseed_usage(server.host, [("1", high, 91.0), ("2", low, 5.0)])
     # Policy delivered, but mode stays manual — no scheduler, no tick.
     server.set_policy(threshold_pct=90.0, default_strategy="best")
 
