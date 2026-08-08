@@ -1,0 +1,124 @@
+"""Assignment CRUD and the §5.2 transition stubs.
+
+`deliverImmediately` on create is accepted by the contract but cannot be
+honoured in P1 — delivery needs the channel. Rather than silently ignore it (a
+caller would believe the account was pushed) the request is rejected.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from fastapi import APIRouter, Query
+
+from app import schemas
+from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.v1.stubs import requires_channel
+from app.core.errors import bad_request
+from app.services import inventory
+
+router = APIRouter(prefix="/tenants/{tenant_id}", tags=["assignments"], dependencies=[AdminAuth])
+
+
+@router.get("/assignments", response_model=schemas.AssignmentPage)
+def list_assignments(
+    tenant_id: uuid.UUID,
+    db: DbSession,
+    serverId: uuid.UUID | None = Query(default=None),  # noqa: N803
+    accountId: uuid.UUID | None = Query(default=None),  # noqa: N803
+    state: schemas.AssignmentState | None = Query(default=None),
+    pageSize: PageSize = 50,  # noqa: N803
+    pageToken: PageToken = None,  # noqa: N803
+):
+    offset = offset_from_token(pageToken)
+    items, total = inventory.list_assignments(
+        db,
+        tenant_id,
+        server_id=serverId,
+        account_id=accountId,
+        state=state,
+        limit=pageSize,
+        offset=offset,
+    )
+    return schemas.AssignmentPage(
+        items=[schemas.Assignment.model_validate(a) for a in items],
+        page_info=schemas.PageInfo(
+            next_page_token=next_page_token(offset, pageSize, total), total_size=total
+        ),
+    )
+
+
+@router.post("/assignments", response_model=schemas.Assignment, status_code=201)
+def create_assignment(tenant_id: uuid.UUID, body: schemas.AssignmentCreate, db: DbSession):
+    if body.deliver_immediately:
+        raise bad_request(
+            "assignment.deliver_immediately_unsupported",
+            "deliverImmediately requires the AMS↔AMA channel (P2). Create the "
+            "assignment without it; it stays in `pending`.",
+        )
+    assignment = inventory.create_assignment(
+        db, tenant_id, account_id=body.account_id, server_id=body.server_id, pinned=body.pinned
+    )
+    return schemas.Assignment.model_validate(assignment)
+
+
+@router.get("/assignments/{assignment_id}", response_model=schemas.Assignment)
+def get_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+    return schemas.Assignment.model_validate(
+        inventory.get_assignment(db, tenant_id, assignment_id)
+    )
+
+
+@router.patch("/assignments/{assignment_id}", response_model=schemas.Assignment)
+def update_assignment(
+    tenant_id: uuid.UUID,
+    assignment_id: uuid.UUID,
+    body: schemas.AssignmentUpdate,
+    db: DbSession,
+):
+    # The contract notes that `pinned` also issues a SetAccountActive command;
+    # in P1 only the AMS-side flag is recorded, and it converges on nothing.
+    return schemas.Assignment.model_validate(
+        inventory.update_assignment(db, tenant_id, assignment_id, pinned=body.pinned)
+    )
+
+
+@router.post("/assignments/{assignment_id}:deliver", summary="deliver (P2)")
+def deliver_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+    inventory.get_assignment(db, tenant_id, assignment_id)
+    raise requires_channel("assignment.deliver", "POST .../assignments/{id}:deliver")
+
+
+@router.post("/assignments/{assignment_id}:recall", summary="recall (P2)")
+def recall_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+    inventory.get_assignment(db, tenant_id, assignment_id)
+    raise requires_channel("assignment.recall", "POST .../assignments/{id}:recall")
+
+
+@router.post("/assignments/{assignment_id}:activate", summary="activate (P2)")
+def activate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+    inventory.get_assignment(db, tenant_id, assignment_id)
+    raise requires_channel("assignment.activate", "POST .../assignments/{id}:activate")
+
+
+@router.post("/assignments/{assignment_id}:deactivate", summary="deactivate (P2)")
+def deactivate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+    inventory.get_assignment(db, tenant_id, assignment_id)
+    raise requires_channel("assignment.deactivate", "POST .../assignments/{id}:deactivate")
+
+
+@router.post("/assignments/{assignment_id}:recover", summary="recover (P2)")
+def recover_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+    inventory.get_assignment(db, tenant_id, assignment_id)
+    raise requires_channel("assignment.recover", "POST .../assignments/{id}:recover")
+
+
+@router.post("/assignments/{assignment_id}:switch-now", summary="switch-now (P2)")
+def switch_now(
+    tenant_id: uuid.UUID,
+    assignment_id: uuid.UUID,
+    db: DbSession,
+    body: schemas.SwitchNowRequest | None = None,
+):
+    inventory.get_assignment(db, tenant_id, assignment_id)
+    raise requires_channel("assignment.switch_now", "POST .../assignments/{id}:switch-now")
