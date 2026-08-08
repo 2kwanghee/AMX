@@ -272,6 +272,46 @@ def client(app_env: str):
         yield test_client
 
 
+@pytest.fixture(scope="session")
+def rest_server(app_env: str, signing_keys: dict[str, str], workdir: Path) -> str:
+    """The AMS REST API as a real HTTP process (uvicorn) on its own port.
+
+    P4's console E2E needs a URL the ams-web BFF can ``fetch``, so unlike the P2/P3
+    in-process ``TestClient`` this runs the same FastAPI app over the wire. It
+    shares the one PostgreSQL with the gRPC process, so an alert the agent opens
+    over gRPC is visible to a REST reader here — the coupling is the database, as
+    in production.
+    """
+    port = _free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "AMX_DATABASE_URL": app_env,
+            "AMX_ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
+            "AMX_ADMIN_TOKEN": TEST_ADMIN_TOKEN,
+            "AMX_SIGNING_KEY": signing_keys["signing_key"],
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    log_dir = workdir / "logs"
+    log_dir.mkdir(exist_ok=True)
+    proc = Process(
+        "ams-rest",
+        [
+            sys.executable, "-m", "uvicorn", "app.main:create_app", "--factory",
+            "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning",
+        ],
+        env,
+        AMS_SERVER,
+        log_dir,
+    )
+    try:
+        _wait_port(port, proc, timeout_s=30)
+        yield f"http://127.0.0.1:{port}/api/v1"
+    finally:
+        proc.stop()
+
+
 # -- Agent hosts --------------------------------------------------------------
 class AgentHost:
     """One simulated server: an isolated Claude config home plus its ama daemon.

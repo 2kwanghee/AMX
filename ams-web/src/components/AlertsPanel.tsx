@@ -31,8 +31,8 @@ export function AlertsPanel({ tenantId }: { tenantId: string }) {
     <div className="panel">
       <h2>Alerts</h2>
       {error && (
-        <p className="muted">
-          Alerts API not reachable yet (Track A). Panel wired to <code>GET /alerts</code>.
+        <p className="err">
+          Could not load alerts: {error instanceof Error ? error.message : 'request failed'}.
         </p>
       )}
       {act.error && <p className="err">{act.error}</p>}
