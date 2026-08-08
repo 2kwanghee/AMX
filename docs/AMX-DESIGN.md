@@ -455,6 +455,11 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
   키(KEK)는 AMS가 세션 수립 시 전달하고 **메모리에만 보관** → 오프박스 파일 사본은 복호 불가,
   무인 재부팅 시 AMS 재연결 없이는 로컬 계정 정보를 열 수 없다("AMS 없이는 변경 불가" 부합).
   (대안 TPM/systemd-cred 봉인은 O1에서 **미채택** — 메모리 전용 확정, §8)
+  KEK 전달은 **에이전트별 ephemeral X25519 sealed box 봉인**(C2): AMA가 연결마다 X25519 키쌍을
+  생성해 공개키를 `Register.agent_public_key`에 싣고, AMS는 그 공개키로 세션 KEK를 NaCl sealed box
+  봉인해 `SessionSetup.WrappedKey`로 전달한다. TLS를 종단하는 앞단(로드밸런서 등)에서도 KEK가
+  평문으로 노출되지 않는다. 개인키는 세션 스코프 메모리 전용(재연결마다 교체). 공개키를 제시하지
+  않는 세션은 거부되며, `AMX_ALLOW_RAW_KEK`(dev 전용) 원시 폴백은 프로덕션에서 사용 금지.
 - **권위 강제는 암호화가 아니라 서명**: 매니페스트와 모든 명령에 AMS Ed25519 서명,
   AMA는 빌드에 내장된 공개키로 검증 후에만 적용. 위조 매니페스트는 검증 실패.
 - **정합 동기화 (등록분만 사용 강제)**: 매 리포트 틱마다 `tsamx list --json`과 매니페스트를 대조.
@@ -579,7 +584,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | 계층 | 설계 |
 |---|---|
 | At-rest (AMS) | `accounts.encrypted_secret`을 전용 `AMX_ENCRYPTION_KEY`(Fernet 또는 AES-GCM)로 암호화. 인증용 시크릿과 **분리**(키 로테이션 독립). SaaS 단계: 테넌트별 DEK를 KEK(KMS)로 감싸는 봉투암호화 |
-| In-transit | gRPC TLS 필수 + 앱 계층 Ed25519 명령 서명. credential 세트는 deliver/재주입 시에만 스트림에 실리고 채널·로그에 저장되지 않음. **토큰/credential은 절대 로깅 금지** |
+| In-transit | gRPC TLS 필수(§B4 — one-way 기본, mTLS 옵션·defense-in-depth) + 앱 계층 Ed25519 명령 서명. **세션 KEK는 에이전트별 ephemeral X25519 sealed box로 봉인**(C2, §6.2) — TLS 종단 앞단에서도 KEK 평문 없음. credential 세트는 deliver/재주입 시에만 스트림에 실리고 채널·로그에 저장되지 않음. **토큰/credential/KEK는 절대 로깅 금지**. **위협 경계**: sealed box는 익명 봉투라 발신자 신원을 바인딩하지 않으므로 *선의의 종단 프록시*까지만 방어한다 — 능동 MITM이 `Register.agent_public_key`를 치환하는 공격은 TLS(특히 mTLS, §B4)가 막는다 |
 | 등록 플로우 (§5.5) | PKCE verifier는 서버 세션 보관·**1회용**(교환 성공/실패 시 즉시 폐기). authorize 코드는 짧은 TTL 내 교환, 미사용 시 폐기. `:oauth-start`/`:oauth-complete`는 관리자 인증 + 테넌트 RBAC 필수 |
 | At-rest (AMA) | AES-256-GCM 매니페스트 + AAD 바인딩 + KEK 메모리 보관 (§6.2) |
 | AMA 인증 | 1회성 enroll-token(발급 시 해시만 DB 저장) → 최초 등록 시 장수명 server credential 교환 → 이후 세션은 credential 제시. credential은 서버측에서 tenant_id에 바인딩 |
