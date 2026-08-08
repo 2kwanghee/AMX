@@ -187,9 +187,19 @@ func run() error {
 
 	// Usage report ticker (§6.5): every 5 minutes, project the local pool and
 	// send it non-blocking. A drop while disconnected is harmless — the next tick
-	// supersedes it (design note §8).
+	// supersedes it (design note §8). AMX_REPORT_INTERVAL overrides the cadence
+	// (a Go duration); unset/invalid keeps the 5-minute default. A test hook to
+	// force a prompt report/resync tick — production leaves it unset.
+	repInterval := reportInterval
+	if v := os.Getenv("AMX_REPORT_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			repInterval = d
+		} else {
+			log.Printf("AMX_REPORT_INTERVAL %q: invalid (using default)", v)
+		}
+	}
 	go func() {
-		t := time.NewTicker(reportInterval)
+		t := time.NewTicker(repInterval)
 		defer t.Stop()
 		for {
 			select {
