@@ -176,6 +176,19 @@ func NewNonce() ([]byte, error) {
 	return n, nil
 }
 
+// WireAAD derives the additional authenticated data for a credential envelope
+// received from AMS (proto EncryptedCredential §6.2). Both components come from
+// values the agent already holds — the ams_account_id of the command being
+// processed and its own agent_id — never from the wire aad_* fields.
+//
+// The NUL separator is the one AMS seals with (ams-server app/grpc/signing.py
+// build_aad). It must not drift from that definition or every deliver fails
+// authentication, and it is deliberately distinct from the manifest's own local
+// AAD (internal/store), which never crosses a process boundary.
+func WireAAD(amsAccountID, agentID string) []byte {
+	return []byte(amsAccountID + "\x00" + agentID)
+}
+
 // UnwrapKEK recovers the raw AES-256 KEK from the wrapped form delivered in
 // SessionSetup.WrappedKey.wrapped_key.
 //

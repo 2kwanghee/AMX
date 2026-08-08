@@ -95,7 +95,7 @@ func (hn *harness) deliverCmd(t *testing.T, cmdID, amsID, email string, desired 
 	if err != nil {
 		t.Fatal(err)
 	}
-	aad := []byte(amsID + "\x1f" + testAgentID)
+	aad := crypto.WireAAD(amsID, testAgentID)
 	plaintext := []byte(`{"accessToken":"tok-` + email + `"}`)
 	ct, err := crypto.Seal(hn.kek, nonce, plaintext, aad)
 	if err != nil {

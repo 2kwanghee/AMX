@@ -13,8 +13,14 @@ import (
 
 // tsamxAddRequest builds an AddRequest from a plaintext credential set. The
 // caller wipes plaintext after Add returns; the bridge copies what it needs.
-func tsamxAddRequest(email string, plaintext []byte, enable bool) tsamx.AddRequest {
-	return tsamx.AddRequest{Email: email, CredentialJSON: plaintext, Enable: enable}
+func tsamxAddRequest(ref *amxv1.AccountRef, organizationName string, plaintext []byte, enable bool) tsamx.AddRequest {
+	return tsamx.AddRequest{
+		Email:            ref.GetEmail(),
+		AccountUUID:      ref.GetAccountUuid(),
+		OrganizationName: organizationName,
+		CredentialJSON:   plaintext,
+		Enable:           enable,
+	}
 }
 
 // handleSessionSetup injects KEKs and persists any promoted server credential.
@@ -108,7 +114,7 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	if !ok {
 		return reject(ack, "no_kek", fmt.Errorf("key_id %q not held", ec.GetKeyId()))
 	}
-	aad := []byte(amsID + "\x1f" + h.agentID)
+	aad := crypto.WireAAD(amsID, h.agentID)
 	plaintext, err := crypto.Open(kek, ec.GetNonce(), ec.GetCiphertext(), aad)
 	for i := range kek {
 		kek[i] = 0
@@ -133,7 +139,7 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 
 	// Install via the bridge (critical section, §6.3). CredentialJSON is the
 	// plaintext set; the bridge writes it to the account's config home.
-	addErr := h.bridge.Add(ctx, tsamxAddRequest(ref.GetEmail(), plaintext, wantEnabled))
+	addErr := h.bridge.Add(ctx, tsamxAddRequest(ref, d.GetOrganizationName(), plaintext, wantEnabled))
 	wipe(plaintext) // wipe plaintext from memory (§6.3)
 	if addErr != nil {
 		h.setAccountState(ctx, ack, ref, desired)

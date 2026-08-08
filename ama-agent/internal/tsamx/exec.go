@@ -11,24 +11,44 @@ import (
 	"time"
 )
 
-// ExecBridge runs the real tsamx CLI. It is a P2 skeleton: List/Status parse
-// `--json` (the reporter's read path, exercised end to end), while the mutating
-// verbs exec the corresponding subcommand with per-account env injection.
+// EnvBinary names the tsamx executable when it is not on PATH (a venv shim, a
+// uv-managed install). Read once by NewExecBridge.
+const EnvBinary = "AMX_TSAMX_BIN"
+
+// ExecBridge runs the real tsamx CLI against one Claude config home — the
+// agent's own. Isolation between AMA instances is per *server*, not per account:
+// one tsamx pool per host, so CLAUDE_CONFIG_DIR / XDG_DATA_HOME come from the
+// daemon's environment and every verb sees the same pool.
 //
-// Tests never use this type — they use Fake — so a real tsamx install is not a
-// build- or unit-test dependency (design note §6, §8).
+// Unit tests use Fake instead, so a real tsamx install is not a build- or
+// unit-test dependency; the E2E suite exercises this type (design note §6, §8).
 type ExecBridge struct {
-	// Binary is the tsamx executable (default "tsamx").
+	// Binary is the tsamx executable (default $AMX_TSAMX_BIN, else "tsamx").
 	Binary string
-	// BaseEnv is the environment before per-account injection (default os.Environ()).
+	// BaseEnv is the environment every invocation inherits (default os.Environ()).
 	BaseEnv []string
+	// ConfigDir is the Claude config home tsamx reads and captures from
+	// (default $CLAUDE_CONFIG_DIR). Add stages the credential set here.
+	ConfigDir string
+	// DataHome is the tsamx backup root's XDG base (default $XDG_DATA_HOME).
+	DataHome string
 	// Timeout bounds a single CLI invocation (default 30s).
 	Timeout time.Duration
 }
 
-// NewExecBridge returns an ExecBridge with defaults filled in.
+// NewExecBridge returns an ExecBridge configured from the daemon's environment.
 func NewExecBridge() *ExecBridge {
-	return &ExecBridge{Binary: "tsamx", BaseEnv: os.Environ(), Timeout: 30 * time.Second}
+	binary := os.Getenv(EnvBinary)
+	if binary == "" {
+		binary = "tsamx"
+	}
+	return &ExecBridge{
+		Binary:    binary,
+		BaseEnv:   os.Environ(),
+		ConfigDir: os.Getenv("CLAUDE_CONFIG_DIR"),
+		DataHome:  os.Getenv("XDG_DATA_HOME"),
+		Timeout:   30 * time.Second,
+	}
 }
 
 func (b *ExecBridge) binary() string {
@@ -45,11 +65,18 @@ func (b *ExecBridge) timeout() time.Duration {
 	return b.Timeout
 }
 
-// env builds the process environment with optional per-account isolation.
+// env builds the process environment, letting a per-call override win over the
+// bridge-wide config home.
 func (b *ExecBridge) env(configDir, dataHome string) []string {
 	base := b.BaseEnv
 	if base == nil {
 		base = os.Environ()
+	}
+	if configDir == "" {
+		configDir = b.ConfigDir
+	}
+	if dataHome == "" {
+		dataHome = b.DataHome
 	}
 	env := append([]string(nil), base...)
 	if configDir != "" {
@@ -77,55 +104,86 @@ func (b *ExecBridge) run(ctx context.Context, env []string, args ...string) ([]b
 	return stdout.Bytes(), nil
 }
 
-// Add writes the credential set into the account's config home, then runs
-// `tsamx add`. Writing the credential file mirrors SSOT §6.3 (deliver installs
-// ~/.claude/.credentials.json before `tsamx add`).
+// claudeIdentity is the subset of Claude's global config that tsamx reads to
+// name the account it is about to capture (`oauthAccount` in `.claude.json`).
+type claudeIdentity struct {
+	OAuthAccount struct {
+		EmailAddress     string `json:"emailAddress"`
+		AccountUUID      string `json:"accountUuid"`
+		OrganizationUUID string `json:"organizationUuid"`
+		OrganizationName string `json:"organizationName"`
+	} `json:"oauthAccount"`
+}
+
+// Add installs one account into the local pool (SSOT §6.3 deliver).
 //
-// NOTE(P2 skeleton): the exact `tsamx add` argument surface for a pre-seeded
-// credential is finalized in the deployment track (O5). This installs the
-// credential file and invokes the verb; the credential is passed via file, never
-// as a CLI arg or a log line.
+// `tsamx add` captures whatever account the Claude config home currently holds
+// — it takes no identifier — so the bridge first stages that home: the
+// credential set into `.credentials.json` and the identity into `.claude.json`.
+// The credential travels by file, never as an argument or a log line (§7).
+//
+// AMS carries no organization UUID for an account, so every delivered account is
+// staged as a personal one; tsamx keys slots on (email, organizationUuid) and an
+// empty UUID is its personal-account value.
 func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
-	if req.ConfigDir != "" {
-		if err := os.MkdirAll(req.ConfigDir, 0o700); err != nil {
-			return err
-		}
-		credPath := filepath.Join(req.ConfigDir, ".credentials.json")
-		if err := os.WriteFile(credPath, req.CredentialJSON, 0o600); err != nil {
-			return err
-		}
+	configDir := req.ConfigDir
+	if configDir == "" {
+		configDir = b.ConfigDir
 	}
-	env := b.env(req.ConfigDir, req.DataHome)
-	if _, err := b.run(ctx, env, "add", req.Email, "--json"); err != nil {
+	if configDir == "" {
+		return fmt.Errorf("tsamx add %s: no Claude config home configured (set CLAUDE_CONFIG_DIR)", req.Email)
+	}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return err
 	}
+	if err := os.WriteFile(filepath.Join(configDir, ".credentials.json"), req.CredentialJSON, 0o600); err != nil {
+		return err
+	}
+	var identity claudeIdentity
+	identity.OAuthAccount.EmailAddress = req.Email
+	identity.OAuthAccount.AccountUUID = req.AccountUUID
+	identity.OAuthAccount.OrganizationName = req.OrganizationName
+	blob, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(configDir, ".claude.json"), blob, 0o600); err != nil {
+		return err
+	}
+
+	env := b.env(configDir, req.DataHome)
+	if _, err := b.run(ctx, env, "add"); err != nil {
+		return err
+	}
+	// `add` makes the new slot active and enabled; only a disabled desired state
+	// needs a follow-up verb.
 	if req.Enable {
-		return b.Enable(ctx, req.Email)
+		return nil
 	}
 	return b.Disable(ctx, req.Email)
 }
 
 // Remove runs `tsamx remove <account>`.
 func (b *ExecBridge) Remove(ctx context.Context, account string) error {
-	_, err := b.run(ctx, b.env("", ""), "remove", account, "--json")
+	_, err := b.run(ctx, b.env("", ""), "remove", account)
 	return err
 }
 
 // Enable runs `tsamx enable <account>`.
 func (b *ExecBridge) Enable(ctx context.Context, account string) error {
-	_, err := b.run(ctx, b.env("", ""), "enable", account, "--json")
+	_, err := b.run(ctx, b.env("", ""), "enable", account)
 	return err
 }
 
 // Disable runs `tsamx disable <account>`.
 func (b *ExecBridge) Disable(ctx context.Context, account string) error {
-	_, err := b.run(ctx, b.env("", ""), "disable", account, "--json")
+	_, err := b.run(ctx, b.env("", ""), "disable", account)
 	return err
 }
 
 // Switch runs `tsamx switch <target>`.
 func (b *ExecBridge) Switch(ctx context.Context, target string) error {
-	_, err := b.run(ctx, b.env("", ""), "switch", target, "--json")
+	_, err := b.run(ctx, b.env("", ""), "switch", target)
 	return err
 }
 
