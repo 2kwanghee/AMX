@@ -10,7 +10,7 @@ package amx.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/amx/amx/contracts/gen/go;amxv1";
+option go_package = "github.com/2kwanghee/AMX/contracts/gen/go;amxv1";
 option java_multiple_files = true;
 option java_package = "io.amx.v1";
 option csharp_namespace = "Amx.V1";

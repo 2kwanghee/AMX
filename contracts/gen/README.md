@@ -22,7 +22,7 @@ next `make all` overwrites it.
 
 | Path | Contents |
 |---|---|
-| `go/` | `amx.pb.go`, `amx_grpc.pb.go`, plus a `go.mod` making this an importable module (`github.com/amx/amx/contracts/gen/go`) |
+| `go/` | `amx.pb.go`, `amx_grpc.pb.go`, plus a `go.mod` making this an importable module (`github.com/2kwanghee/AMX/contracts/gen/go`) |
 | `python/` | `amx_pb2.py`, `amx_pb2.pyi`, `amx_pb2_grpc.py`, plus `pyproject.toml`/`uv.lock` pinning the generator |
 | `typescript/` | `src/amx.ts` and `src/google/protobuf/timestamp.ts`, plus `package.json`/`tsconfig.json` |
 
