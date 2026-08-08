@@ -10,8 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
+
+// deliverLockName is the file flock'd for the deliver critical section (B1b). It
+// is kept separate from the credential files so the runner never touches it.
+const deliverLockName = ".amx-deliver.lock"
 
 // EnvBinary names the tsamx executable when it is not on PATH (a venv shim, a
 // uv-managed install). Read once by NewExecBridge.
@@ -206,6 +211,39 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	tmpName = "" // renamed into place; skip cleanup
 	return nil
+}
+
+// DeliverLock implements Bridge.DeliverLock: an exclusive flock (LOCK_EX) over
+// <configDir>/.amx-deliver.lock, held for the deliver critical section (B1b). The
+// amx-claude wrapper takes a shared lock (LOCK_SH) on the same path before it
+// reads the credential, so it blocks for the (sub-second) swap rather than
+// reading a half-swapped or momentarily-new credential. When no config home is
+// configured there is nothing to protect, so the release is a no-op.
+func (b *ExecBridge) DeliverLock(_ context.Context) (func() error, error) {
+	configDir := b.ConfigDir
+	if configDir == "" {
+		return func() error { return nil }, nil
+	}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(configDir, deliverLockName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() error {
+		// Closing the fd releases the lock; unlock explicitly first for clarity.
+		unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		closeErr := f.Close()
+		if unlockErr != nil {
+			return unlockErr
+		}
+		return closeErr
+	}, nil
 }
 
 // Remove runs `tsamx remove <account>`.

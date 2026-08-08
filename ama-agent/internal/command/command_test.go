@@ -674,3 +674,39 @@ func countPrefix(calls []string, prefix string) int {
 	}
 	return n
 }
+
+func indexOfPrefix(calls []string, prefix string) int {
+	for i, c := range calls {
+		if len(c) >= len(prefix) && c[:len(prefix)] == prefix {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestDeliverHoldsDeliverLockAroundSwap (B1b): the deliver critical section takes
+// the cross-process deliver lock BEFORE staging the credential (Add) and releases
+// it only AFTER the active-account restore, so a runner cannot start up and read a
+// half-swapped credential.
+func TestDeliverHoldsDeliverLockAroundSwap(t *testing.T) {
+	hn := newHarness(t)
+	ctx := context.Background()
+	if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+		t.Fatal(err)
+	}
+	base := len(hn.fake.CallLog())
+	hn.apply(t, hn.deliverCmd(t, "d1", "acc-b", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	log := hn.fake.CallLog()[base:]
+
+	iLock := indexOfPrefix(log, "deliver_lock")
+	iAdd := indexOfPrefix(log, "add b@x.io")
+	iSwitch := indexOfPrefix(log, "switch a@x.io")
+	iUnlock := indexOfPrefix(log, "deliver_unlock")
+	if iLock < 0 || iAdd < 0 || iSwitch < 0 || iUnlock < 0 {
+		t.Fatalf("missing expected calls: %v", log)
+	}
+	if !(iLock < iAdd && iAdd < iSwitch && iSwitch < iUnlock) {
+		t.Fatalf("deliver lock did not bracket add+restore (lock=%d add=%d switch=%d unlock=%d): %v",
+			iLock, iAdd, iSwitch, iUnlock, log)
+	}
+}

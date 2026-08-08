@@ -158,6 +158,21 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 		return diverged(ack, "manifest_upsert", err)
 	}
 
+	// B1b: hold an exclusive cross-process lock over the runner's config home for
+	// the entire credential-swap critical section (Add writes the credential ->
+	// restore switches the active account back). A runner (claude) started through
+	// the amx-claude wrapper takes a shared lock on the same file before reading
+	// .credentials.json, so it cannot begin inside this window and read the
+	// momentarily-active new account. The engine lock only serializes AMA; this
+	// flock coordinates with the separate runner processes. Acquired after the
+	// idempotent-resend short-circuit (a no-op resend swaps nothing).
+	releaseLock, lockErr := h.bridge.DeliverLock(ctx)
+	if lockErr != nil {
+		wipe(plaintext)
+		return diverged(ack, "deliver_lock", lockErr)
+	}
+	defer func() { _ = releaseLock() }()
+
 	// Record the account the runner (Claude Code) is currently reading BEFORE Add.
 	// `tsamx add` makes the freshly-staged slot active (exec.go Add), so if we do
 	// not restore, the runner would be left on the NEW account and overcharged on

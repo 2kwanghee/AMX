@@ -1,0 +1,52 @@
+#!/bin/sh
+# amx-claude — launch Claude Code (the runner) under the AMX deliver lock (B1b).
+#
+# Why: when AMA delivers a new account it briefly stages that account's
+# credential into the shared Claude config home and, for a sub-second window,
+# makes it the live account before restoring the previously-active one (see
+# AMA handleDeliver / SSOT §6.3). A `claude` process that STARTS UP inside that
+# window would read the new account's `.credentials.json` and bill it by
+# mistake. B1a narrows the window to milliseconds; this wrapper closes it for
+# runners launched through it.
+#
+# How: AMA holds an EXCLUSIVE flock on `<CLAUDE_CONFIG_DIR>/.amx-deliver.lock`
+# for the whole swap. This wrapper takes a SHARED flock on the same file before
+# exec'ing claude, so its startup blocks until any in-progress deliver finishes.
+# The lock file is separate from the credential files, so claude never touches
+# it. Shared vs exclusive: many runners may hold the shared lock at once (they
+# do not serialize against each other), but none can overlap AMA's exclusive
+# swap.
+#
+# Usage: drop-in replacement for `claude`. All arguments — including `-p
+# <command>` used by the ClickEye webhook path — are passed through unchanged.
+#   amx-claude                 # interactive, same as `claude`
+#   amx-claude -p "do a thing"  # batch, same as `claude -p ...`
+# Recommended install: alias claude=amx-claude for interactive shells, and call
+# amx-claude at the ClickEye webhook entrypoint. See docs/DEPLOYMENT-RUNNER.md.
+
+set -eu
+
+# The runner and AMA MUST agree on the config home. Default to Claude's own
+# default (~/.claude) when CLAUDE_CONFIG_DIR is unset, so the lock path matches
+# the credential path claude will actually read.
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+LOCK_FILE="$CONFIG_DIR/.amx-deliver.lock"
+
+# Locate the real claude (never recurse into this wrapper if it shadows claude
+# on PATH under the same name).
+CLAUDE_BIN="${AMX_CLAUDE_BIN:-claude}"
+
+# If flock(1) or the config dir is unavailable, fall back to launching claude
+# directly rather than blocking the runner. B1a still bounds the exposure to the
+# sub-second swap window; the flock is defense-in-depth on top of that.
+if ! command -v flock >/dev/null 2>&1; then
+	exec "$CLAUDE_BIN" "$@"
+fi
+if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+	exec "$CLAUDE_BIN" "$@"
+fi
+
+# Take a SHARED lock on the deliver lock file for the claude process lifetime,
+# then hand off to claude. `flock` creates the file if needed and holds the lock
+# until the command it wraps exits.
+exec flock -s "$LOCK_FILE" "$CLAUDE_BIN" "$@"
