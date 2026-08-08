@@ -283,8 +283,35 @@ def test_unknown_tenant_is_404_everywhere(client):
     assert client.get(f"/api/v1/tenants/{missing}/assignments").status_code == 404
 
 
-# -- P2 stubs -----------------------------------------------------------------
-def test_state_transition_endpoints_report_501(client):
+# -- P2 transition wiring -----------------------------------------------------
+def test_transition_endpoints_enqueue_commands_and_advance_state(client):
+    # deliver/recall/activate/deactivate now land (P2 track C): they enqueue a
+    # signed command on the outbox and move the assignment. The gRPC session
+    # process delivers it; the REST layer only records the intent + transition.
+    tenant_id = make_tenant(client)
+    account = make_account(client, tenant_id)
+    server = make_server(client, tenant_id)
+    assignment = client.post(
+        f"/api/v1/tenants/{tenant_id}/assignments",
+        json={"accountId": account["id"], "serverId": server["id"]},
+    ).json()
+    base = f"/api/v1/tenants/{tenant_id}/assignments/{assignment['id']}"
+
+    deliver = client.post(f"{base}:deliver")
+    assert deliver.status_code == 200
+    assert deliver.json()["state"] == "delivering"
+    assert deliver.json()["pendingCommandId"]
+
+    # Wired, not stubbed: activate on a delivering row fails its precondition
+    # with a 409, not a 501.
+    assert client.post(f"{base}:activate").status_code == 409
+
+    recall = client.post(f"{base}:recall")
+    assert recall.status_code == 200
+    assert recall.json()["state"] == "recalling"
+
+
+def test_deferred_transition_endpoints_still_report_501(client):
     tenant_id = make_tenant(client)
     account = make_account(client, tenant_id)
     server = make_server(client, tenant_id)
@@ -294,7 +321,8 @@ def test_state_transition_endpoints_report_501(client):
     ).json()
 
     base = f"/api/v1/tenants/{tenant_id}/assignments/{assignment['id']}"
-    for action in ("deliver", "recall", "activate", "deactivate", "recover", "switch-now"):
+    # recover and switch-now are P3/deployment work and stay honest 501s.
+    for action in ("recover", "switch-now"):
         response = client.post(f"{base}:{action}")
         assert response.status_code == 501, action
         assert "P2" in response.json()["detail"]

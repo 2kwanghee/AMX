@@ -13,6 +13,8 @@ dependencies = [
     "pydantic-settings>=2.3",
     "cryptography>=42.0",
     "httpx>=0.27",
+    "grpcio>=1.83",
+    "protobuf>=5.27",
 ]
 
 [project.optional-dependencies]

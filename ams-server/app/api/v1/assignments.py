@@ -15,7 +15,7 @@ from app import schemas
 from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
 from app.api.v1.stubs import requires_channel
 from app.core.errors import bad_request
-from app.services import inventory
+from app.services import commands, inventory
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["assignments"], dependencies=[AdminAuth])
 
@@ -83,28 +83,52 @@ def update_assignment(
     )
 
 
-@router.post("/assignments/{assignment_id}:deliver", summary="deliver (P2)")
+# The transition actions below enqueue a signed command on the outbox and move
+# the assignment; the gRPC session process delivers it and reconciles the ack
+# (design note §2, §5). Each resolves the assignment first, so a cross-tenant id
+# gets 404 before any state change (P1 defence-in-depth pattern).
+@router.post(
+    "/assignments/{assignment_id}:deliver",
+    summary="deliver",
+    response_model=schemas.Assignment,
+)
 def deliver_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
-    inventory.get_assignment(db, tenant_id, assignment_id)
-    raise requires_channel("assignment.deliver", "POST .../assignments/{id}:deliver")
+    return schemas.Assignment.model_validate(
+        commands.request_deliver(db, tenant_id, assignment_id)
+    )
 
 
-@router.post("/assignments/{assignment_id}:recall", summary="recall (P2)")
+@router.post(
+    "/assignments/{assignment_id}:recall",
+    summary="recall",
+    response_model=schemas.Assignment,
+)
 def recall_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
-    inventory.get_assignment(db, tenant_id, assignment_id)
-    raise requires_channel("assignment.recall", "POST .../assignments/{id}:recall")
+    return schemas.Assignment.model_validate(
+        commands.request_recall(db, tenant_id, assignment_id)
+    )
 
 
-@router.post("/assignments/{assignment_id}:activate", summary="activate (P2)")
+@router.post(
+    "/assignments/{assignment_id}:activate",
+    summary="activate",
+    response_model=schemas.Assignment,
+)
 def activate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
-    inventory.get_assignment(db, tenant_id, assignment_id)
-    raise requires_channel("assignment.activate", "POST .../assignments/{id}:activate")
+    return schemas.Assignment.model_validate(
+        commands.request_activate(db, tenant_id, assignment_id)
+    )
 
 
-@router.post("/assignments/{assignment_id}:deactivate", summary="deactivate (P2)")
+@router.post(
+    "/assignments/{assignment_id}:deactivate",
+    summary="deactivate",
+    response_model=schemas.Assignment,
+)
 def deactivate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
-    inventory.get_assignment(db, tenant_id, assignment_id)
-    raise requires_channel("assignment.deactivate", "POST .../assignments/{id}:deactivate")
+    return schemas.Assignment.model_validate(
+        commands.request_deactivate(db, tenant_id, assignment_id)
+    )
 
 
 @router.post("/assignments/{assignment_id}:recover", summary="recover (P2)")

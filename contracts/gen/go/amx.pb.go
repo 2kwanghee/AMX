@@ -1022,6 +1022,12 @@ type AmsCommand struct {
 	// Issue time, carried inside the signed payload so AMA can reject stale
 	// replays outside its acceptance window.
 	IssuedAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	// Intended recipient. AMS fills this with the authenticated agent_id of the
+	// session it is writing to, and — being part of this message — it is covered
+	// by `signature`. AMA MUST reject any command whose target_agent_id is not its
+	// own AMX_AGENT_ID, so a command signed for one agent cannot be re-injected
+	// into another (cross-agent / cross-tenant replay). SessionSetup included.
+	TargetAgentId string `protobuf:"bytes,4,opt,name=target_agent_id,json=targetAgentId,proto3" json:"target_agent_id,omitempty"`
 	// Types that are valid to be assigned to Cmd:
 	//
 	//	*AmsCommand_Deliver
@@ -1085,6 +1091,13 @@ func (x *AmsCommand) GetIssuedAt() *timestamppb.Timestamp {
 		return x.IssuedAt
 	}
 	return nil
+}
+
+func (x *AmsCommand) GetTargetAgentId() string {
+	if x != nil {
+		return x.TargetAgentId
+	}
+	return ""
 }
 
 func (x *AmsCommand) GetCmd() isAmsCommand_Cmd {
@@ -2622,13 +2635,14 @@ const file_amx_proto_rawDesc = "" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12;\n" +
 	"\vreceived_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"receivedAt\"\x8c\x04\n" +
+	"receivedAt\"\xb4\x04\n" +
 	"\n" +
 	"AmsCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1c\n" +
 	"\tsignature\x18\x02 \x01(\fR\tsignature\x127\n" +
-	"\tissued_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bissuedAt\x122\n" +
+	"\tissued_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bissuedAt\x12&\n" +
+	"\x0ftarget_agent_id\x18\x04 \x01(\tR\rtargetAgentId\x122\n" +
 	"\adeliver\x18\n" +
 	" \x01(\v2\x16.amx.v1.DeliverAccountH\x00R\adeliver\x12/\n" +
 	"\x06recall\x18\v \x01(\v2\x15.amx.v1.RecallAccountH\x00R\x06recall\x129\n" +

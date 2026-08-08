@@ -42,6 +42,8 @@ ASSIGNMENT_STATES = (
     "recalling",
     "detached",
 )
+COMMAND_TYPES = ("deliver", "recall", "activate", "deactivate")
+COMMAND_STATUSES = ("queued", "sent", "acked", "failed")
 
 
 class Base(DeclarativeBase):
@@ -179,6 +181,60 @@ class Assignment(Base):
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     pending_command_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentCommand(Base):
+    """Command outbox (design note §2).
+
+    REST transition actions INSERT a row here; the gRPC session process polls
+    for ``status='queued'`` rows belonging to an online server, signs and pushes
+    the command, then marks it ``acked``/``failed`` on the agent's CommandAck.
+
+    The tenant boundary is structural, exactly as for the other tables: the row
+    reaches ``servers`` through the composite ``(server_id, tenant_id)`` foreign
+    key, so a command can never name a server in another tenant. ``command_id``
+    is globally unique and is the idempotency key carried on the wire (§6.3).
+    """
+
+    __tablename__ = "agent_commands"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["server_id", "tenant_id"],
+            ["servers.id", "servers.tenant_id"],
+            name="fk_agent_commands_server_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("command_id", name="uq_agent_commands_command_id"),
+        Index("ix_agent_commands_dispatch", "server_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    server_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    # Nullable: server-scoped commands (e.g. set_mode) name no assignment. The
+    # account-scoped commands this phase issues always set it. No composite FK to
+    # assignments — that table has no (id, tenant_id) anchor — so the tenant tie
+    # is carried by server_id above and the service-layer tenant re-check.
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    command_id: Mapped[str] = mapped_column(Text, nullable=False)
+    command_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    acked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

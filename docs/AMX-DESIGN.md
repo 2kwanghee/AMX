@@ -287,14 +287,18 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
 | active | 하달·확인 완료, 스위칭 후보 | `tsamx enable` 상태 |
 | inactive | 하달됐으나 로테이션 제외 | `tsamx disable` 상태 |
 | quarantined | AMA가 소진/실패 보고 | tsamx quarantine 반영 |
-| recalling | 회수 명령 전송, 제거 확인 대기 | `tsamx remove` 수행 중 |
-| detached | 종말 상태 (행은 감사용 유지) | 로컬 흔적 없음 |
+| recalling | 회수 명령 전송, 확인 대기 | `tsamx disable` 수행 중 (credential 레코드 **보존**, O2 기본); `purge_local_copy=true`면 `tsamx remove` + 레코드 삭제 |
+| detached | 종말 상태 (행은 감사용 유지) | 로테이션 제외 + credential 레코드 보존(빠른 재배정); `purge_local_copy=true` 시에만 로컬 흔적 완전 제거 |
 
 - **스위칭 모드**는 서버 단위 속성(`servers.switch_mode`), 계정 단위 제외는 `pinned`로.
 - **비상태 명령**: `switch_now`/`set_mode`/`req_report`는 배정 상태를 전이시키지 않는다
   (switch-now는 `last_switched_at`만 갱신, set_mode는 `servers.switch_mode`만 변경).
 - **recover 전이**: REST `POST …/assignments/{id}:recover`(§5.3)가 트리거 →
   AMA에 `set_active(activate)` 하달 → ack 시 quarantined → active.
+- **재배정 단축 (O2 파급)**: recall 기본이 credential 레코드를 보존하므로, 같은
+  계정을 같은 서버에 다시 배정할 때 AMA에 보존 레코드가 있으면 deliver는 재주입 대신
+  `tsamx enable`로 단축된다(credential 재전송 불필요). 레코드가 없거나
+  `purge_local_copy=true`로 삭제됐던 경우에만 full deliver.
 
 ### 5.3 REST API 표면 (관리 CRUD — 요구 AMS-1~4, 6)
 
@@ -412,7 +416,7 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
   AAD = `(amsAccountId + agentId)` 바인딩(다른 에이전트로 레코드 복사·스왑 차단).
   키(KEK)는 AMS가 세션 수립 시 전달하고 **메모리에만 보관** → 오프박스 파일 사본은 복호 불가,
   무인 재부팅 시 AMS 재연결 없이는 로컬 계정 정보를 열 수 없다("AMS 없이는 변경 불가" 부합).
-  (대안: TPM/systemd-cred 봉인 — §8 미해결 항목)
+  (대안 TPM/systemd-cred 봉인은 O1에서 **미채택** — 메모리 전용 확정, §8)
 - **권위 강제는 암호화가 아니라 서명**: 매니페스트와 모든 명령에 AMS Ed25519 서명,
   AMA는 빌드에 내장된 공개키로 검증 후에만 적용. 위조 매니페스트는 검증 실패.
 - **정합 동기화 (등록분만 사용 강제)**: 매 리포트 틱마다 `tsamx list --json`과 매니페스트를 대조.
@@ -426,7 +430,7 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
 | AMS 명령 | 로컬 절차 | 재전송 시 |
 |---|---|---|
 | deliver | 서명 검증 → credential 세트 복호 → 매니페스트 upsert → 이전 활성 계정 기록 → credential 파일 기록(`~/.claude/.credentials.json` + `~/.claude.json` oauthAccount) → `tsamx add` (슬롯 자동 할당) → 필요 시 `tsamx switch <이전 활성>` 복귀 → 평문 메모리 소거 | 이미 존재하면 no-op, 수렴 상태 회신 |
-| recall | 대상이 활성이면 먼저 `tsamx switch <타계정>` → `tsamx remove` → 매니페스트 삭제 | 부재 시 성공 no-op |
+| recall | 대상이 활성이면 먼저 `tsamx switch <타계정>` → **기본(`purge_local_copy=false`, O2)**: `tsamx disable` + 매니페스트 레코드 `inactive`로 보존(빠른 재배정) / **`purge_local_copy=true`**: `tsamx remove` + 매니페스트 레코드 삭제 | 부재 시 성공 no-op |
 | activate | `tsamx enable` + 매니페스트 상태 갱신 | 동일 상태면 no-op |
 | deactivate | `tsamx disable` (크레덴셜 유지, 로테이션만 제외) | no-op |
 | switch_now | `tsamx switch <num\|email>` (또는 `--strategy best`) | 이미 활성이면 no-op |
@@ -440,6 +444,17 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
 - ack는 단순 성공/실패가 아니라 **수렴 상태**(현재 로컬 실상)를 회신 → AMS reconcile 입력.
 - **AMS 연결 두절 시**: 현행 로스터로 스위칭 엔진 **계속 가동**(무인 운영 유지),
   로컬발 계정 변경은 거부, 이벤트는 암호화 아웃박스에 큐잉 → 재연결 시 dedupe 플러시.
+- **멱등 처리로그와 콜드스타트 (O1 메모리 KEK 파급 — 3규칙)**: `command_id` 처리로그는
+  **평문 사이드카**(`applied.log`)에 저장한다 — command_id는 비밀이 아니며, 재부팅 후
+  KEK 없이도 읽혀야 하므로 암호화 매니페스트와 분리한다. 재전송 no-op 판정은
+  `command_id ∈ applied.log` **AND 현재 실상이 desired와 일치**를 모두 만족할 때만 —
+  재부팅으로 실상이 소실됐으면 로그에 있어도 재실행한다. 이로부터:
+  1. `SessionSetup`(KEK 전달)은 `applied_command_ids` 억제 대상에서 **영구 제외** —
+     AMS는 매 세션 시작 시 Register 직후 무조건 하달한다(재부팅 교착 방지).
+  2. 콜드스타트 시 KEK 미보유로 `Register.accounts`가 빌 수 있다. AMS는 **빈 Register로
+     삭제형 reconcile을 하지 않고**, SessionSetup 이후 첫 `UsageReport`를 실상 권위로 삼는다.
+  3. AMS의 deliver 재하달 억제는 `command_id ∈ applied_command_ids` **AND** 보고된 actual에
+     해당 계정이 존재할 때만 — 재부팅 후 actual이 비면 억제가 풀려 재하달이 진행된다.
 
 ### 6.4 자동 스위칭 (요구 AMA-3, D8)
 
@@ -530,8 +545,8 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 
 | # | 항목 | 선택지 | 시점 |
 |---|---|---|---|
-| O1 | AMA KEK 보관 | 메모리 전용(기밀성↑, 재부팅 시 AMS 필요) vs TPM/systemd-cred 봉인(자가 복구) | P2 착수 전 |
-| O2 | recall 시맨틱 | 로컬 크레덴셜 완전 삭제(현 설계) vs disable만(빠른 재배정) | P2 착수 전 |
+| O1 | AMA KEK 보관 | **결정: 메모리 전용** (2026-08-08). 재부팅 시 KEK 소실 → AMS 재연결로 `SessionSetup` 재수신해야 로컬 스토어 복호. TPM/봉인 없음. 콜드스타트 3규칙은 §6.3 | ✅ 확정 |
+| O2 | recall 시맨틱 | **결정: disable만** (2026-08-08). 기본 `purge_local_copy=false` — `tsamx disable`+레코드 보존(빠른 재배정), `true`만 완전 삭제. §5.2·§6.3 반영 | ✅ 확정 |
 | O3 | API-key 계정 | 구독 쿼터 없어 95% 임계 무의미 — 관리 대상 포함 여부. 포함 시 등록 경로는 `tsamx add-token`이 여전히 유효 (api_key는 대화형 로그인 불필요, §2.4-5의 폐기는 oauth 한정) | P1 중 |
 | O4 | 스위칭 정책 소유권 | threshold/쿨다운을 AMS 중앙 관리·하달 vs tsamx 로컬 기본값 유지(현 설계: 95만 하달) | P3 |
 | O5 | 러너 config 공유 | AMA 서버의 실행 러너(Claude Code)가 같은 `~/.claude`를 읽는지 배포 시 보장 필요. deliver 크리티컬 섹션(§6.3) 동안 러너 무중단(또는 일시 정지) 방안 포함 | P2 배포 설계 |

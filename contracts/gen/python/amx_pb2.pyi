@@ -129,10 +129,11 @@ class Ack(_message.Message):
     def __init__(self, accepted: _Optional[bool] = ..., message: _Optional[str] = ..., received_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class AmsCommand(_message.Message):
-    __slots__ = ("command_id", "signature", "issued_at", "deliver", "recall", "set_active", "set_mode", "switch_now", "req_report", "session_setup")
+    __slots__ = ("command_id", "signature", "issued_at", "target_agent_id", "deliver", "recall", "set_active", "set_mode", "switch_now", "req_report", "session_setup")
     COMMAND_ID_FIELD_NUMBER: _ClassVar[int]
     SIGNATURE_FIELD_NUMBER: _ClassVar[int]
     ISSUED_AT_FIELD_NUMBER: _ClassVar[int]
+    TARGET_AGENT_ID_FIELD_NUMBER: _ClassVar[int]
     DELIVER_FIELD_NUMBER: _ClassVar[int]
     RECALL_FIELD_NUMBER: _ClassVar[int]
     SET_ACTIVE_FIELD_NUMBER: _ClassVar[int]
@@ -143,6 +144,7 @@ class AmsCommand(_message.Message):
     command_id: str
     signature: bytes
     issued_at: _timestamp_pb2.Timestamp
+    target_agent_id: str
     deliver: DeliverAccount
     recall: RecallAccount
     set_active: SetAccountActive
@@ -150,7 +152,7 @@ class AmsCommand(_message.Message):
     switch_now: SwitchNow
     req_report: RequestReport
     session_setup: SessionSetup
-    def __init__(self, command_id: _Optional[str] = ..., signature: _Optional[bytes] = ..., issued_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deliver: _Optional[_Union[DeliverAccount, _Mapping]] = ..., recall: _Optional[_Union[RecallAccount, _Mapping]] = ..., set_active: _Optional[_Union[SetAccountActive, _Mapping]] = ..., set_mode: _Optional[_Union[SetSwitchMode, _Mapping]] = ..., switch_now: _Optional[_Union[SwitchNow, _Mapping]] = ..., req_report: _Optional[_Union[RequestReport, _Mapping]] = ..., session_setup: _Optional[_Union[SessionSetup, _Mapping]] = ...) -> None: ...
+    def __init__(self, command_id: _Optional[str] = ..., signature: _Optional[bytes] = ..., issued_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., target_agent_id: _Optional[str] = ..., deliver: _Optional[_Union[DeliverAccount, _Mapping]] = ..., recall: _Optional[_Union[RecallAccount, _Mapping]] = ..., set_active: _Optional[_Union[SetAccountActive, _Mapping]] = ..., set_mode: _Optional[_Union[SetSwitchMode, _Mapping]] = ..., switch_now: _Optional[_Union[SwitchNow, _Mapping]] = ..., req_report: _Optional[_Union[RequestReport, _Mapping]] = ..., session_setup: _Optional[_Union[SessionSetup, _Mapping]] = ...) -> None: ...
 
 class SessionSetup(_message.Message):
     __slots__ = ("server_credential", "keys", "active_key_id", "revoked_key_ids")

@@ -175,6 +175,13 @@ message AmsCommand {
   // replays outside its acceptance window.
   google.protobuf.Timestamp issued_at = 3;
 
+  // Intended recipient. AMS fills this with the authenticated agent_id of the
+  // session it is writing to, and — being part of this message — it is covered
+  // by `signature`. AMA MUST reject any command whose target_agent_id is not its
+  // own AMX_AGENT_ID, so a command signed for one agent cannot be re-injected
+  // into another (cross-agent / cross-tenant replay). SessionSetup included.
+  string target_agent_id = 4;
+
   oneof cmd {
     DeliverAccount deliver = 10;
     RecallAccount recall = 11;
