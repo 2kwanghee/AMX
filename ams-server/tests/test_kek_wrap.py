@@ -303,13 +303,30 @@ def _capture_grpc_logs():
     return handler, restore
 
 
+def _create_server_sync(signer):
+    """Build a server from a synchronous test context.
+
+    ``grpc.aio.server()`` grabs the running/current event loop. Called outside a
+    coroutine, that raises ``RuntimeError: no current event loop`` on Python 3.11
+    (3.12+ autocreates one), so we set an explicit loop for the call and tear it
+    down after — keeping these tests Python-version independent.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return create_server(signer, session_factory=get_sessionmaker())
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 def test_raw_kek_optin_logs_startup_warning(app_env, monkeypatch):
     """AMX_ALLOW_RAW_KEK=1 emits a loud one-time warning when the server is built."""
     monkeypatch.setenv("AMX_ALLOW_RAW_KEK", "1")
     signer = signing.Signer.from_env_or_generate()
     handler, restore = _capture_grpc_logs()
     try:
-        create_server(signer, session_factory=get_sessionmaker())
+        _create_server_sync(signer)
     finally:
         restore()
     warnings = [m for lvl, m in handler.messages if lvl >= logging.WARNING]
@@ -324,7 +341,7 @@ def test_raw_kek_disabled_no_startup_warning(app_env, monkeypatch):
     signer = signing.Signer.from_env_or_generate()
     handler, restore = _capture_grpc_logs()
     try:
-        create_server(signer, session_factory=get_sessionmaker())
+        _create_server_sync(signer)
     finally:
         restore()
     assert not any("AMX_ALLOW_RAW_KEK" in m for _lvl, m in handler.messages)
