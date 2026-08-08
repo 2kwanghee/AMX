@@ -359,7 +359,32 @@ message AmaMessage {
     UsageReport usage = 12;
     CommandAck ack = 13;
     AccountEvent event = 14;
+    CredentialUpdate cred_update = 15;
   }
+}
+
+// Upstream credential re-sync (§5.7, O9 rotating refresh tokens). When tsamx
+// refreshes an OAuth credential locally, its refresh token rotates and the
+// AMS-held copy in accounts.encrypted_secret goes stale. The agent pushes the
+// refreshed set back so AMS can re-encrypt it and deliver the current copy on a
+// cross-server re-assignment (same-server re-assignment is already covered by
+// O2 local retention). Delivery is best-effort; on loss, re-assignment falls
+// back to §5.5 re-auth.
+message CredentialUpdate {
+  AccountRef account = 1;
+
+  // Refreshed credential set, sealed under the manifest KEK — same envelope as
+  // DeliverAccount.encrypted_credential. AAD binds ams_account_id + agent_id.
+  EncryptedCredential encrypted_credential = 2;
+
+  // Session auth; bound server-side to tenant_id (never trust a client tenant).
+  string server_credential = 3;
+
+  // Local observation time of the refresh. AMS keeps the newest per account and
+  // ignores an update that is not strictly newer, so a delayed or duplicated
+  // push cannot roll the stored copy back (monotonicity, cf. P3 SetPolicy).
+  // A wall-clock timestamp survives agent reboots, unlike an in-memory counter.
+  google.protobuf.Timestamp observed_at = 4;
 }
 
 // First message on every stream. Presents the agent's credential (§7 AMA 인증):

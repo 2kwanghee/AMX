@@ -51,6 +51,13 @@ type Record struct {
 	Nonce            []byte    `json:"nonce"`
 	Ciphertext       []byte    `json:"ciphertext"` // sealed credential-set JSON — never logged
 	ReceivedAt       time.Time `json:"receivedAt"`
+	// Fingerprint is the stable identity hash of the sealed credential set (the
+	// refresh-token hash when present, else a content hash — CredentialFingerprint,
+	// mirroring tsamx oauth.credential_fingerprint). It is a one-way hash, NOT the
+	// credential, so it lives in the plaintext metadata: the O9 credential re-sync
+	// (§5.7) compares the live on-disk fingerprint against this baseline to detect
+	// a local refresh-token rotation without decrypting the record every tick.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // Store is the in-memory + on-disk manifest, guarded by a mutex.
@@ -155,11 +162,57 @@ func (s *Store) Upsert(rec Record, plaintextCred []byte) error {
 	rec.KeyID = keyID
 	rec.Nonce = nonce
 	rec.Ciphertext = ct
+	// Stamp the identity fingerprint from the plaintext being sealed so every
+	// writer (deliver AND re-sync) leaves a correct detection baseline (§5.7).
+	rec.Fingerprint = CredentialFingerprint(plaintextCred)
 	if rec.ReceivedAt.IsZero() {
 		rec.ReceivedAt = time.Now().UTC()
 	}
 	cp := rec
 	s.records[rec.AMSAccountID] = &cp
+	return s.persist()
+}
+
+// UpdateBaseline advances the detection baseline of an ALREADY-PRESENT record
+// after an O9 re-sync push is accepted: it re-seals plaintextCred under the
+// active KEK and restamps the envelope + fingerprint, but leaves AllocationStatus
+// (and every other metadata field) untouched, and does nothing at all when the
+// record is absent. This is deliberately NOT Upsert: Upsert runs outside the
+// engine lock after the network Send, and in that window a concurrent recall may
+// have deleted the record (purge=true) or flipped it to inactive (purge=false).
+// A blind re-insert would resurrect a purged account or revive an inactive one,
+// and reconcile would then re-inject a recalled credential. Returning ErrNotFound
+// for an absent record lets the caller skip silently (the record is gone, so
+// there is nothing left to keep a baseline for). The caller MUST wipe
+// plaintextCred afterwards.
+func (s *Store) UpdateBaseline(amsAccountID string, plaintextCred []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[amsAccountID]
+	if !ok {
+		// Deleted out from under us by a concurrent recall/purge — do not recreate.
+		return ErrNotFound
+	}
+	kek, keyID, ok := s.keks.ActiveKey()
+	if !ok {
+		return ErrNoKEK
+	}
+	defer wipe(kek)
+	nonce, err := crypto.NewNonce()
+	if err != nil {
+		return err
+	}
+	ct, err := crypto.Seal(kek, nonce, plaintextCred, s.aad(amsAccountID))
+	if err != nil {
+		return err
+	}
+	// Envelope + fingerprint only; AllocationStatus, Email, ReceivedAt, etc. are
+	// preserved so a racing recall's status change survives.
+	r.Algorithm = int32(1) // ENCRYPTION_ALGORITHM_AES_256_GCM
+	r.KeyID = keyID
+	r.Nonce = nonce
+	r.Ciphertext = ct
+	r.Fingerprint = CredentialFingerprint(plaintextCred)
 	return s.persist()
 }
 
@@ -189,6 +242,23 @@ func (s *Store) Get(amsAccountID string) (Record, bool) {
 		return Record{}, false
 	}
 	return *r, true
+}
+
+// FindByEmail returns a shallow copy of the record whose Email matches (the O9
+// re-sync maps the live active account, known only by email, back to its
+// ams_account_id and fingerprint baseline). Absent -> ok=false.
+func (s *Store) FindByEmail(email string) (Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if email == "" {
+		return Record{}, false
+	}
+	for _, r := range s.records {
+		if r.Email == email {
+			return *r, true
+		}
+	}
+	return Record{}, false
 }
 
 // SetStatus updates a record's allocation status (e.g. recall=disable keeps the

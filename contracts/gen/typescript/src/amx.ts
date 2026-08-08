@@ -604,6 +604,38 @@ export interface AmaMessage {
   usage?: UsageReport | undefined;
   ack?: CommandAck | undefined;
   event?: AccountEvent | undefined;
+  credUpdate?: CredentialUpdate | undefined;
+}
+
+/**
+ * Upstream credential re-sync (§5.7, O9 rotating refresh tokens). When tsamx
+ * refreshes an OAuth credential locally, its refresh token rotates and the
+ * AMS-held copy in accounts.encrypted_secret goes stale. The agent pushes the
+ * refreshed set back so AMS can re-encrypt it and deliver the current copy on a
+ * cross-server re-assignment (same-server re-assignment is already covered by
+ * O2 local retention). Delivery is best-effort; on loss, re-assignment falls
+ * back to §5.5 re-auth.
+ */
+export interface CredentialUpdate {
+  account:
+    | AccountRef
+    | undefined;
+  /**
+   * Refreshed credential set, sealed under the manifest KEK — same envelope as
+   * DeliverAccount.encrypted_credential. AAD binds ams_account_id + agent_id.
+   */
+  encryptedCredential:
+    | EncryptedCredential
+    | undefined;
+  /** Session auth; bound server-side to tenant_id (never trust a client tenant). */
+  serverCredential: string;
+  /**
+   * Local observation time of the refresh. AMS keeps the newest per account and
+   * ignores an update that is not strictly newer, so a delayed or duplicated
+   * push cannot roll the stored copy back (monotonicity, cf. P3 SetPolicy).
+   * A wall-clock timestamp survives agent reboots, unlike an in-memory counter.
+   */
+  observedAt: Date | undefined;
 }
 
 /**
@@ -2982,7 +3014,14 @@ export const RequestReport: MessageFns<RequestReport> = {
 };
 
 function createBaseAmaMessage(): AmaMessage {
-  return { register: undefined, hb: undefined, usage: undefined, ack: undefined, event: undefined };
+  return {
+    register: undefined,
+    hb: undefined,
+    usage: undefined,
+    ack: undefined,
+    event: undefined,
+    credUpdate: undefined,
+  };
 }
 
 export const AmaMessage: MessageFns<AmaMessage> = {
@@ -3001,6 +3040,9 @@ export const AmaMessage: MessageFns<AmaMessage> = {
     }
     if (message.event !== undefined) {
       AccountEvent.encode(message.event, writer.uint32(114).fork()).join();
+    }
+    if (message.credUpdate !== undefined) {
+      CredentialUpdate.encode(message.credUpdate, writer.uint32(122).fork()).join();
     }
     return writer;
   },
@@ -3052,6 +3094,14 @@ export const AmaMessage: MessageFns<AmaMessage> = {
           message.event = AccountEvent.decode(reader, reader.uint32());
           continue;
         }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.credUpdate = CredentialUpdate.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3068,6 +3118,11 @@ export const AmaMessage: MessageFns<AmaMessage> = {
       usage: isSet(object.usage) ? UsageReport.fromJSON(object.usage) : undefined,
       ack: isSet(object.ack) ? CommandAck.fromJSON(object.ack) : undefined,
       event: isSet(object.event) ? AccountEvent.fromJSON(object.event) : undefined,
+      credUpdate: isSet(object.credUpdate)
+        ? CredentialUpdate.fromJSON(object.credUpdate)
+        : isSet(object.cred_update)
+        ? CredentialUpdate.fromJSON(object.cred_update)
+        : undefined,
     };
   },
 
@@ -3088,6 +3143,9 @@ export const AmaMessage: MessageFns<AmaMessage> = {
     if (message.event !== undefined) {
       obj.event = AccountEvent.toJSON(message.event);
     }
+    if (message.credUpdate !== undefined) {
+      obj.credUpdate = CredentialUpdate.toJSON(message.credUpdate);
+    }
     return obj;
   },
 
@@ -3107,6 +3165,133 @@ export const AmaMessage: MessageFns<AmaMessage> = {
     message.event = (object.event !== undefined && object.event !== null)
       ? AccountEvent.fromPartial(object.event)
       : undefined;
+    message.credUpdate = (object.credUpdate !== undefined && object.credUpdate !== null)
+      ? CredentialUpdate.fromPartial(object.credUpdate)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseCredentialUpdate(): CredentialUpdate {
+  return { account: undefined, encryptedCredential: undefined, serverCredential: "", observedAt: undefined };
+}
+
+export const CredentialUpdate: MessageFns<CredentialUpdate> = {
+  encode(message: CredentialUpdate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.account !== undefined) {
+      AccountRef.encode(message.account, writer.uint32(10).fork()).join();
+    }
+    if (message.encryptedCredential !== undefined) {
+      EncryptedCredential.encode(message.encryptedCredential, writer.uint32(18).fork()).join();
+    }
+    if (message.serverCredential !== "") {
+      writer.uint32(26).string(message.serverCredential);
+    }
+    if (message.observedAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.observedAt), writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CredentialUpdate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCredentialUpdate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.account = AccountRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.encryptedCredential = EncryptedCredential.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.serverCredential = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.observedAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CredentialUpdate {
+    return {
+      account: isSet(object.account) ? AccountRef.fromJSON(object.account) : undefined,
+      encryptedCredential: isSet(object.encryptedCredential)
+        ? EncryptedCredential.fromJSON(object.encryptedCredential)
+        : isSet(object.encrypted_credential)
+        ? EncryptedCredential.fromJSON(object.encrypted_credential)
+        : undefined,
+      serverCredential: isSet(object.serverCredential)
+        ? globalThis.String(object.serverCredential)
+        : isSet(object.server_credential)
+        ? globalThis.String(object.server_credential)
+        : "",
+      observedAt: isSet(object.observedAt)
+        ? fromJsonTimestamp(object.observedAt)
+        : isSet(object.observed_at)
+        ? fromJsonTimestamp(object.observed_at)
+        : undefined,
+    };
+  },
+
+  toJSON(message: CredentialUpdate): unknown {
+    const obj: any = {};
+    if (message.account !== undefined) {
+      obj.account = AccountRef.toJSON(message.account);
+    }
+    if (message.encryptedCredential !== undefined) {
+      obj.encryptedCredential = EncryptedCredential.toJSON(message.encryptedCredential);
+    }
+    if (message.serverCredential !== "") {
+      obj.serverCredential = message.serverCredential;
+    }
+    if (message.observedAt !== undefined) {
+      obj.observedAt = message.observedAt.toISOString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CredentialUpdate>): CredentialUpdate {
+    return CredentialUpdate.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CredentialUpdate>): CredentialUpdate {
+    const message = createBaseCredentialUpdate();
+    message.account = (object.account !== undefined && object.account !== null)
+      ? AccountRef.fromPartial(object.account)
+      : undefined;
+    message.encryptedCredential = (object.encryptedCredential !== undefined && object.encryptedCredential !== null)
+      ? EncryptedCredential.fromPartial(object.encryptedCredential)
+      : undefined;
+    message.serverCredential = object.serverCredential ?? "";
+    message.observedAt = object.observedAt ?? undefined;
     return message;
   },
 };

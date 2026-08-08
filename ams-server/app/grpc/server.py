@@ -22,12 +22,12 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import grpc
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.timestamp_pb2 import Timestamp
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core import crypto
@@ -85,6 +85,14 @@ _ALLOCATION_STATUS = {
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+# Upper bound on how far ahead of AMS wall-clock a re-sync's observed_at may sit.
+# observed_at is the monotonicity authority; without a ceiling a single push with a
+# far-future stamp would pin the account and reject every later honest rotation
+# (credential lock-in). Small enough to bound the attack, large enough to absorb
+# ordinary agent/AMS clock skew.
+_OBSERVED_AT_MAX_SKEW = timedelta(minutes=5)
 
 
 def _event_detail(payload: dict) -> dict:
@@ -220,7 +228,15 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                     msg = await it.__anext__()
                 except StopAsyncIteration:
                     break
-                await asyncio.to_thread(self._handle_upstream, msg, server_id, tenant_id)
+                await asyncio.to_thread(
+                    self._handle_upstream,
+                    msg,
+                    server_id,
+                    tenant_id,
+                    agent_id,
+                    kek,
+                    key_id,
+                )
         finally:
             poll_task.cancel()
             self._online.pop(str(server_id), None)
@@ -537,7 +553,13 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             commands.mark_sent(db, command_id)
 
     def _handle_upstream(
-        self, msg: pb.AmaMessage, server_id: uuid.UUID, tenant_id: uuid.UUID
+        self,
+        msg: pb.AmaMessage,
+        server_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        agent_id: str,
+        kek: bytes,
+        key_id: str,
     ) -> None:
         kind = msg.WhichOneof("msg")
         if kind == "hb":
@@ -558,6 +580,10 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             self._store_usage(server_id, tenant_id, msg.usage, report_type="usage")
         elif kind == "event":
             self._store_event(server_id, tenant_id, msg.event)
+        elif kind == "cred_update":
+            self._apply_cred_update(
+                msg.cred_update, server_id, tenant_id, agent_id, kek, key_id
+            )
 
     def _touch_last_seen(self, server_id: uuid.UUID) -> None:
         with self._sm() as db:
@@ -703,6 +729,168 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                     source_snapshot_id=snapshot.id,
                 )
             db.commit()
+
+    def _apply_cred_update(
+        self,
+        cred: pb.CredentialUpdate,
+        server_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        agent_id: str,
+        kek: bytes,
+        key_id: str,
+    ) -> None:
+        """Upstream credential re-sync (§5.7, O9 rotating refresh tokens).
+
+        The agent pushes a refreshed OAuth set sealed under this session's KEK
+        (AAD = ams_account_id‖agent_id, same envelope as DeliverAccount). AMS
+        opens it, re-encrypts under the at-rest Fernet key, and stores it — but
+        only when the account belongs to this session's tenant (§7: never trust a
+        client tenant), is actually assigned to THIS session's server (a session
+        may only re-seal a credential it legitimately holds — otherwise any
+        session could overwrite a sibling server's account under its own KEK), and
+        the observed_at is strictly newer than the stored one (monotonicity) yet
+        not implausibly in the future (skew clamp, no lock-in). Every failure path
+        is opaque: only account identifiers
+        are logged, never ciphertext, KEK, or plaintext (§7). Plaintext lives in
+        memory only from open to re-seal and is dropped immediately after.
+        """
+        raw_id = cred.account.ams_account_id
+        try:
+            account_id = uuid.UUID(str(raw_id))
+        except (ValueError, TypeError):
+            _logger.warning("cred_update rejected: malformed account id")
+            return
+        # observed_at is the monotonicity authority; a re-sync without it cannot
+        # be ordered against the stored copy, so it is refused.
+        if not cred.HasField("observed_at"):
+            _logger.warning("cred_update rejected: no observed_at (account %s)", account_id)
+            return
+        observed_at = cred.observed_at.ToDatetime(tzinfo=UTC)
+        # observed_at drives an irreversible monotonic ratchet: once stored, every
+        # future re-sync must beat it. A stamp implausibly far in the future would
+        # therefore pin the account forever and starve honest rotations (lock-in).
+        # Reject anything past now + allowed skew; genuine agent clock drift stays
+        # under the bound, so the past/near-now monotonicity path is untouched.
+        if observed_at > _now() + _OBSERVED_AT_MAX_SKEW:
+            _logger.warning(
+                "cred_update rejected: observed_at too far in the future (account %s)",
+                account_id,
+            )
+            return
+        enc = cred.encrypted_credential
+
+        with self._sm() as db:
+            account = db.scalar(
+                select(Account).where(
+                    Account.id == account_id, Account.tenant_id == tenant_id
+                )
+            )
+            if account is None:
+                # Unknown to this tenant, or cross-tenant probe — indistinguishable
+                # by design (§7 tenant isolation).
+                _logger.warning("cred_update rejected: unknown account for tenant")
+                return
+            # Ownership: this session may only re-seal a credential its own server
+            # actually holds. Without this, a session could push a set sealed under
+            # its KEK for a sibling server's account (AAD re-derives from the
+            # session agent_id, so it authenticates) and overwrite that account's
+            # at-rest secret. Require an assignment of this account to THIS session's
+            # server in a state where the credential is actually resident locally
+            # (§5.2): active (enable), inactive (disable, O2-preserved), quarantined
+            # (exhausted). pending is pre-deliver (no local copy yet), recalling is
+            # mid-removal, detached is terminal — none legitimately hold it, so all
+            # are excluded. A missing assignment is refused opaquely, so an unowned
+            # account is indistinguishable from an unknown one (§7).
+            owns = db.scalar(
+                select(Assignment.id).where(
+                    Assignment.account_id == account.id,
+                    Assignment.server_id == server_id,
+                    Assignment.tenant_id == tenant_id,
+                    Assignment.state.in_(("active", "inactive", "quarantined")),
+                )
+            )
+            if owns is None:
+                _logger.warning("cred_update rejected: unknown account for tenant")
+                return
+            # The KEK is per-session; a mismatched key_id cannot be opened with the
+            # KEK we hold, so reject before touching the AEAD.
+            if not enc.key_id or enc.key_id != key_id:
+                _logger.warning("cred_update rejected: unknown key id (account %s)", account.id)
+                return
+            # Monotonicity pre-check (the atomic guard is the conditional UPDATE
+            # below; this only avoids needless crypto on a stale push).
+            if (
+                account.credential_observed_at is not None
+                and observed_at <= account.credential_observed_at
+            ):
+                _logger.info("cred_update ignored: not newer (account %s)", account.id)
+                return
+
+            # AAD is derived from values AMS already holds — the looked-up account
+            # id and the session's own agent_id — never from the wire aad_* copies
+            # (proto §6.2 warning). A record sealed for a different (account, agent)
+            # fails authentication here.
+            try:
+                plaintext = signing.open_credential(
+                    kek,
+                    enc.ciphertext,
+                    enc.nonce,
+                    ams_account_id=str(account.id),
+                    agent_id=agent_id,
+                )
+            except Exception:  # noqa: BLE001 - opaque: never surface crypto detail (§7)
+                _logger.warning(
+                    "cred_update rejected: decryption/authentication failed (account %s)",
+                    account.id,
+                )
+                return
+
+            # A record can authenticate (right KEK + AAD) yet carry non-UTF-8 bytes
+            # — a self-sealed malformed push. Treat a decode failure as an opaque
+            # reject, not an exception: an uncaught UnicodeDecodeError would unwind
+            # the session read loop and drop the stream. Wipe the plaintext on both
+            # paths (§7); only the account id is logged.
+            try:
+                secret = plaintext.decode()
+            except UnicodeDecodeError:
+                _logger.warning(
+                    "cred_update rejected: credential is not valid UTF-8 (account %s)",
+                    account.id,
+                )
+                return
+            finally:
+                del plaintext
+            # Re-encrypt under the at-rest Fernet key and drop the plaintext before
+            # any DB round-trip.
+            new_secret = crypto.encrypt_secret(secret)
+            new_mask = crypto.mask_secret(account.credential_type, secret)
+            del secret
+
+            # Atomic monotonic update: the WHERE clause makes the observed_at guard
+            # part of the write, so a concurrent re-sync or a deliver reading in
+            # parallel cannot lose to a stale push.
+            result = db.execute(
+                update(Account)
+                .where(
+                    Account.id == account.id,
+                    Account.tenant_id == tenant_id,
+                    or_(
+                        Account.credential_observed_at.is_(None),
+                        Account.credential_observed_at < observed_at,
+                    ),
+                )
+                .values(
+                    encrypted_secret=new_secret,
+                    secret_masked=new_mask,
+                    credential_observed_at=observed_at,
+                    updated_at=_now(),
+                )
+            )
+            db.commit()
+            if result.rowcount:
+                _logger.info("cred_update applied (account %s)", account.id)
+            else:
+                _logger.info("cred_update ignored: not newer (account %s)", account.id)
 
     def _store_report_envelope(self, envelope: pb.ReportEnvelope) -> bool:
         if not envelope.server_credential:

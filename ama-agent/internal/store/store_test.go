@@ -102,6 +102,74 @@ func TestSetStatusAndRemove(t *testing.T) {
 	}
 }
 
+// TestUpdateBaselineDoesNotResurrect proves the O9 re-sync baseline advance
+// (fix 4) never recreates a record a concurrent recall purged: after Remove, an
+// UpdateBaseline for the same account returns ErrNotFound and leaves the record
+// absent, so reconcile cannot re-inject a recalled credential.
+func TestUpdateBaselineDoesNotResurrect(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"))
+	if err := st.Upsert(Record{AMSAccountID: "acc-1", Email: "a@x.io", AllocationStatus: 2}, []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	// A concurrent purge=true recall deletes the record.
+	if err := st.Remove("acc-1"); err != nil {
+		t.Fatal(err)
+	}
+	// The in-flight re-sync's baseline advance lands after the purge.
+	if err := st.UpdateBaseline("acc-1", []byte("new")); err != ErrNotFound {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if _, ok := st.Get("acc-1"); ok {
+		t.Fatal("record resurrected by UpdateBaseline after purge")
+	}
+	// Survives reload: nothing was persisted.
+	st2, _ := Open(dir, "ama_dev", keksWith(t, "k1"))
+	if _, ok := st2.Get("acc-1"); ok {
+		t.Fatal("record resurrected on disk")
+	}
+}
+
+// TestUpdateBaselinePreservesStatus proves the baseline advance restamps the
+// fingerprint + envelope only, leaving AllocationStatus untouched: a concurrent
+// recall=disable that flipped the record to inactive is not reverted to active.
+func TestUpdateBaselinePreservesStatus(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"))
+	old := []byte(`{"refreshToken":"r-old"}`)
+	if err := st.Upsert(Record{AMSAccountID: "acc-1", Email: "a@x.io", AllocationStatus: 2}, old); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.Get("acc-1")
+	// A concurrent recall=disable marks it inactive (status 3).
+	if err := st.SetStatus("acc-1", 3); err != nil {
+		t.Fatal(err)
+	}
+	// The in-flight re-sync advances the baseline with a rotated credential.
+	fresh := []byte(`{"refreshToken":"r-new"}`)
+	if err := st.UpdateBaseline("acc-1", fresh); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := st.Get("acc-1")
+	if !ok {
+		t.Fatal("record missing after UpdateBaseline")
+	}
+	if rec.AllocationStatus != 3 {
+		t.Fatalf("AllocationStatus reverted: want 3 (inactive), got %d", rec.AllocationStatus)
+	}
+	// Fingerprint + credential were advanced to the fresh set.
+	if rec.Fingerprint == before.Fingerprint {
+		t.Fatal("fingerprint not advanced")
+	}
+	got, err := st.OpenCredential("acc-1")
+	if err != nil {
+		t.Fatalf("open after baseline: %v", err)
+	}
+	if !bytes.Equal(got, fresh) {
+		t.Fatal("credential not re-sealed to the fresh set")
+	}
+}
+
 func TestAppliedLogRingAndLookup(t *testing.T) {
 	dir := t.TempDir()
 	l, err := OpenAppliedLog(dir)
