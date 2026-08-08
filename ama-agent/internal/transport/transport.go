@@ -6,7 +6,10 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"math/rand"
 	"os"
 	"sync"
@@ -31,6 +34,16 @@ const (
 	// EnvTLSServerName overrides the SNI / certificate name verified against
 	// EnvTLSCA (defaults to the dial host).
 	EnvTLSServerName = "AMX_AMS_TLS_SERVER_NAME"
+	// EnvTLSClientCert and EnvTLSClientKey point at a PEM client certificate and
+	// its private key. When both are set (alongside EnvTLSCA) the agent presents
+	// the certificate for mutual TLS; when absent the dial stays one-way TLS
+	// (server verified, client anonymous). mTLS is defense-in-depth here — the
+	// app layer already authenticates AMA with a server_credential (§AMA 인증) —
+	// so one-way TLS already satisfies the in-transit requirement (§7) and the
+	// client cert is an opt-in for deployments that also want transport-level
+	// peer authentication.
+	EnvTLSClientCert = "AMX_AMS_TLS_CLIENT_CERT"
+	EnvTLSClientKey  = "AMX_AMS_TLS_CLIENT_KEY"
 	// EnvAllowInsecure must be "1" to permit a plaintext dial when no TLS CA is
 	// configured. Without it the agent refuses to connect rather than leak the
 	// KEK to an eavesdropper (ADVERSARY).
@@ -43,11 +56,44 @@ const (
 // deployment fails closed instead of dialing in plaintext by default.
 func SecurityDialOption() (grpc.DialOption, error) {
 	if ca := os.Getenv(EnvTLSCA); ca != "" {
-		creds, err := credentials.NewClientTLSFromFile(ca, os.Getenv(EnvTLSServerName))
-		if err != nil {
-			return nil, err
+		clientCert := os.Getenv(EnvTLSClientCert)
+		clientKey := os.Getenv(EnvTLSClientKey)
+		// A single half of the client-cert pair is always a misconfiguration:
+		// fail closed rather than silently fall back to anonymous one-way TLS,
+		// which would leave a deployment that intended mTLS unauthenticated.
+		if (clientCert == "") != (clientKey == "") {
+			return nil, fmt.Errorf(
+				"transport: set both %s and %s for mutual TLS, or neither for one-way TLS",
+				EnvTLSClientCert, EnvTLSClientKey)
 		}
-		return grpc.WithTransportCredentials(creds), nil
+		if clientCert == "" {
+			// One-way TLS: verify the server against the CA, present no cert.
+			creds, err := credentials.NewClientTLSFromFile(ca, os.Getenv(EnvTLSServerName))
+			if err != nil {
+				return nil, err
+			}
+			return grpc.WithTransportCredentials(creds), nil
+		}
+		// Mutual TLS: verify the server against the CA and present our own cert.
+		caPEM, err := os.ReadFile(ca)
+		if err != nil {
+			return nil, fmt.Errorf("transport: read TLS CA %q: %w", ca, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("transport: no certificates parsed from TLS CA %q", ca)
+		}
+		cert, err := tls.LoadX509KeyPair(clientCert, clientKey)
+		if err != nil {
+			return nil, fmt.Errorf("transport: load client key pair: %w", err)
+		}
+		cfg := &tls.Config{
+			RootCAs:      pool,
+			Certificates: []tls.Certificate{cert},
+			ServerName:   os.Getenv(EnvTLSServerName),
+			MinVersion:   tls.VersionTLS12,
+		}
+		return grpc.WithTransportCredentials(credentials.NewTLS(cfg)), nil
 	}
 	if os.Getenv(EnvAllowInsecure) == "1" {
 		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
