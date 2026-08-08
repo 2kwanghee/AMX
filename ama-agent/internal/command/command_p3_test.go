@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -289,4 +290,37 @@ func containsPrefix(log []string, prefix string) bool {
 		}
 	}
 	return false
+}
+
+// restoreFailBridge fails only the restore Switch, so a test can exercise the
+// B1a "복귀 실패 -> diverged" path (add succeeds, the runner is left on the new
+// account = overcharge risk that must be surfaced to AMS).
+type restoreFailBridge struct {
+	*tsamx.Fake
+}
+
+func (b *restoreFailBridge) Switch(_ context.Context, target string) error {
+	return errors.New("restore switch failed for " + target)
+}
+
+// TestDeliverRestoreFailureDiverges (B1a): when restoring the previously-active
+// account fails, deliver reports DIVERGED with error_code tsamx_restore_active so
+// AMS is alerted to the overcharge window (the new account was left active).
+func TestDeliverRestoreFailureDiverges(t *testing.T) {
+	fake := tsamx.NewFake()
+	ctx := context.Background()
+	if err := fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+		t.Fatal(err)
+	}
+	hn := newHarnessBridge(t, &restoreFailBridge{Fake: fake}, &sync.Mutex{}, nil)
+	ack := hn.apply(t, hn.deliverCmd(t, "d1", "acc-b", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_DIVERGED {
+		t.Fatalf("restore-failure convergence = %v, want DIVERGED", ack.Convergence)
+	}
+	if ack.ErrorCode != "tsamx_restore_active" {
+		t.Fatalf("error_code = %q, want tsamx_restore_active", ack.ErrorCode)
+	}
+	if !fake.Has("b@x.io") {
+		t.Fatal("B should have been added before the failed restore")
+	}
 }

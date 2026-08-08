@@ -138,7 +138,11 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(configDir, ".credentials.json"), req.CredentialJSON, 0o600); err != nil {
+	// Write both files atomically (temp in the same dir + rename). The runner
+	// (Claude Code) reads these concurrently; a non-atomic os.WriteFile could be
+	// observed half-written, so an in-flight runner request would read a torn
+	// credential. os.Rename is atomic on the same filesystem.
+	if err := writeFileAtomic(filepath.Join(configDir, ".credentials.json"), req.CredentialJSON, 0o600); err != nil {
 		return err
 	}
 	var identity claudeIdentity
@@ -149,7 +153,7 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(configDir, ".claude.json"), blob, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(configDir, ".claude.json"), blob, 0o600); err != nil {
 		return err
 	}
 
@@ -163,6 +167,45 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 		return nil
 	}
 	return b.Disable(ctx, req.Email)
+}
+
+// writeFileAtomic writes data to a temp file in the same directory as path and
+// renames it into place, so a concurrent reader (the runner) never observes a
+// partial write. The temp file is created 0o600 and the final file carries perm;
+// on any failure before the rename the temp file is removed. Never logs data.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".amx-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup unless the rename below claims the temp file.
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = "" // renamed into place; skip cleanup
+	return nil
 }
 
 // Remove runs `tsamx remove <account>`.

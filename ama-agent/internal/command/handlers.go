@@ -158,6 +158,20 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 		return diverged(ack, "manifest_upsert", err)
 	}
 
+	// Record the account the runner (Claude Code) is currently reading BEFORE Add.
+	// `tsamx add` makes the freshly-staged slot active (exec.go Add), so if we do
+	// not restore, the runner would be left on the NEW account and overcharged on
+	// every deliver (§6.3 critical section warning). deliver only adds to the pool
+	// and sets enable/disable — it never changes which account is live; activation
+	// is auto/switch_now's job, regardless of desired ACTIVE/INACTIVE. The whole
+	// capture -> Add -> restore span is one critical section held under the engine
+	// lock, so no scheduler tick can move `active` mid-flight. A Status read error
+	// leaves prevActive empty (nothing to restore to); this matches switch_now.
+	prevActive := ""
+	if before, serr := h.bridge.Status(ctx); serr == nil && before != nil {
+		prevActive = before.ActiveEmail
+	}
+
 	// Install via the bridge (critical section, §6.3). CredentialJSON is the
 	// plaintext set; the bridge writes it to the account's config home.
 	addErr := h.bridge.Add(ctx, tsamxAddRequest(ref, d.GetOrganizationName(), plaintext, wantEnabled))
@@ -167,6 +181,20 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 		out := diverged(ack, "tsamx_add", addErr)
 		h.record(out, "deliver", amsID, desired.String())
 		return out
+	}
+
+	// Restore the runner's previously-active account (§6.3 "tsamx switch <이전 활성>
+	// 복귀"). Only when a *different* account was active before — the first-account
+	// case (prevActive == "") has none to return to, so the new slot may stay
+	// active. A failed restore leaves the runner on the new account, an overcharge
+	// risk, so it is surfaced as diverged (not converged).
+	if prevActive != "" && prevActive != ref.GetEmail() {
+		if serr := h.bridge.Switch(ctx, prevActive); serr != nil {
+			h.setAccountState(ctx, ack, ref, desired)
+			out := diverged(ack, "tsamx_restore_active", serr)
+			h.record(out, "deliver", amsID, desired.String())
+			return out
+		}
 	}
 
 	h.setAccountState(ctx, ack, ref, desired)

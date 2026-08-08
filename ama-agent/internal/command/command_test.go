@@ -179,6 +179,115 @@ func TestDeliverIdempotentResend(t *testing.T) {
 	}
 }
 
+// TestDeliverResendPreservesActiveNoOp (B1a idempotency): a resend of an
+// already-applied deliver takes the no-op path — it must not re-run Add, and must
+// not re-capture/re-restore the active account (no extra switch). The runner's
+// active account is unchanged and no new bridge mutation is issued.
+func TestDeliverResendPreservesActiveNoOp(t *testing.T) {
+	hn := newHarness(t)
+	ctx := context.Background()
+	if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := hn.deliverCmd(t, "d1", "acc-b", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, "")
+	hn.apply(t, cmd) // first apply: adds B, restores active to A
+	if got := hn.fake.ActiveEmail(); got != "a@x.io" {
+		t.Fatalf("after first deliver active = %q, want a@x.io", got)
+	}
+	addCalls := countPrefix(hn.fake.Calls, "add ")
+	switchCalls := countPrefix(hn.fake.Calls, "switch ")
+
+	ack := hn.apply(t, cmd) // resend
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("resend convergence = %v", ack.Convergence)
+	}
+	if got := countPrefix(hn.fake.Calls, "add "); got != addCalls {
+		t.Fatalf("resend re-ran Add: %d -> %d", addCalls, got)
+	}
+	if got := countPrefix(hn.fake.Calls, "switch "); got != switchCalls {
+		t.Fatalf("resend re-ran restore switch: %d -> %d", switchCalls, got)
+	}
+	if got := hn.fake.ActiveEmail(); got != "a@x.io" {
+		t.Fatalf("resend moved active = %q, want a@x.io", got)
+	}
+}
+
+// TestDeliverPreservesPreviousActive (B1a): delivering a NEW account must not
+// move the runner's live credential. `tsamx add` activates the new slot, so
+// handleDeliver restores the previously-active account — otherwise every deliver
+// silently reassigns the runner to the new account and overcharges it (§6.3).
+func TestDeliverPreservesPreviousActive(t *testing.T) {
+	hn := newHarness(t)
+	ctx := context.Background()
+	// Account A is the runner's currently-active account.
+	if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := hn.fake.ActiveEmail(); got != "a@x.io" {
+		t.Fatalf("precondition: active = %q, want a@x.io", got)
+	}
+	// Deliver a new account B.
+	ack := hn.apply(t, hn.deliverCmd(t, "d1", "acc-b", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("deliver convergence = %v detail=%q", ack.Convergence, ack.Detail)
+	}
+	if !hn.fake.Has("b@x.io") {
+		t.Fatal("B not added to pool")
+	}
+	// The runner must still be on A, not the freshly delivered B.
+	if got := hn.fake.ActiveEmail(); got != "a@x.io" {
+		t.Fatalf("active after deliver = %q, want a@x.io (runner must not move to the new account)", got)
+	}
+}
+
+// TestDeliverFirstAccountBecomesActive (B1a): with no previously-active account
+// (empty pool) there is nothing to restore to, so the first delivered account may
+// stay active.
+func TestDeliverFirstAccountBecomesActive(t *testing.T) {
+	hn := newHarness(t)
+	ack := hn.apply(t, hn.deliverCmd(t, "d1", "acc-a", "a@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("deliver convergence = %v detail=%q", ack.Convergence, ack.Detail)
+	}
+	if got := hn.fake.ActiveEmail(); got != "a@x.io" {
+		t.Fatalf("first delivered account should be active, got %q", got)
+	}
+}
+
+// TestDeliverDesiredStatusDoesNotMoveActive (B1a): deliver adds to the pool and
+// only sets enable/disable; it never changes which account is live, whether
+// desired is ACTIVE (enabled rotation candidate) or INACTIVE (disabled). The
+// runner stays on the previously-active account in both cases.
+func TestDeliverDesiredStatusDoesNotMoveActive(t *testing.T) {
+	cases := []struct {
+		name         string
+		desired      amxv1.AllocationStatus
+		wantDisabled bool
+	}{
+		{"desiredActive", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, false},
+		{"desiredInactive", amxv1.AllocationStatus_ALLOCATION_STATUS_INACTIVE, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := newHarness(t)
+			ctx := context.Background()
+			if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+				t.Fatal(err)
+			}
+			ack := hn.apply(t, hn.deliverCmd(t, "d1", "acc-b", "b@x.io", tc.desired, ""))
+			if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+				t.Fatalf("deliver convergence = %v detail=%q", ack.Convergence, ack.Detail)
+			}
+			if got := hn.fake.ActiveEmail(); got != "a@x.io" {
+				t.Fatalf("active = %q, want a@x.io (runner active unchanged)", got)
+			}
+			if d, ok := hn.fake.Disabled("b@x.io"); !ok || d != tc.wantDisabled {
+				t.Fatalf("b disabled = %v (present=%v), want %v", d, ok, tc.wantDisabled)
+			}
+		})
+	}
+}
+
 // TestRecallDisablePreservesRecord: recall with purge_local_copy=false disables
 // the account and keeps the manifest record (marked INACTIVE) — O2.
 func TestRecallDisablePreservesRecord(t *testing.T) {

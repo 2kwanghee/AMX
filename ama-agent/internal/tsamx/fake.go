@@ -75,6 +75,10 @@ func (f *Fake) Add(_ context.Context, req AddRequest) error {
 	}
 	acc.cred = append([]byte(nil), req.CredentialJSON...)
 	acc.disabled = !req.Enable
+	// Model real `tsamx add`: capturing a slot makes it the active account
+	// (exec.go Add / SSOT §6.3). deliver relies on this to know it must restore
+	// the previously-active account afterward.
+	f.active = req.Email
 	return nil
 }
 
