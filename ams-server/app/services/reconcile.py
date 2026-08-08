@@ -17,18 +17,49 @@ Convergence -> assignment state (design note §5):
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Account, AgentCommand, Assignment
+from app.models import Account, AgentCommand, Assignment, UsageSnapshot
+from app.services import commands
+
+_logger = logging.getLogger("ams.reconcile")
 
 CONVERGED = "converged"
 PENDING = "pending"
 DIVERGED = "diverged"
 REJECTED = "rejected"
+
+# Actual allocation statuses as reported by the agent (translated from the proto
+# AllocationStatus enum at the gRPC boundary, keeping this module protobuf-free).
+ACTUAL_ACTIVE = "active"
+ACTUAL_INACTIVE = "inactive"
+ACTUAL_QUARANTINED = "quarantined"
+ACTUAL_ABSENT = "absent"
+
+# assignment.state -> the allocation status the agent should be reporting for it.
+# delivering/recalling are deliberately absent: those are in-flight and compared
+# by the command-ack path, not by the report path (avoids racing a live command).
+_EXPECTED_ACTUAL = {
+    "active": ACTUAL_ACTIVE,
+    "inactive": ACTUAL_INACTIVE,
+    "quarantined": ACTUAL_QUARANTINED,
+    "detached": ACTUAL_ABSENT,
+}
+
+# R3 loop guard: cap how many times reconcile may re-issue the SAME narrow
+# correction for the SAME assignment. Beyond it, drift is still alarmed but no
+# further command is queued — a feedback loop cannot form.
+CORRECTION_CAP = int(os.environ.get("AMX_RECONCILE_CORRECTION_CAP", "3"))
+
+# Narrow, safe, idempotent corrections only (design note decision 7):
+CORRECTION_REDELIVER = "redeliver"  # assigned (active/inactive) but locally absent
+CORRECTION_RECALL = "recall"  # detached but still present locally
 
 
 def _now() -> datetime:
@@ -170,3 +201,144 @@ def suppress_applied(
         command.updated_at = _now()
         _apply_converged(db, command, assignment)
     db.commit()
+
+
+# -- reconcile-on-report (design note §5, decision 3 & 7) ---------------------
+def reconcile_from_report(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    server_id: uuid.UUID,
+    reported: dict[str, str],
+    snapshot: UsageSnapshot | None = None,
+    correction_cap: int = CORRECTION_CAP,
+) -> list[dict]:
+    """Compare desired (assignment table) against actual (this report).
+
+    ``reported`` maps ``ams_account_id`` -> the actual allocation status the
+    agent reported (translated from the proto enum at the gRPC boundary; an
+    account the agent does not mention is treated as ``ACTUAL_ABSENT``). This is
+    where rule 2 (the report is the actual authority) and rule 3 (redelivery is
+    only suppressed while the account is actually present) are actually fired:
+
+    * ``is_current`` is never compared — a manual/auto switch moves it without
+      being drift, so only ``allocation_status`` is checked.
+    * Drift is always alarmed and marked on the snapshot.
+    * Auto-correction is narrow and idempotent (decision 7): an assigned account
+      absent locally is re-delivered; a detached account still present locally
+      is re-recalled. Every other mismatch is alarm-only. A per-(assignment,
+      correction) cap stops any feedback loop.
+
+    The caller commits; this function only stages rows (so it composes with the
+    snapshot insert in one transaction). Scoped to ``(tenant_id, server_id)``.
+    """
+    assignments = list(
+        db.scalars(
+            select(Assignment).where(
+                Assignment.tenant_id == tenant_id,
+                Assignment.server_id == server_id,
+                Assignment.state.in_(("active", "inactive", "quarantined", "detached")),
+            )
+        ).all()
+    )
+    # A detached row is history; if the same account has a live (non-detached)
+    # assignment on this server it was legitimately re-installed, so the detached
+    # row's "present locally" is not drift and must not trigger a recall.
+    live_account_ids = {
+        str(a.account_id) for a in assignments if a.state != "detached"
+    }
+
+    drift_entries: list[dict] = []
+    for assignment in assignments:
+        expected = _EXPECTED_ACTUAL[assignment.state]
+        actual = reported.get(str(assignment.account_id), ACTUAL_ABSENT)
+        if actual == expected:
+            continue
+        if assignment.state == "detached" and str(assignment.account_id) in live_account_ids:
+            continue  # covered by a live assignment; not drift
+
+        correction = None
+        if assignment.state in ("active", "inactive") and actual == ACTUAL_ABSENT:
+            correction = CORRECTION_REDELIVER
+        elif assignment.state == "detached" and actual != ACTUAL_ABSENT:
+            correction = CORRECTION_RECALL
+
+        corrected = False
+        capped = False
+        if correction is not None:
+            corrected, capped = _apply_correction(db, assignment, correction, correction_cap)
+
+        entry = {
+            "assignment_id": str(assignment.id),
+            "account_id": str(assignment.account_id),
+            "expected": expected,
+            "actual": actual,
+            "correction": correction,
+            "corrected": corrected,
+        }
+        drift_entries.append(entry)
+        _logger.warning(
+            "reconcile drift: assignment=%s account=%s expected=%s actual=%s "
+            "correction=%s corrected=%s capped=%s",
+            assignment.id,
+            assignment.account_id,
+            expected,
+            actual,
+            correction,
+            corrected,
+            capped,
+        )
+
+    if drift_entries and snapshot is not None:
+        snapshot.drift = drift_entries
+    return drift_entries
+
+
+def _apply_correction(
+    db: Session, assignment: Assignment, correction: str, cap: int
+) -> tuple[bool, bool]:
+    """Queue one narrow correction, honouring the loop cap. Returns
+    ``(corrected, capped)`` — ``capped`` is True when the cap blocked it."""
+    marker = AgentCommand.payload["reconcile_correction"].astext
+    # Skip if one is already in flight — don't stack a fresh correction on every
+    # 5-minute report before the first has had a chance to converge.
+    inflight = db.scalar(
+        select(func.count())
+        .select_from(AgentCommand)
+        .where(
+            AgentCommand.assignment_id == assignment.id,
+            marker == correction,
+            AgentCommand.status.in_(("queued", "sent")),
+        )
+    )
+    if inflight:
+        return False, False
+    # Loop guard: cap total historical re-issues of this correction.
+    prior = (
+        db.scalar(
+            select(func.count())
+            .select_from(AgentCommand)
+            .where(
+                AgentCommand.assignment_id == assignment.id,
+                marker == correction,
+            )
+        )
+        or 0
+    )
+    if prior >= cap:
+        return False, True
+
+    if correction == CORRECTION_REDELIVER:
+        command_type = "deliver"
+        payload = {
+            "reconcile_correction": correction,
+            "desired_status": assignment.state,  # "active" or "inactive"
+        }
+    else:  # CORRECTION_RECALL
+        command_type = "recall"
+        payload = {"reconcile_correction": correction, "purge_local_copy": False}
+
+    commands.enqueue(
+        db, assignment=assignment, command_type=command_type, payload=payload
+    )
+    return True, False

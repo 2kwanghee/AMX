@@ -13,11 +13,20 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// SwitchController is the scheduler control surface the Handler drives from
+// SetSwitchMode (auto -> Start, manual -> Stop). Kept as an interface so the
+// command package does not import the scheduler (avoids an import cycle).
+type SwitchController interface {
+	Start()
+	Stop()
+}
 
 // DefaultAcceptanceWindow bounds how stale a signed command's issued_at may be
 // before it is rejected as a possible replay (SSOT §6.3 / proto AmsCommand.issued_at).
@@ -34,6 +43,12 @@ type Handler struct {
 	bridge  tsamx.Bridge
 	creds   *store.CredentialSidecar // nil -> memory-only (tests)
 
+	// engine serializes every tsamx mutation sequence with the scheduler tick
+	// (design decision 4, R3). Shared with the Scheduler; never nil.
+	engine    *sync.Mutex
+	outbox    *reporter.Outbox // AccountEvent sink for manual switches; may be nil
+	switchCtl SwitchController // scheduler start/stop; may be nil (tests)
+
 	window time.Duration
 	now    func() time.Time
 
@@ -44,6 +59,22 @@ type Handler struct {
 	// path B — AMS has already burned the one-shot enroll_token by then.
 	serverCredential string
 	switchMode       amxv1.SwitchMode
+	// defaultStrategy is the strategy SetPolicy delivered; used by auto/switch_now
+	// when no explicit strategy is named (O4-C). Memory-only, re-asserted each
+	// session.
+	defaultStrategy amxv1.SwitchNow_SwitchStrategy
+	// lastSwitchedAt records the time of the last manual switch (informational,
+	// design note §3). Memory-only.
+	lastSwitchedAt time.Time
+	// lastPolicyIssuedAt is the issued_at of the most recently applied SetPolicy.
+	// SetPolicy is re-asserted every session and is NOT gated by the applied log
+	// (re-application is idempotent), so this memory-only high-water mark is the
+	// only thing that stops a captured older SetPolicy — resent inside the
+	// freshness window — from rolling the live threshold BACK to a past value
+	// (ADVERSARY R3: a threshold 90 recaptured after the operator lowered it to
+	// 50). Only strictly-newer-or-equal issued_at is applied; strictly older is
+	// ignored.
+	lastPolicyIssuedAt time.Time
 }
 
 // Config assembles a Handler.
@@ -57,6 +88,14 @@ type Config struct {
 	Creds            *store.CredentialSidecar // optional; nil keeps the credential in memory only
 	AcceptanceWindow time.Duration            // 0 -> DefaultAcceptanceWindow
 	Now              func() time.Time
+	// Engine is the shared tsamx serialization lock (R3). Nil -> the Handler
+	// allocates its own (fine for tests with no scheduler).
+	Engine *sync.Mutex
+	// Outbox is where manual-switch AccountEvents are queued. Nil -> no event.
+	Outbox *reporter.Outbox
+	// SwitchController starts/stops the scheduler on SetSwitchMode. Nil -> mode is
+	// only recorded (P2 behavior).
+	SwitchController SwitchController
 }
 
 // New validates cfg and returns a Handler.
@@ -78,16 +117,23 @@ func New(cfg Config) (*Handler, error) {
 	if now == nil {
 		now = time.Now
 	}
+	engine := cfg.Engine
+	if engine == nil {
+		engine = &sync.Mutex{}
+	}
 	h := &Handler{
-		agentID: cfg.AgentID,
-		pub:     cfg.PublicKey,
-		store:   cfg.Store,
-		keks:    cfg.KEKs,
-		applied: cfg.Applied,
-		bridge:  cfg.Bridge,
-		creds:   cfg.Creds,
-		window:  w,
-		now:     now,
+		agentID:   cfg.AgentID,
+		pub:       cfg.PublicKey,
+		store:     cfg.Store,
+		keks:      cfg.KEKs,
+		applied:   cfg.Applied,
+		bridge:    cfg.Bridge,
+		creds:     cfg.Creds,
+		engine:    engine,
+		outbox:    cfg.Outbox,
+		switchCtl: cfg.SwitchController,
+		window:    w,
+		now:       now,
 	}
 	// Recover a credential persisted by a previous run so the first Register
 	// after a restart authenticates over path B (§7 enroll handshake).
@@ -112,6 +158,13 @@ func (h *Handler) SwitchMode() amxv1.SwitchMode {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.switchMode
+}
+
+// DefaultStrategy returns the strategy last delivered by SetPolicy (O4-C).
+func (h *Handler) DefaultStrategy() amxv1.SwitchNow_SwitchStrategy {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.defaultStrategy
 }
 
 // Handle processes one command and returns the convergence ack.
@@ -150,6 +203,8 @@ func (h *Handler) Handle(ctx context.Context, cmd *amxv1.AmsCommand) *amxv1.Comm
 		return h.handleSetActive(ctx, cmd, c.SetActive, ack)
 	case *amxv1.AmsCommand_SetMode:
 		return h.handleSetMode(ctx, cmd, c.SetMode, ack)
+	case *amxv1.AmsCommand_SetPolicy:
+		return h.handleSetPolicy(ctx, cmd, c.SetPolicy, ack)
 	case *amxv1.AmsCommand_SwitchNow:
 		return h.handleSwitchNow(ctx, cmd, c.SwitchNow, ack)
 	case *amxv1.AmsCommand_ReqReport:

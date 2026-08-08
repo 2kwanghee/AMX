@@ -467,10 +467,20 @@ scheduler 틱 (적응 주기, 기본 60s)
   + autoswitch_state.json fsnotify 감시 (이중 감지: lastSwitchAt/lastSwitchTo, quarantine)
 ```
 
-- 임계치 95%는 AMA 초기화 시 `tsamx config set autoswitch.threshold 95`로 주입.
-- 히스테리시스·쿨다운·quarantine·후보 랭킹은 tsamx 엔진 그대로 활용 (재구현 없음).
-- **전 계정 소진**(all-exhausted, 전부 95%↑) 감지 시 → 크리티컬 이벤트 전송
+- 임계치는 AMS가 `SetPolicy`(cmd 17)로 하달 → AMA가 `tsamx config set autoswitch.threshold <pct>` 주입 (O4-C, 기본 95).
+- 히스테리시스·쿨다운·quarantine·후보 랭킹은 tsamx 엔진 그대로 활용 (재구현 없음, O4-C에서 로컬 소유).
+- **전 계정 소진**(all-exhausted, 전부 임계↑) 감지 시 → 크리티컬 이벤트 전송
   → AMS가 경보 + 추가 계정 배정 판단.
+
+**P3 설계 확정 (설계노트 `docs/design-notes/p3-architecture.md` 참조):**
+- **세션 권위 재천명**: AMA의 `switch_mode`·정책은 메모리 전용(재부팅 소실)이므로, AMS는 매 세션 시작 시
+  `SessionSetup → SetSwitchMode → SetPolicy`를 **무조건 재천명**한다(applied 게이트 제외). 재천명 없으면
+  재시작한 에이전트가 zero-value=MANUAL로 떨어져 자동 스위칭이 멈춘다.
+- **reconcile-on-report**: reconcile은 별도 타이머가 아니라 **UsageReport 케이던스로 구동**한다. 5분마다
+  도착하는 리포트가 actual 권위이므로 수신 시점에 desired(assignments) vs actual을 대조한다. 자동 교정은
+  안전·멱등 케이스로 좁게 게이트하고 루프 방지 카운터를 둔다.
+- **엔진 락**: scheduler 틱(`auto --once`)과 command 핸들러(deliver 크리티컬 섹션)는 같은 tsamx 풀을
+  만지므로, 모든 bridge 변경 시퀀스를 단일 mutex로 직렬화한다(P3 최대 동시성 난제).
 
 ### 6.5 보고 스키마 (요구 AMA-2) — 5분 폴링 + 수동 조회 공용
 
@@ -548,7 +558,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | O1 | AMA KEK 보관 | **결정: 메모리 전용** (2026-08-08). 재부팅 시 KEK 소실 → AMS 재연결로 `SessionSetup` 재수신해야 로컬 스토어 복호. TPM/봉인 없음. 콜드스타트 3규칙은 §6.3 | ✅ 확정 |
 | O2 | recall 시맨틱 | **결정: disable만** (2026-08-08). 기본 `purge_local_copy=false` — `tsamx disable`+레코드 보존(빠른 재배정), `true`만 완전 삭제. §5.2·§6.3 반영 | ✅ 확정 |
 | O3 | API-key 계정 | 구독 쿼터 없어 95% 임계 무의미 — 관리 대상 포함 여부. 포함 시 등록 경로는 `tsamx add-token`이 여전히 유효 (api_key는 대화형 로그인 불필요, §2.4-5의 폐기는 oauth 한정) | P1 중 |
-| O4 | 스위칭 정책 소유권 | threshold/쿨다운을 AMS 중앙 관리·하달 vs tsamx 로컬 기본값 유지(현 설계: 95만 하달) | P3 |
+| O4 | 스위칭 정책 소유권 | **결정: 하이브리드(O4-C)** (2026-08-08). `threshold_pct`+`default_strategy`는 AMS가 `SetPolicy`(proto cmd 17)로 하달, cooldown/hysteresis는 tsamx 로컬. 전체 중앙화(O4-B)는 P5 이월(SetPolicy 필드 추가로 확장). §6.4·설계노트 P3 | ✅ 확정 |
 | O5 | 러너 config 공유 | AMA 서버의 실행 러너(Claude Code)가 같은 `~/.claude`를 읽는지 배포 시 보장 필요. deliver 크리티컬 섹션(§6.3) 동안 러너 무중단(또는 일시 정지) 방안 포함 | P2 배포 설계 |
 | O6 | tsamx 업스트림 동기화 절차 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 검증 체크리스트 + 소유자 | P1 이후 운영 |
 | O7 | 다중 AMS 인스턴스 | 세션 레지스트리 + 내부 라우팅 (P1은 단일 인스턴스로 미룸) | SaaS 단계 |

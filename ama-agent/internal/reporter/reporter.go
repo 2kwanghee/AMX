@@ -1,11 +1,13 @@
 // Package reporter builds usage reports and account events from the tsamx cache
 // (design note §6, SSOT §6.5). It re-serializes `tsamx list --json` — it does NOT
-// poll the usage API itself. P2 skeleton: report construction + an offline outbox
-// with dedupe; the 5-minute ticker is wired in cmd/ama but left un-driven per P2.
+// poll the usage API itself. Report construction plus an offline outbox with
+// bounded dedupe; the 5-minute usage ticker is driven from cmd/ama/main.go (§6.5).
 package reporter
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -13,6 +15,17 @@ import (
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// NewEventID returns a random hex identifier for an AccountEvent's outbox dedupe
+// key (proto AccountEvent.event_id). Falls back to a timestamp-derived value if
+// the CSPRNG is unavailable (never expected).
+func NewEventID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "evt-" + time.Now().UTC().Format("20060102T150405.000000000")
+	}
+	return hex.EncodeToString(b[:])
+}
 
 // SwitchThresholdPct is the utilization at/above which an account counts as
 // exhausted for pool summary purposes (D10, injected into tsamx as 95).
@@ -134,12 +147,24 @@ func parseTime(s string) *timestamppb.Timestamp {
 	return nil
 }
 
+// outboxDedupeWindow bounds how many recent event_ids the outbox remembers for
+// dedupe. On a long-running agent an unbounded seen-set would grow without limit
+// (memory leak); a re-send of an event_id evicted past this window is treated as
+// new, which the emitters never do in practice (event_ids are fresh per event).
+const outboxDedupeWindow = 1024
+
 // Outbox queues AccountEvents while AMS is unreachable and flushes them on
-// reconnect, deduplicated by event_id (SSOT §6.3 offline outbox).
+// reconnect, deduplicated by event_id over a bounded recent window (SSOT §6.3
+// offline outbox).
 type Outbox struct {
 	mu    sync.Mutex
 	queue []*amxv1.AccountEvent
-	seen  map[string]struct{}
+	// seen holds the event_ids currently inside the dedupe window; ring is a
+	// fixed-size FIFO of the same ids so seen stays bounded at outboxDedupeWindow.
+	seen map[string]struct{}
+	ring [outboxDedupeWindow]string
+	rlen int // occupied slots (grows to the window size, then stays)
+	rpos int // next write index (and, once full, the oldest slot)
 }
 
 // NewOutbox returns an empty outbox.
@@ -147,7 +172,7 @@ func NewOutbox() *Outbox {
 	return &Outbox{seen: make(map[string]struct{})}
 }
 
-// Enqueue adds an event unless its event_id was already queued or flushed.
+// Enqueue adds an event unless its event_id is still inside the dedupe window.
 func (o *Outbox) Enqueue(ev *amxv1.AccountEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -156,9 +181,22 @@ func (o *Outbox) Enqueue(ev *amxv1.AccountEvent) {
 		if _, ok := o.seen[id]; ok {
 			return
 		}
-		o.seen[id] = struct{}{}
+		o.markSeen(id)
 	}
 	o.queue = append(o.queue, ev)
+}
+
+// markSeen records id in the dedupe window, evicting the oldest id once the
+// window is full so the seen map cannot grow past outboxDedupeWindow entries.
+func (o *Outbox) markSeen(id string) {
+	if o.rlen == outboxDedupeWindow {
+		delete(o.seen, o.ring[o.rpos]) // slot at rpos is the oldest once full
+	} else {
+		o.rlen++
+	}
+	o.ring[o.rpos] = id
+	o.rpos = (o.rpos + 1) % outboxDedupeWindow
+	o.seen[id] = struct{}{}
 }
 
 // Depth returns the number of queued events (for Heartbeat.outbox_depth).

@@ -190,10 +190,11 @@ message AmsCommand {
     SwitchNow switch_now = 14;
     RequestReport req_report = 15;
     SessionSetup session_setup = 16;
+    SetPolicy set_policy = 17;
   }
 
   // Reserved for future commands.
-  reserved 17 to 29;
+  reserved 18 to 29;
 }
 
 // Session establishment layer, sent by AMS at the start of a session and again
@@ -320,6 +321,19 @@ message SwitchNow {
     SWITCH_STRATEGY_BEST = 1;
     SWITCH_STRATEGY_NEXT_AVAILABLE = 2;
   }
+}
+
+// Switching policy delivery (§6.4, O4-C hybrid). AMS owns threshold + default
+// strategy; cooldown/hysteresis stay local to the tsamx engine. Re-asserted
+// every session alongside SetSwitchMode, so AMA keeps it in memory only.
+message SetPolicy {
+  // Injected as `tsamx config set autoswitch.threshold <pct>`. 0 keeps the
+  // local default (no injection).
+  double threshold_pct = 1;
+  // Default for auto/switch_now when no strategy is named.
+  // UNSPECIFIED keeps the local default.
+  SwitchNow.SwitchStrategy default_strategy = 2;
+  // cooldown/hysteresis intentionally absent — tsamx-local (O4-C).
 }
 
 // Ask for an immediate report (§6.3 req_report, REST `:refresh-usage`).

@@ -52,6 +52,24 @@ _CONVERGENCE = {
     pb.CommandAck.CONVERGENCE_DIVERGED: reconcile.DIVERGED,
     pb.CommandAck.CONVERGENCE_REJECTED: reconcile.REJECTED,
 }
+_SWITCH_MODE = {
+    "auto": pb.SWITCH_MODE_AUTO,
+    "manual": pb.SWITCH_MODE_MANUAL,
+}
+_SWITCH_STRATEGY = {
+    "best": pb.SwitchNow.SWITCH_STRATEGY_BEST,
+    "next_available": pb.SwitchNow.SWITCH_STRATEGY_NEXT_AVAILABLE,
+}
+# proto AllocationStatus -> the actual-status strings reconcile compares against
+# (keeps app.services.reconcile protobuf-free — the translation lives here).
+_ALLOCATION_STATUS = {
+    pb.ALLOCATION_STATUS_ACTIVE: reconcile.ACTUAL_ACTIVE,
+    pb.ALLOCATION_STATUS_INACTIVE: reconcile.ACTUAL_INACTIVE,
+    pb.ALLOCATION_STATUS_QUARANTINED: reconcile.ACTUAL_QUARANTINED,
+    pb.ALLOCATION_STATUS_DELIVERING: "delivering",
+    pb.ALLOCATION_STATUS_RECALLING: "recalling",
+    pb.ALLOCATION_STATUS_ABSENT: reconcile.ACTUAL_ABSENT,
+}
 
 
 def _now() -> datetime:
@@ -62,6 +80,20 @@ def _now_ts() -> Timestamp:
     ts = Timestamp()
     ts.FromDatetime(_now())
     return ts
+
+
+def _set_policy_msg(threshold_pct, default_strategy) -> pb.SetPolicy:
+    """Build a SetPolicy from stored columns. NULL/absent values push nothing —
+    threshold_pct 0 and strategy UNSPECIFIED both mean "keep the tsamx-local
+    default" per the proto (O4-C)."""
+    policy = pb.SetPolicy()
+    if threshold_pct:
+        policy.threshold_pct = float(threshold_pct)
+    if default_strategy:
+        policy.default_strategy = _SWITCH_STRATEGY.get(
+            default_strategy, pb.SwitchNow.SWITCH_STRATEGY_UNSPECIFIED
+        )
+    return policy
 
 
 def sign_command(signer: signing.Signer, command: pb.AmsCommand) -> None:
@@ -118,6 +150,17 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         write_lock = asyncio.Lock()
         async with write_lock:
             await context.write(setup)
+
+        # Session authority re-assertion (design note decision 5): AMA's
+        # switch_mode and policy are memory-only, so AMS unconditionally re-pushes
+        # SessionSetup -> SetSwitchMode -> SetPolicy every session, exempt from the
+        # applied-id gate. Without it a restarted agent falls to MANUAL and auto
+        # switching stops. Signed and bound to agent_id, exactly like every other
+        # command; NULL policy columns push no value (the agent keeps its local
+        # default).
+        for cmd in await asyncio.to_thread(self._build_reassertion, server_id, agent_id):
+            async with write_lock:
+                await context.write(cmd)
 
         # Cold-start rule 3: suppress redundant redelivery only for accounts the
         # agent both reports applied AND reports present. An empty (pre-KEK)
@@ -255,6 +298,39 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
     def _build_command(
         self, db: Session, row: AgentCommand, agent_id: str, kek: bytes, key_id: str
     ) -> pb.AmsCommand | None:
+        # Bind the command to the authenticated recipient. target_agent_id is
+        # inside the signed payload, so the agent rejects any command not minted
+        # for it — a captured command cannot be re-injected into another agent.
+        cmd = pb.AmsCommand(
+            command_id=row.command_id, issued_at=_now_ts(), target_agent_id=agent_id
+        )
+        ctype = row.command_type
+
+        # Server-scoped (assignment_id NULL) session-control commands.
+        if ctype == "set_policy":
+            cmd.set_policy.CopyFrom(
+                _set_policy_msg(
+                    row.payload.get("threshold_pct"), row.payload.get("default_strategy")
+                )
+            )
+            sign_command(self._signer, cmd)
+            return cmd
+        if ctype == "set_mode":
+            mode = _SWITCH_MODE.get(row.payload.get("mode"), pb.SWITCH_MODE_UNSPECIFIED)
+            cmd.set_mode.CopyFrom(pb.SetSwitchMode(mode=mode))
+            sign_command(self._signer, cmd)
+            return cmd
+        if ctype == "req_report":
+            cmd.req_report.CopyFrom(
+                pb.RequestReport(
+                    report_type=pb.RequestReport.REPORT_TYPE_USAGE,
+                    reason=row.payload.get("reason", ""),
+                )
+            )
+            sign_command(self._signer, cmd)
+            return cmd
+
+        # Account/assignment-scoped commands from here on.
         assignment = db.scalar(
             select(Assignment).where(
                 Assignment.id == row.assignment_id, Assignment.tenant_id == row.tenant_id
@@ -274,17 +350,11 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             email=account.email,
             account_uuid=account.account_uuid or "",
         )
-        # Bind the command to the authenticated recipient. target_agent_id is
-        # inside the signed payload, so the agent rejects any command not minted
-        # for it — a captured command cannot be re-injected into another agent.
-        cmd = pb.AmsCommand(
-            command_id=row.command_id, issued_at=_now_ts(), target_agent_id=agent_id
-        )
-        if row.command_type == "deliver":
+        if ctype == "deliver":
             cmd.deliver.CopyFrom(
                 self._build_deliver(account, assignment, account_ref, row, agent_id, kek, key_id)
             )
-        elif row.command_type == "recall":
+        elif ctype == "recall":
             cmd.recall.CopyFrom(
                 pb.RecallAccount(
                     assignment_id=str(assignment.id),
@@ -292,19 +362,65 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                     purge_local_copy=bool(row.payload.get("purge_local_copy", False)),
                 )
             )
-        elif row.command_type in ("activate", "deactivate"):
+        elif ctype in ("activate", "deactivate"):
             cmd.set_active.CopyFrom(
                 pb.SetAccountActive(
                     assignment_id=str(assignment.id),
                     account=account_ref,
-                    active=bool(row.payload.get("active", row.command_type == "activate")),
-                    clear_quarantine=False,
+                    active=bool(row.payload.get("active", ctype == "activate")),
+                    clear_quarantine=bool(row.payload.get("clear_quarantine", False)),
                 )
             )
+        elif ctype == "switch_now":
+            switch = pb.SwitchNow(assignment_id=str(assignment.id))
+            strategy = row.payload.get("strategy")
+            if strategy:
+                switch.strategy = _SWITCH_STRATEGY.get(
+                    strategy, pb.SwitchNow.SWITCH_STRATEGY_UNSPECIFIED
+                )
+            else:
+                switch.account.CopyFrom(account_ref)
+            cmd.switch_now.CopyFrom(switch)
         else:
             return None
         sign_command(self._signer, cmd)
         return cmd
+
+    def _build_reassertion(
+        self, server_id: uuid.UUID, agent_id: str
+    ) -> list[pb.AmsCommand]:
+        """SetSwitchMode + SetPolicy re-asserted from the server row (decision 5).
+
+        Not routed through the outbox: re-assertion is idempotent and must not be
+        suppressed by the applied-id gate, so these carry fresh command_ids and
+        are built inline every session.
+        """
+        with self._sm() as db:
+            server = db.get(Server, server_id)
+            if server is None:
+                return []
+            mode = _SWITCH_MODE.get(server.switch_mode, pb.SWITCH_MODE_UNSPECIFIED)
+            threshold_pct = server.threshold_pct
+            default_strategy = server.default_strategy
+        out: list[pb.AmsCommand] = []
+        set_mode = pb.AmsCommand(
+            command_id="reassert_mode_" + uuid.uuid4().hex,
+            issued_at=_now_ts(),
+            target_agent_id=agent_id,
+        )
+        set_mode.set_mode.CopyFrom(pb.SetSwitchMode(mode=mode))
+        sign_command(self._signer, set_mode)
+        out.append(set_mode)
+
+        set_policy = pb.AmsCommand(
+            command_id="reassert_policy_" + uuid.uuid4().hex,
+            issued_at=_now_ts(),
+            target_agent_id=agent_id,
+        )
+        set_policy.set_policy.CopyFrom(_set_policy_msg(threshold_pct, default_strategy))
+        sign_command(self._signer, set_policy)
+        out.append(set_policy)
+        return out
 
     def _build_deliver(
         self,
@@ -427,14 +543,31 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         report_type: str,
     ) -> None:
         with self._sm() as db:
-            db.add(
-                UsageSnapshot(
-                    tenant_id=tenant_id,
-                    server_id=server_id,
-                    account_id=None,
-                    report_type=report_type,
-                    payload=MessageToDict(report, preserving_proto_field_name=True),
+            snapshot = UsageSnapshot(
+                tenant_id=tenant_id,
+                server_id=server_id,
+                account_id=None,
+                report_type=report_type,
+                payload=MessageToDict(report, preserving_proto_field_name=True),
+            )
+            db.add(snapshot)
+            db.flush()  # assign snapshot.id before reconcile marks drift on it
+            # reconcile-on-report (design note decision 3): the report is the
+            # actual authority. Translate proto AllocationStatus to the strings
+            # reconcile compares, then let it detect drift + narrow corrections.
+            reported = {
+                a.account.ams_account_id: _ALLOCATION_STATUS.get(
+                    a.allocation_status, reconcile.ACTUAL_ABSENT
                 )
+                for a in report.accounts
+                if a.account.ams_account_id
+            }
+            reconcile.reconcile_from_report(
+                db,
+                tenant_id=tenant_id,
+                server_id=server_id,
+                reported=reported,
+                snapshot=snapshot,
             )
             db.commit()
 

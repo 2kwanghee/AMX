@@ -21,6 +21,7 @@ AccountStatus = Literal["available", "assigned", "disabled", "quarantined"]
 CredentialType = Literal["oauth", "api_key"]
 ServerStatus = Literal["online", "offline", "degraded"]
 SwitchMode = Literal["auto", "manual"]
+SwitchStrategy = Literal["best", "next_available"]
 AssignmentState = Literal[
     "pending", "delivering", "active", "inactive", "quarantined", "recalling", "detached"
 ]
@@ -120,6 +121,11 @@ class ServerUpdate(Wire):
     name: str | None = Field(default=None, min_length=1)
     hostname: str | None = None
     status: ServerStatus | None = None
+    # O4-C policy (design note O4-C). Provided fields are written; unset fields
+    # are left untouched (detected via model_fields_set). threshold_pct None
+    # clears central control back to the tsamx-local default.
+    threshold_pct: float | None = Field(default=None, ge=0, le=100)
+    default_strategy: SwitchStrategy | None = None
 
 
 class Server(Wire):
@@ -128,6 +134,8 @@ class Server(Wire):
     name: str
     hostname: str | None = None
     switch_mode: SwitchMode
+    threshold_pct: float | None = None
+    default_strategy: SwitchStrategy | None = None
     status: ServerStatus
     agent_id: str | None = None
     agent_version: str | None = None

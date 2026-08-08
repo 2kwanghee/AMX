@@ -98,6 +98,21 @@ func (c *Client) Send(msg *amxv1.AmaMessage) error {
 	}
 }
 
+// TrySend queues a message without blocking. It returns false if the send buffer
+// is full (drop the message) or the client is closed. Used for usage reports,
+// which the next tick supersedes, so a drop when disconnected is harmless
+// (design note §8: usage is not an event).
+func (c *Client) TrySend(msg *amxv1.AmaMessage) bool {
+	select {
+	case <-c.closed:
+		return false
+	case c.sendCh <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
 // Recv returns the channel of inbound commands. It stays open across reconnects
 // and is closed only by Close.
 func (c *Client) Recv() <-chan *amxv1.AmsCommand {

@@ -34,6 +34,27 @@ type Bridge interface {
 	Switch(ctx context.Context, target string) error
 	List(ctx context.Context) (*ListResult, error)
 	Status(ctx context.Context) (*StatusResult, error)
+
+	// AutoOnce runs `tsamx auto --once` (a single evaluate-and-maybe-switch
+	// tick) and returns its exit code: 0 switched, 2 no action, 3 blocked (no
+	// viable target / all exhausted). A non-nil error is returned only for a
+	// real failure (exit 1, or the process could not run); codes 0/2/3 are
+	// normal outcomes returned with a nil error (design note §2, §6).
+	AutoOnce(ctx context.Context) (int, error)
+	// SwitchStrategy runs `tsamx switch --strategy <strategy>` where strategy is
+	// "best" or "next-available" (design note §3).
+	SwitchStrategy(ctx context.Context, strategy string) error
+	// ConfigSetThreshold runs `tsamx config set autoswitch.threshold <pct>`
+	// (O4-C SetPolicy delivery, design note §O4-C).
+	ConfigSetThreshold(ctx context.Context, pct float64) error
+	// AutoStatePath returns the path to tsamx's autoswitch_state.json, watched
+	// for quarantine changes (design note §2 dual detection). Empty when the
+	// path cannot be resolved, in which case the watcher is not started.
+	AutoStatePath() string
+	// ReadQuarantine returns the currently quarantined accounts as number->email
+	// from autoswitch_state.json. A missing/unreadable state file yields an empty
+	// map and a nil error (nothing quarantined).
+	ReadQuarantine(ctx context.Context) (map[string]string, error)
 }
 
 // ListResult mirrors `tsamx list --json` (tsamx json_output schema v1).
