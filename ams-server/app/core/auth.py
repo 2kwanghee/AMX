@@ -21,5 +21,9 @@ def require_admin(authorization: str | None = Header(default=None)) -> None:
         raise ApiError(
             401, "Unauthorized", "auth.missing_bearer", "Bearer token required."
         )
-    if not secrets.compare_digest(token, get_settings().admin_token):
+    # Compared as UTF-8 bytes, not as str: compare_digest raises TypeError on a
+    # str containing any code point above U+00FF, so a non-ASCII Authorization
+    # header would otherwise leave an unhandled 500 and a traceback where a 401
+    # belongs. Encoding both sides also keeps the comparison constant-time.
+    if not secrets.compare_digest(token.encode("utf-8"), get_settings().admin_token.encode("utf-8")):
         raise ApiError(401, "Unauthorized", "auth.invalid_token", "Invalid admin token.")

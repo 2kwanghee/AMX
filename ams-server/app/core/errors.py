@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 
 class ApiError(Exception):
@@ -33,6 +37,34 @@ def not_implemented(code: str, detail: str) -> ApiError:
     return ApiError(501, "Not Implemented", code, detail)
 
 
+def scrub_validation_errors(errors: list[Any]) -> list[dict[str, Any]]:
+    """Keep the shape of a validation failure, drop the payload that caused it.
+
+    FastAPI's own 422 body echoes each error's `input` — for this API that is
+    the credential set on `POST /accounts` or the authorization code on
+    `:oauth-complete`, so the default handler would put plaintext secrets in a
+    response body and in any access log that records one (§7). `ctx` goes too:
+    it carries constraint context that can quote the offending value.
+
+    An allowlist, not a blocklist: only `loc`, `msg` and `type` survive, so a
+    future pydantic version that adds another value-bearing key cannot reopen
+    this. `loc` is field position and `msg`/`type` are constraint text, none of
+    which depend on what the caller sent.
+    """
+    scrubbed = []
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        scrubbed.append(
+            {
+                "loc": [str(part) for part in error.get("loc", ())],
+                "msg": str(error.get("msg", "")),
+                "type": str(error.get("type", "")),
+            }
+        )
+    return scrubbed
+
+
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _handle(_: Request, exc: ApiError) -> JSONResponse:
@@ -46,4 +78,38 @@ def install_error_handlers(app: FastAPI) -> None:
             body["detail"] = exc.detail
         return JSONResponse(
             status_code=exc.status, content=body, media_type="application/problem+json"
+        )
+
+    # Registered explicitly for both exception types: FastAPI installs its own
+    # RequestValidationError handler at construction time, and a
+    # pydantic.ValidationError raised while building a response model bypasses
+    # that one entirely and would otherwise surface as a 500 traceback.
+    @app.exception_handler(RequestValidationError)
+    async def _handle_request_validation(_: Request, exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "type": "about:blank",
+                "title": "Unprocessable Content",
+                "status": 422,
+                "code": "request.invalid",
+                "detail": "The request body or parameters failed validation.",
+                "errors": scrub_validation_errors(exc.errors()),
+            },
+            media_type="application/problem+json",
+        )
+
+    @app.exception_handler(ValidationError)
+    async def _handle_validation(_: Request, exc: ValidationError) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "type": "about:blank",
+                "title": "Internal Server Error",
+                "status": 500,
+                "code": "response.invalid",
+                "detail": "The server produced a response that failed validation.",
+                "errors": scrub_validation_errors(exc.errors()),
+            },
+            media_type="application/problem+json",
         )

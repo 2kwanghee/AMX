@@ -42,8 +42,17 @@ def decrypt_secret(ciphertext: str) -> str:
 def mask_secret(credential_type: str, plaintext: str) -> str:
     """A display hint that cannot be walked back to the credential.
 
-    Four characters of a salted digest, not of the secret itself — a suffix of
-    the real token would leak material every time the console renders a list.
+    Four characters of a plain SHA-256 digest, not of the secret itself — a
+    suffix of the real token would leak material every time the console renders
+    a list.
+
+    The digest is unsalted, so equal masks are evidence that two accounts hold
+    the same credential and a mask is a (weak, 16-bit) correlation handle across
+    tenants. That is accepted for P1: the mask discloses no credential material
+    and 4 hex characters collide often enough to make the signal noisy. Salting
+    it properly needs a masking key kept separate from `AMX_ENCRYPTION_KEY`
+    (§7 keeps key purposes apart), which belongs with the SaaS-stage envelope
+    encryption work, not here.
     """
     digest = hashlib.sha256(plaintext.encode()).hexdigest()[:4].upper()
     return f"{credential_type}:…{digest}"

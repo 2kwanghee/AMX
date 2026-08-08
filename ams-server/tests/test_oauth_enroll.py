@@ -206,6 +206,32 @@ def test_email_override_wins_over_the_credential_set(client, app):
     assert response.json()["email"] == "override@example.com"
 
 
+def test_a_422_on_oauth_complete_never_echoes_the_code(client):
+    """The authorization code is single-use material; a 422 must not carry it."""
+    tenant_id = make_tenant(client)
+    canary = "auth-code-canary-7b2e4d"
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts:oauth-complete",
+        json={"code": canary},  # flowId missing
+    )
+    assert response.status_code == 422
+    assert canary not in response.text
+    body = response.json()
+    assert body["code"] == "request.invalid"
+    assert [e["loc"] for e in body["errors"]] == [["body", "flowId"]]
+
+
+def test_a_422_on_oauth_start_never_echoes_the_body(client):
+    tenant_id = make_tenant(client)
+    canary = "label-canary-3c9f1a"
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts:oauth-start",
+        json={"label": {"unexpected": canary}},
+    )
+    assert response.status_code == 422
+    assert canary not in response.text
+
+
 def test_build_credential_set_requires_an_access_token():
     from app.core.errors import ApiError
 

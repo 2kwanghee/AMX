@@ -49,11 +49,80 @@ def test_a_wrong_bearer_token_is_rejected(client):
     assert response.json()["code"] == "auth.invalid_token"
 
 
+def test_a_non_ascii_bearer_token_is_rejected_not_crashed(client):
+    """A 401, not an unhandled 500.
+
+    Header bytes are decoded latin-1, so any byte above 0x7F becomes a
+    non-ASCII `str` — and `secrets.compare_digest` raises TypeError on those
+    rather than returning False. The header is sent as raw bytes here because
+    that is what a caller puts on the wire; the HTTP client refuses to encode a
+    non-ASCII header given as `str`, so a str-valued test would never reach the
+    server at all.
+    """
+    for token in ("토큰값입니다", "café-token-value", "🔑🔑🔑"):
+        response = client.get(
+            "/api/v1/tenants",
+            headers={"Authorization": b"Bearer " + token.encode("utf-8")},
+        )
+        assert response.status_code == 401, token
+        assert response.json()["code"] == "auth.invalid_token"
+
+
 def test_the_configured_token_is_accepted(client):
     response = client.get(
         "/api/v1/tenants", headers={"Authorization": f"Bearer {TEST_ADMIN_TOKEN}"}
     )
     assert response.status_code == 200
+
+
+# -- Validation failures ------------------------------------------------------
+CANARY = "canary-plaintext-must-not-appear-9f3a1c"
+
+
+def test_a_422_never_echoes_the_submitted_secret(client):
+    """FastAPI's default 422 body includes each error's `input` (§7)."""
+    tenant_id = make_tenant(client)
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts",
+        json={"credentialType": "oauth", "secret": CANARY},  # email missing
+    )
+    assert response.status_code == 422
+    assert CANARY not in response.text
+    body = response.json()
+    assert body["code"] == "request.invalid"
+    assert body["status"] == 422
+    assert [e["loc"] for e in body["errors"]] == [["body", "email"]]
+    for error in body["errors"]:
+        assert set(error) == {"loc", "msg", "type"}
+
+
+def test_a_422_never_echoes_a_bad_enum_value(client):
+    """The offending value reaches `input` and `ctx` on enum failures too."""
+    tenant_id = make_tenant(client)
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts",
+        json={"email": "a@example.com", "credentialType": CANARY, "secret": CANARY},
+    )
+    assert response.status_code == 422
+    assert CANARY not in response.text
+
+
+def test_scrub_keeps_only_location_and_message():
+    from app.core.errors import scrub_validation_errors
+
+    scrubbed = scrub_validation_errors(
+        [
+            {
+                "loc": ("body", "secret"),
+                "msg": "field required",
+                "type": "missing",
+                "input": {"secret": CANARY},
+                "ctx": {"expected": CANARY},
+                "url": "https://errors.pydantic.dev/",
+            }
+        ]
+    )
+    assert scrubbed == [{"loc": ["body", "secret"], "msg": "field required", "type": "missing"}]
 
 
 # -- Round trips --------------------------------------------------------------
