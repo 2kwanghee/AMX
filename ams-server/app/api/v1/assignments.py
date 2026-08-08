@@ -13,7 +13,6 @@ from fastapi import APIRouter, Query
 
 from app import schemas
 from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
-from app.api.v1.stubs import requires_channel
 from app.core.errors import bad_request
 from app.services import commands, inventory
 
@@ -131,18 +130,30 @@ def deactivate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: Db
     )
 
 
-@router.post("/assignments/{assignment_id}:recover", summary="recover (P2)")
+@router.post(
+    "/assignments/{assignment_id}:recover",
+    summary="recover",
+    response_model=schemas.Assignment,
+)
 def recover_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
-    inventory.get_assignment(db, tenant_id, assignment_id)
-    raise requires_channel("assignment.recover", "POST .../assignments/{id}:recover")
+    # §5.2 quarantined -> active via SetAccountActive(activate, clear_quarantine).
+    return schemas.Assignment.model_validate(
+        commands.request_recover(db, tenant_id, assignment_id)
+    )
 
 
-@router.post("/assignments/{assignment_id}:switch-now", summary="switch-now (P2)")
+@router.post(
+    "/assignments/{assignment_id}:switch-now",
+    summary="switch-now",
+    response_model=schemas.Assignment,
+)
 def switch_now(
     tenant_id: uuid.UUID,
     assignment_id: uuid.UUID,
     db: DbSession,
     body: schemas.SwitchNowRequest | None = None,
 ):
-    inventory.get_assignment(db, tenant_id, assignment_id)
-    raise requires_channel("assignment.switch_now", "POST .../assignments/{id}:switch-now")
+    strategy = body.strategy if body is not None else None
+    return schemas.Assignment.model_validate(
+        commands.request_switch_now(db, tenant_id, assignment_id, strategy=strategy)
+    )

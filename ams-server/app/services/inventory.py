@@ -318,6 +318,32 @@ def delete_server(db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID) -> No
     db.commit()
 
 
+_UNSET = object()
+
+
+def set_server_policy(
+    db: Session,
+    tenant_id: uuid.UUID,
+    server_id: uuid.UUID,
+    *,
+    threshold_pct=_UNSET,
+    default_strategy=_UNSET,
+) -> Server:
+    """Persist the O4-C switching policy columns (design note O4-C).
+
+    Only fields actually supplied are written, so a PATCH that carries just one
+    leaves the other in place. Commit is the caller's; the gRPC re-assertion and
+    the outbox SetPolicy read these columns back.
+    """
+    server = get_server(db, tenant_id, server_id)
+    if threshold_pct is not _UNSET:
+        server.threshold_pct = threshold_pct
+    if default_strategy is not _UNSET:
+        server.default_strategy = default_strategy
+    server.updated_at = _now()
+    return server
+
+
 def issue_enroll_token(
     db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID, *, ttl_seconds: int
 ) -> tuple[str, datetime]:

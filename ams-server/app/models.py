@@ -42,8 +42,18 @@ ASSIGNMENT_STATES = (
     "recalling",
     "detached",
 )
-COMMAND_TYPES = ("deliver", "recall", "activate", "deactivate")
+COMMAND_TYPES = (
+    "deliver",
+    "recall",
+    "activate",
+    "deactivate",
+    "set_mode",
+    "switch_now",
+    "req_report",
+    "set_policy",
+)
 COMMAND_STATUSES = ("queued", "sent", "acked", "failed")
+SWITCH_STRATEGIES = ("best", "next_available")
 
 
 class Base(DeclarativeBase):
@@ -128,6 +138,12 @@ class Server(Base):
     agent_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     tsamx_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     switch_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
+    # O4-C hybrid switching policy (design note O4-C). NULL means "not centrally
+    # set" — AMS delivers no value and the tsamx-local default stays in force.
+    # Re-asserted every session via SetPolicy (proto cmd 17); AMA keeps it in
+    # memory only, so a restart recovers it from here, not from an agent sidecar.
+    threshold_pct: Mapped[float | None] = mapped_column(nullable=True)
+    default_strategy: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="offline")
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -261,6 +277,10 @@ class UsageSnapshot(Base):
     account_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     report_type: Mapped[str] = mapped_column(String(32), nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # Reconcile-on-report drift marker (design note §5). NULL = no drift found on
+    # this report; otherwise a list of {assignment_id, expected, actual,
+    # correction, corrected} entries recorded by reconcile_from_report.
+    drift: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     reported_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

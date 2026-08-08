@@ -157,6 +157,15 @@ def test_commands_are_bound_to_the_authenticated_agent(app_env):
             assert setup.WhichOneof("cmd") == "session_setup"
             assert setup.target_agent_id == AGENT_ID
 
+            # Session authority re-assertion (decision 5): SetSwitchMode + SetPolicy
+            # are pushed right after SessionSetup and are agent-bound too.
+            set_mode = await _read(call)
+            assert set_mode.WhichOneof("cmd") == "set_mode"
+            assert set_mode.target_agent_id == AGENT_ID
+            set_policy = await _read(call)
+            assert set_policy.WhichOneof("cmd") == "set_policy"
+            assert set_policy.target_agent_id == AGENT_ID
+
             await asyncio.to_thread(_rest_deliver, tenant_id, assignment_id)
             cmd = await _read(call)
             assert cmd.WhichOneof("cmd") == "deliver"
@@ -217,6 +226,11 @@ def test_deliver_roundtrip_converges_assignment_to_active(app_env):
             )
             setup = await _read(call)
             kek = setup.session_setup.keys[0].wrapped_key
+
+            # Drain the decision-5 re-assertion (SetSwitchMode + SetPolicy) that
+            # precedes any outbox command on a fresh session.
+            assert (await _read(call)).WhichOneof("cmd") == "set_mode"
+            assert (await _read(call)).WhichOneof("cmd") == "set_policy"
 
             # REST deliver: enqueue + pending->delivering.
             await asyncio.to_thread(_rest_deliver, tenant_id, assignment_id)

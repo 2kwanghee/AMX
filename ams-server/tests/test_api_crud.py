@@ -311,7 +311,9 @@ def test_transition_endpoints_enqueue_commands_and_advance_state(client):
     assert recall.json()["state"] == "recalling"
 
 
-def test_deferred_transition_endpoints_still_report_501(client):
+def test_p3_switching_endpoints_are_wired(client):
+    # P3 track AMS: recover / switch-now / refresh-usage / switch-mode now enqueue
+    # commands instead of returning 501.
     tenant_id = make_tenant(client)
     account = make_account(client, tenant_id)
     server = make_server(client, tenant_id)
@@ -321,17 +323,41 @@ def test_deferred_transition_endpoints_still_report_501(client):
     ).json()
 
     base = f"/api/v1/tenants/{tenant_id}/assignments/{assignment['id']}"
-    # recover and switch-now are P3/deployment work and stay honest 501s.
-    for action in ("recover", "switch-now"):
-        response = client.post(f"{base}:{action}")
-        assert response.status_code == 501, action
-        assert "P2" in response.json()["detail"]
+    # switch-now on a pending (not-yet-installed) assignment fails its precondition
+    # with a 409 — wired, not a 501.
+    assert client.post(f"{base}:switch-now").status_code == 409
+    # recover requires quarantined; a pending assignment gets a 409.
+    assert client.post(f"{base}:recover").status_code == 409
 
     server_base = f"/api/v1/tenants/{tenant_id}/servers/{server['id']}"
-    assert client.post(f"{server_base}:refresh-usage").status_code == 501
-    assert client.post(f"{server_base}:switch-mode", json={"mode": "manual"}).status_code == 501
+    # refresh-usage queues a RequestReport → 202 Accepted.
+    assert client.post(f"{server_base}:refresh-usage").status_code == 202
+    # switch-mode persists servers.switch_mode and returns the updated server.
+    resp = client.post(f"{server_base}:switch-mode", json={"mode": "manual"})
+    assert resp.status_code == 200
+    assert resp.json()["switchMode"] == "manual"
     # Usage is a real read against the snapshot cache; nothing has reported yet.
     assert client.get(f"{server_base}/usage").status_code == 404
+
+
+def test_server_policy_patch_persists_and_is_masked_none_by_default(client):
+    tenant_id = make_tenant(client)
+    server = make_server(client, tenant_id)
+    server_base = f"/api/v1/tenants/{tenant_id}/servers/{server['id']}"
+    # Fresh server: no central policy.
+    assert server["thresholdPct"] is None
+    assert server["defaultStrategy"] is None
+    # PATCH sets the O4-C policy columns.
+    patched = client.patch(
+        server_base, json={"thresholdPct": 90, "defaultStrategy": "best"}
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["thresholdPct"] == 90
+    assert patched.json()["defaultStrategy"] == "best"
+    # A name-only PATCH leaves the policy untouched.
+    renamed = client.patch(server_base, json={"name": "runner-renamed"})
+    assert renamed.json()["thresholdPct"] == 90
+    assert renamed.json()["defaultStrategy"] == "best"
 
 
 def test_stub_endpoints_do_not_leak_other_tenants_ids(client):

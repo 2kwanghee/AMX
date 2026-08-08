@@ -8,9 +8,8 @@ from fastapi import APIRouter, Query, Response, status
 
 from app import schemas
 from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
-from app.api.v1.stubs import requires_channel
 from app.core.errors import not_found
-from app.services import inventory
+from app.services import commands, inventory
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["servers"], dependencies=[AdminAuth])
 
@@ -62,6 +61,20 @@ def update_server(
     server = inventory.update_server(
         db, tenant_id, server_id, name=body.name, hostname=body.hostname, status=body.status
     )
+    # O4-C policy fields are set only when actually present in the PATCH body
+    # (so a name-only PATCH does not clear the policy), then re-delivered to a
+    # connected agent via the outbox.
+    fields = body.model_fields_set
+    if "threshold_pct" in fields or "default_strategy" in fields:
+        kwargs = {}
+        if "threshold_pct" in fields:
+            kwargs["threshold_pct"] = body.threshold_pct
+        if "default_strategy" in fields:
+            kwargs["default_strategy"] = body.default_strategy
+        inventory.set_server_policy(db, tenant_id, server_id, **kwargs)
+        db.commit()
+        commands.request_set_policy(db, tenant_id, server_id)
+        db.refresh(server)
     return _to_wire(db, server)
 
 
@@ -104,15 +117,18 @@ def get_server_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
     return schemas.UsageSnapshot.model_validate(snapshot)
 
 
-@router.post("/servers/{server_id}:refresh-usage")
+@router.post("/servers/{server_id}:refresh-usage", status_code=status.HTTP_202_ACCEPTED)
 def refresh_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
-    inventory.get_server(db, tenant_id, server_id)
-    raise requires_channel("server.refresh_usage", "POST .../servers/{id}:refresh-usage")
+    # Queues a RequestReport for the connected agent; the report arrives back on
+    # the session stream (§6.3 req_report). Resolves the server first so a
+    # cross-tenant id gets 404 before anything is queued.
+    commands.request_refresh_usage(db, tenant_id, server_id)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
-@router.post("/servers/{server_id}:switch-mode")
+@router.post("/servers/{server_id}:switch-mode", response_model=schemas.Server)
 def set_switch_mode(
     tenant_id: uuid.UUID, server_id: uuid.UUID, body: schemas.SwitchModeRequest, db: DbSession
 ):
-    inventory.get_server(db, tenant_id, server_id)
-    raise requires_channel("server.switch_mode", "POST .../servers/{id}:switch-mode")
+    server = commands.request_switch_mode(db, tenant_id, server_id, mode=body.mode)
+    return _to_wire(db, server)
