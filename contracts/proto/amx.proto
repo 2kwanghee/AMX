@@ -231,8 +231,11 @@ message SessionSetup {
   message WrappedKey {
     string key_id = 1;
 
-    // The KEK, wrapped for this agent in transit. Plaintext KEK material never
-    // touches disk on the agent (§6.2) and is never logged (§7).
+    // The KEK sealed to Register.agent_public_key via a NaCl sealed box
+    // (X25519 + XSalsa20-Poly1305), so only this agent's ephemeral private key
+    // can open it (C2, §7). When the agent sent no public key and AMS runs with
+    // AMX_ALLOW_RAW_KEK (dev only), this is the raw KEK instead. Plaintext KEK
+    // material never touches disk on the agent (§6.2) and is never logged (§7).
     bytes wrapped_key = 2;
 
     EncryptionAlgorithm algorithm = 3;
@@ -412,6 +415,14 @@ message Register {
   // reconnect optimization, not an authoritative log — every command is
   // idempotent anyway (§6.3), so a redelivery beyond the window is harmless.
   repeated string applied_command_ids = 10;
+
+  // Ephemeral X25519 public key (32 bytes) for per-agent KEK wrapping (C2, §7).
+  // The agent generates a fresh key pair per connection, keeping the private
+  // half in memory only. AMS seals each WrappedKey to this key (NaCl sealed
+  // box), so a KEK is never in cleartext even where TLS terminates ahead of
+  // AMS. Empty means the agent cannot unwrap — AMS then falls back to a raw KEK
+  // only if AMX_ALLOW_RAW_KEK is set (dev), otherwise the session is refused.
+  bytes agent_public_key = 11;
 }
 
 message Heartbeat {

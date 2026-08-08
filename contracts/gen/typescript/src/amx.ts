@@ -391,8 +391,11 @@ export interface SessionSetup {
 export interface SessionSetup_WrappedKey {
   keyId: string;
   /**
-   * The KEK, wrapped for this agent in transit. Plaintext KEK material never
-   * touches disk on the agent (§6.2) and is never logged (§7).
+   * The KEK sealed to Register.agent_public_key via a NaCl sealed box
+   * (X25519 + XSalsa20-Poly1305), so only this agent's ephemeral private key
+   * can open it (C2, §7). When the agent sent no public key and AMS runs with
+   * AMX_ALLOW_RAW_KEK (dev only), this is the raw KEK instead. Plaintext KEK
+   * material never touches disk on the agent (§6.2) and is never logged (§7).
    */
   wrappedKey: Uint8Array;
   algorithm: EncryptionAlgorithm;
@@ -671,6 +674,15 @@ export interface Register {
    * idempotent anyway (§6.3), so a redelivery beyond the window is harmless.
    */
   appliedCommandIds: string[];
+  /**
+   * Ephemeral X25519 public key (32 bytes) for per-agent KEK wrapping (C2, §7).
+   * The agent generates a fresh key pair per connection, keeping the private
+   * half in memory only. AMS seals each WrappedKey to this key (NaCl sealed
+   * box), so a KEK is never in cleartext even where TLS terminates ahead of
+   * AMS. Empty means the agent cannot unwrap — AMS then falls back to a raw KEK
+   * only if AMX_ALLOW_RAW_KEK is set (dev), otherwise the session is refused.
+   */
+  agentPublicKey: Uint8Array;
 }
 
 export interface Heartbeat {
@@ -3308,6 +3320,7 @@ function createBaseRegister(): Register {
     switchMode: 0,
     accounts: [],
     appliedCommandIds: [],
+    agentPublicKey: new Uint8Array(0),
   };
 }
 
@@ -3342,6 +3355,9 @@ export const Register: MessageFns<Register> = {
     }
     for (const v of message.appliedCommandIds) {
       writer.uint32(82).string(v!);
+    }
+    if (message.agentPublicKey.length !== 0) {
+      writer.uint32(90).bytes(message.agentPublicKey);
     }
     return writer;
   },
@@ -3433,6 +3449,14 @@ export const Register: MessageFns<Register> = {
           message.appliedCommandIds.push(reader.string());
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.agentPublicKey = reader.bytes();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3488,6 +3512,11 @@ export const Register: MessageFns<Register> = {
         : globalThis.Array.isArray(object?.applied_command_ids)
         ? object.applied_command_ids.map((e: any) => globalThis.String(e))
         : [],
+      agentPublicKey: isSet(object.agentPublicKey)
+        ? bytesFromBase64(object.agentPublicKey)
+        : isSet(object.agent_public_key)
+        ? bytesFromBase64(object.agent_public_key)
+        : new Uint8Array(0),
     };
   },
 
@@ -3523,6 +3552,9 @@ export const Register: MessageFns<Register> = {
     if (message.appliedCommandIds?.length) {
       obj.appliedCommandIds = message.appliedCommandIds;
     }
+    if (message.agentPublicKey.length !== 0) {
+      obj.agentPublicKey = base64FromBytes(message.agentPublicKey);
+    }
     return obj;
   },
 
@@ -3541,6 +3573,7 @@ export const Register: MessageFns<Register> = {
     message.switchMode = object.switchMode ?? 0;
     message.accounts = object.accounts?.map((e) => AccountUsage.fromPartial(e)) || [];
     message.appliedCommandIds = object.appliedCommandIds?.map((e) => e) || [];
+    message.agentPublicKey = object.agentPublicKey ?? new Uint8Array(0);
     return message;
   },
 };

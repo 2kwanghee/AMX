@@ -2079,8 +2079,15 @@ type Register struct {
 	// reconnect optimization, not an authoritative log — every command is
 	// idempotent anyway (§6.3), so a redelivery beyond the window is harmless.
 	AppliedCommandIds []string `protobuf:"bytes,10,rep,name=applied_command_ids,json=appliedCommandIds,proto3" json:"applied_command_ids,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Ephemeral X25519 public key (32 bytes) for per-agent KEK wrapping (C2, §7).
+	// The agent generates a fresh key pair per connection, keeping the private
+	// half in memory only. AMS seals each WrappedKey to this key (NaCl sealed
+	// box), so a KEK is never in cleartext even where TLS terminates ahead of
+	// AMS. Empty means the agent cannot unwrap — AMS then falls back to a raw KEK
+	// only if AMX_ALLOW_RAW_KEK is set (dev), otherwise the session is refused.
+	AgentPublicKey []byte `protobuf:"bytes,11,opt,name=agent_public_key,json=agentPublicKey,proto3" json:"agent_public_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Register) Reset() {
@@ -2190,6 +2197,13 @@ func (x *Register) GetAccounts() []*AccountUsage {
 func (x *Register) GetAppliedCommandIds() []string {
 	if x != nil {
 		return x.AppliedCommandIds
+	}
+	return nil
+}
+
+func (x *Register) GetAgentPublicKey() []byte {
+	if x != nil {
+		return x.AgentPublicKey
 	}
 	return nil
 }
@@ -2699,8 +2713,11 @@ func (x *AccountEvent) GetDetail() string {
 type SessionSetup_WrappedKey struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	KeyId string                 `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
-	// The KEK, wrapped for this agent in transit. Plaintext KEK material never
-	// touches disk on the agent (§6.2) and is never logged (§7).
+	// The KEK sealed to Register.agent_public_key via a NaCl sealed box
+	// (X25519 + XSalsa20-Poly1305), so only this agent's ephemeral private key
+	// can open it (C2, §7). When the agent sent no public key and AMS runs with
+	// AMX_ALLOW_RAW_KEK (dev only), this is the raw KEK instead. Plaintext KEK
+	// material never touches disk on the agent (§6.2) and is never logged (§7).
 	WrappedKey    []byte                 `protobuf:"bytes,2,opt,name=wrapped_key,json=wrappedKey,proto3" json:"wrapped_key,omitempty"`
 	Algorithm     EncryptionAlgorithm    `protobuf:"varint,3,opt,name=algorithm,proto3,enum=amx.v1.EncryptionAlgorithm" json:"algorithm,omitempty"`
 	NotAfter      *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=not_after,json=notAfter,proto3" json:"not_after,omitempty"` // advisory expiry, for rotation planning
@@ -2897,7 +2914,7 @@ const file_amx_proto_rawDesc = "" +
 	"\x14encrypted_credential\x18\x02 \x01(\v2\x1b.amx.v1.EncryptedCredentialR\x13encryptedCredential\x12+\n" +
 	"\x11server_credential\x18\x03 \x01(\tR\x10serverCredential\x12;\n" +
 	"\vobserved_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"observedAt\"\x9b\x03\n" +
+	"observedAt\"\xc5\x03\n" +
 	"\bRegister\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12#\n" +
@@ -2910,7 +2927,8 @@ const file_amx_proto_rawDesc = "" +
 	"switchMode\x120\n" +
 	"\baccounts\x18\t \x03(\v2\x14.amx.v1.AccountUsageR\baccounts\x12.\n" +
 	"\x13applied_command_ids\x18\n" +
-	" \x03(\tR\x11appliedCommandIdsB\x06\n" +
+	" \x03(\tR\x11appliedCommandIds\x12(\n" +
+	"\x10agent_public_key\x18\v \x01(\fR\x0eagentPublicKeyB\x06\n" +
 	"\x04auth\"\x93\x02\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x123\n" +
