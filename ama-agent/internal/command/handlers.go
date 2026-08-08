@@ -6,9 +6,11 @@ import (
 	"fmt"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // tsamxAddRequest builds an AddRequest from a plaintext credential set. The
@@ -68,6 +70,10 @@ func (h *Handler) handleSessionSetup(_ context.Context, cmd *amxv1.AmsCommand, s
 // handleDeliver decrypts the credential set, upserts the manifest, and installs
 // the account via the tsamx bridge (SSOT §6.3 deliver, single critical section).
 func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *amxv1.DeliverAccount, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	// Engine lock (R3): the whole deliver critical section is serialized against
+	// the scheduler tick and other mutating commands (design decision 4).
+	h.engine.Lock()
+	defer h.engine.Unlock()
 	ref := d.GetAccount()
 	if ref == nil || ref.GetAmsAccountId() == "" || ref.GetEmail() == "" {
 		return reject(ack, "bad_account", errors.New("deliver missing account ref"))
@@ -165,6 +171,8 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 // account and KEEPS the manifest record (marked INACTIVE) for fast re-assignment;
 // purge=true removes it from the pool and deletes the record.
 func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *amxv1.RecallAccount, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	h.engine.Lock()
+	defer h.engine.Unlock()
 	ref := r.GetAccount()
 	if ref == nil || ref.GetAmsAccountId() == "" {
 		return reject(ack, "bad_account", errors.New("recall missing account ref"))
@@ -220,6 +228,8 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 // handleSetActive maps activate/deactivate onto tsamx enable/disable and the
 // manifest status.
 func (h *Handler) handleSetActive(ctx context.Context, cmd *amxv1.AmsCommand, sa *amxv1.SetAccountActive, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	h.engine.Lock()
+	defer h.engine.Unlock()
 	ref := sa.GetAccount()
 	if ref == nil || ref.GetAmsAccountId() == "" {
 		return reject(ack, "bad_account", errors.New("set_active missing account ref"))
@@ -262,34 +272,146 @@ func (h *Handler) handleSetActive(ctx context.Context, cmd *amxv1.AmsCommand, sa
 	return ack
 }
 
-// handleSetMode records the desired switch mode. P2 skeleton: the scheduler tick
-// is not driven here (P3) — only the mode is stored and echoed.
+// handleSetMode records the desired switch mode and starts/stops the scheduler:
+// auto -> start the tick loop, manual -> stop it (design note §2). Not gated by
+// the applied log — AMS re-asserts the mode every session (decision 5).
 func (h *Handler) handleSetMode(_ context.Context, cmd *amxv1.AmsCommand, sm *amxv1.SetSwitchMode, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	mode := sm.GetMode()
 	h.mu.Lock()
-	h.switchMode = sm.GetMode()
+	h.switchMode = mode
 	h.mu.Unlock()
-	ack.SwitchMode = sm.GetMode()
+	if h.switchCtl != nil {
+		if mode == amxv1.SwitchMode_SWITCH_MODE_AUTO {
+			h.switchCtl.Start()
+		} else {
+			h.switchCtl.Stop()
+		}
+	}
+	ack.SwitchMode = mode
 	converged(ack)
-	h.record(ack, "set_mode", "", sm.GetMode().String())
+	h.record(ack, "set_mode", "", mode.String())
 	return ack
 }
 
-// handleSwitchNow performs a manual switch. P2 skeleton: only the explicit
-// account target is honored (strategy ranking is P3).
+// handleSetPolicy applies the O4-C hybrid policy (design note §O4-C): threshold
+// is injected into the tsamx engine (config set autoswitch.threshold), and the
+// default strategy is kept in memory for auto/switch_now. Runs under the engine
+// lock — a threshold change alters the criterion an in-flight tick evaluates, so
+// it must be serialized. Memory-only and re-asserted each session, so it is NOT
+// gated by the applied log (re-application is idempotent).
+func (h *Handler) handleSetPolicy(ctx context.Context, cmd *amxv1.AmsCommand, sp *amxv1.SetPolicy, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	h.engine.Lock()
+	defer h.engine.Unlock()
+
+	if pct := sp.GetThresholdPct(); pct > 0 {
+		if err := h.bridge.ConfigSetThreshold(ctx, pct); err != nil {
+			out := diverged(ack, "tsamx_config", err)
+			h.record(out, "set_policy", "", "")
+			return out
+		}
+	}
+	if ds := sp.GetDefaultStrategy(); ds != amxv1.SwitchNow_SWITCH_STRATEGY_UNSPECIFIED {
+		h.mu.Lock()
+		h.defaultStrategy = ds
+		h.mu.Unlock()
+	}
+	converged(ack)
+	h.record(ack, "set_policy", "", sp.GetDefaultStrategy().String())
+	return ack
+}
+
+// handleSwitchNow performs a manual switch (design note §3). Either an explicit
+// account (`tsamx switch <email>`) or a strategy (`tsamx switch --strategy
+// best|next-available`); an unspecified strategy falls back to the SetPolicy
+// default. Runs under the engine lock. On success it emits a manual switch
+// AccountEvent through the outbox and records last_switched_at.
 func (h *Handler) handleSwitchNow(ctx context.Context, cmd *amxv1.AmsCommand, sn *amxv1.SwitchNow, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	h.engine.Lock()
+	defer h.engine.Unlock()
+
+	before, _ := h.bridge.Status(ctx)
+	var fromEmail string
+	if before != nil {
+		fromEmail = before.ActiveEmail
+	}
+
 	ref := sn.GetAccount()
-	if ref == nil || ref.GetEmail() == "" {
-		// strategy target is P3; report not-yet-converged rather than reject.
-		ack.Detail = "switch_now strategy targeting is deferred to P3"
+	if ref != nil && ref.GetEmail() != "" {
+		if err := h.bridge.Switch(ctx, ref.GetEmail()); err != nil {
+			return diverged(ack, "tsamx_switch", err)
+		}
+		h.setAccountState(ctx, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE)
+		h.emitManualSwitch(fromEmail, ref.GetEmail())
+		converged(ack)
+		h.record(ack, "switch_now", ref.GetAmsAccountId(), ref.GetEmail())
+		return ack
+	}
+
+	// Strategy path: use the named strategy, else the SetPolicy default.
+	strategy := sn.GetStrategy()
+	if strategy == amxv1.SwitchNow_SWITCH_STRATEGY_UNSPECIFIED {
+		h.mu.Lock()
+		strategy = h.defaultStrategy
+		h.mu.Unlock()
+	}
+	name := strategyName(strategy)
+	if name == "" {
+		ack.Detail = "switch_now: no target account and no strategy (explicit or default)"
 		return diverged(ack, "unsupported_target", nil)
 	}
-	if err := h.bridge.Switch(ctx, ref.GetEmail()); err != nil {
+	if err := h.bridge.SwitchStrategy(ctx, name); err != nil {
 		return diverged(ack, "tsamx_switch", err)
 	}
-	h.setAccountState(ctx, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE)
+	after, _ := h.bridge.Status(ctx)
+	toEmail := ""
+	if after != nil {
+		toEmail = after.ActiveEmail
+	}
+	if toEmail != "" {
+		h.setAccountState(ctx, ack, &amxv1.AccountRef{Email: toEmail}, amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE)
+	}
+	h.emitManualSwitch(fromEmail, toEmail)
 	converged(ack)
-	h.record(ack, "switch_now", ref.GetAmsAccountId(), ref.GetEmail())
+	h.record(ack, "switch_now", "", name)
 	return ack
+}
+
+// emitManualSwitch queues a manual (trigger=manual) switch AccountEvent and moves
+// last_switched_at. Called while the engine lock is held.
+func (h *Handler) emitManualSwitch(fromEmail, toEmail string) {
+	h.mu.Lock()
+	h.lastSwitchedAt = h.now().UTC()
+	h.mu.Unlock()
+	if h.outbox == nil {
+		return
+	}
+	ev := &amxv1.AccountEvent{
+		SchemaVersion: 1,
+		AgentId:       h.agentID,
+		EventId:       reporter.NewEventID(),
+		OccurredAt:    timestamppb.New(h.now().UTC()),
+		Kind:          amxv1.AccountEvent_KIND_SWITCH,
+		Trigger:       amxv1.AccountEvent_TRIGGER_MANUAL,
+	}
+	if fromEmail != "" {
+		ev.From = &amxv1.AccountRef{Email: fromEmail}
+	}
+	if toEmail != "" {
+		ev.To = &amxv1.AccountRef{Email: toEmail}
+	}
+	h.outbox.Enqueue(ev)
+}
+
+// strategyName maps the proto strategy enum to the tsamx CLI flag value.
+func strategyName(s amxv1.SwitchNow_SwitchStrategy) string {
+	switch s {
+	case amxv1.SwitchNow_SWITCH_STRATEGY_BEST:
+		return "best"
+	case amxv1.SwitchNow_SWITCH_STRATEGY_NEXT_AVAILABLE:
+		return "next-available"
+	default:
+		return ""
+	}
 }
 
 // handleReqReport acknowledges an immediate report request. The report itself is

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -185,6 +187,106 @@ func (b *ExecBridge) Disable(ctx context.Context, account string) error {
 func (b *ExecBridge) Switch(ctx context.Context, target string) error {
 	_, err := b.run(ctx, b.env("", ""), "switch", target)
 	return err
+}
+
+// SwitchStrategy runs `tsamx switch --strategy <strategy>` ("best" or
+// "next-available"), letting tsamx rank the candidate accounts itself.
+func (b *ExecBridge) SwitchStrategy(ctx context.Context, strategy string) error {
+	_, err := b.run(ctx, b.env("", ""), "switch", "--strategy", strategy)
+	return err
+}
+
+// ConfigSetThreshold runs `tsamx config set autoswitch.threshold <pct>`.
+func (b *ExecBridge) ConfigSetThreshold(ctx context.Context, pct float64) error {
+	// Format compactly (no trailing zeros); tsamx accepts an integer or decimal.
+	val := strconv.FormatFloat(pct, 'g', -1, 64)
+	_, err := b.run(ctx, b.env("", ""), "config", "set", "autoswitch.threshold", val)
+	return err
+}
+
+// AutoOnce runs `tsamx auto --once` and returns the CLI's exit code. `auto` must
+// be the first argument (tsamx pre-dispatches it), so it is passed verbatim.
+// Exit codes: 0 switched, 2 no action, 3 blocked. Exit 1 (error) and any
+// failure to run are surfaced as a non-nil error.
+func (b *ExecBridge) AutoOnce(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, b.binary(), "auto", "--once")
+	cmd.Env = b.env("", "")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code := ee.ExitCode()
+		if code == 1 {
+			return 1, fmt.Errorf("tsamx auto --once: error (stderr: %s)", stderr.String())
+		}
+		// 2 (no action) and 3 (blocked / all exhausted) are normal outcomes.
+		return code, nil
+	}
+	return -1, fmt.Errorf("tsamx auto --once: %w (stderr: %s)", err, stderr.String())
+}
+
+// AutoStatePath resolves tsamx's autoswitch_state.json. On Linux/WSL tsamx keeps
+// its backup root at $XDG_DATA_HOME/tsamx (default ~/.local/share/tsamx); the
+// bridge mirrors that resolution from its own DataHome/env.
+func (b *ExecBridge) AutoStatePath() string {
+	root := b.backupRoot()
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "autoswitch_state.json")
+}
+
+func (b *ExecBridge) backupRoot() string {
+	dataHome := b.DataHome
+	if dataHome == "" {
+		dataHome = os.Getenv("XDG_DATA_HOME")
+	}
+	if dataHome != "" {
+		return filepath.Join(dataHome, "tsamx")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".local", "share", "tsamx")
+	}
+	return ""
+}
+
+// autoState is the subset of autoswitch_state.json AMA reads: the quarantine map
+// keyed by slot number, each entry carrying the account email.
+type autoState struct {
+	Quarantine map[string]struct {
+		Email string `json:"email"`
+	} `json:"quarantine"`
+}
+
+// ReadQuarantine parses autoswitch_state.json and returns number->email for the
+// quarantined accounts. A missing/unreadable file means nothing is quarantined.
+func (b *ExecBridge) ReadQuarantine(_ context.Context) (map[string]string, error) {
+	path := b.AutoStatePath()
+	out := make(map[string]string)
+	if path == "" {
+		return out, nil
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return out, nil
+		}
+		return out, nil // unreadable/partial write -> treat as empty (design note §2)
+	}
+	var st autoState
+	if err := json.Unmarshal(blob, &st); err != nil {
+		return out, nil
+	}
+	for num, entry := range st.Quarantine {
+		out[num] = entry.Email
+	}
+	return out, nil
 }
 
 // List runs `tsamx list --json` and parses the schema-v1 payload.

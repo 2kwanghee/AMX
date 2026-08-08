@@ -6,6 +6,8 @@ package reporter
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -13,6 +15,17 @@ import (
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// NewEventID returns a random hex identifier for an AccountEvent's outbox dedupe
+// key (proto AccountEvent.event_id). Falls back to a timestamp-derived value if
+// the CSPRNG is unavailable (never expected).
+func NewEventID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "evt-" + time.Now().UTC().Format("20060102T150405.000000000")
+	}
+	return hex.EncodeToString(b[:])
+}
 
 // SwitchThresholdPct is the utilization at/above which an account counts as
 // exhausted for pool summary purposes (D10, injected into tsamx as 95).

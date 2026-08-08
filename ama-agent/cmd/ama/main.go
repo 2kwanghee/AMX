@@ -1,7 +1,7 @@
-// Command ama is the AMA daemon entrypoint. P2 wires transport, store, command,
-// bridge, and reporter together and opens the Session (Register -> SessionSetup
-// -> command loop). The scheduler / auto-switch tick is a P3 concern and is NOT
-// driven here (design note §6, §7).
+// Command ama is the AMA daemon entrypoint. It wires transport, store, command,
+// bridge, reporter, and the P3 scheduler together and opens the Session (Register
+// -> SessionSetup -> command loop). The scheduler drives the auto-switch tick
+// when the server is in mode=auto (design note §2, §6).
 package main
 
 import (
@@ -10,17 +10,22 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/command"
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
+	"github.com/2kwanghee/AMX/ama-agent/internal/scheduler"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/transport"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 )
+
+// reportInterval is the usage-report cadence (SSOT §6.5, design note §1).
+const reportInterval = 5 * time.Minute
 
 func main() {
 	if err := run(); err != nil {
@@ -55,23 +60,41 @@ func run() error {
 	}
 
 	bridge := tsamx.NewExecBridge()
+	rep := reporter.New(agentID, bridge, time.Now)
+	outbox := reporter.NewOutbox()
+
+	// Engine lock (R3): the single mutex serializing every tsamx mutation
+	// sequence across the scheduler tick and the command handlers (decision 4).
+	engine := &sync.Mutex{}
+	sched := scheduler.New(scheduler.Config{
+		AgentID:  agentID,
+		Bridge:   bridge,
+		Reporter: rep,
+		Outbox:   outbox,
+		Engine:   engine,
+		Now:      time.Now,
+		Logf:     log.Printf,
+	})
 
 	handler, err := command.New(command.Config{
-		AgentID:   agentID,
-		PublicKey: pub,
-		Store:     st,
-		KEKs:      keks,
-		Applied:   applied,
-		Bridge:    bridge,
-		Creds:     creds,
+		AgentID:          agentID,
+		PublicKey:        pub,
+		Store:            st,
+		KEKs:             keks,
+		Applied:          applied,
+		Bridge:           bridge,
+		Creds:            creds,
+		Engine:           engine,
+		Outbox:           outbox,
+		SwitchController: sched,
 	})
 	if err != nil {
 		return err
 	}
-	rep := reporter.New(agentID, bridge, time.Now)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	defer sched.Stop()
 
 	secOpt, err := transport.SecurityDialOption()
 	if err != nil {
@@ -87,20 +110,54 @@ func run() error {
 			AgentId:           agentID,
 			ServerId:          serverID,
 			Hostname:          hostname(),
-			AgentVersion:      "p2",
+			AgentVersion:      "p3",
+			SwitchMode:        handler.SwitchMode(),
 			AppliedCommandIds: applied.RecentIDs(),
+		}
+		// Seed local reality so AMS can reconcile immediately (§5.4). `list` reads
+		// without a KEK, so this works even before SessionSetup.
+		if r, rerr := rep.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE); rerr == nil {
+			reg.Accounts = r.GetAccounts()
 		}
 		if sc := handler.ServerCredential(); sc != "" {
 			reg.Auth = &amxv1.Register_ServerCredential{ServerCredential: sc}
 		} else if enrollToken != "" {
 			reg.Auth = &amxv1.Register_EnrollToken{EnrollToken: enrollToken}
 		}
-		return send(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Register{Register: reg}})
+		if err := send(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Register{Register: reg}}); err != nil {
+			return err
+		}
+		// Flush AccountEvents queued while disconnected (Outbox, dedupe by
+		// event_id). Unsent remainder is retried on the next reconnect.
+		return outbox.Flush(func(ev *amxv1.AccountEvent) error {
+			return send(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Event{Event: ev}})
+		})
 	}
 
 	go func() {
 		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("transport: %v", err)
+		}
+	}()
+
+	// Usage report ticker (§6.5): every 5 minutes, project the local pool and
+	// send it non-blocking. A drop while disconnected is harmless — the next tick
+	// supersedes it (design note §8).
+	go func() {
+		t := time.NewTicker(reportInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				r, rerr := rep.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+				if rerr != nil {
+					log.Printf("usage report: %v", rerr)
+					continue
+				}
+				client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Usage{Usage: r}})
+			}
 		}
 	}()
 

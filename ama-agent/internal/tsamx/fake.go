@@ -18,6 +18,24 @@ type Fake struct {
 
 	// AddErr, if set, is returned by Add (to test failure paths).
 	AddErr error
+
+	// AutoFn, if set, models one `tsamx auto --once` tick: it may mutate the pool
+	// through the Fake's own (locked) methods, e.g. SetActiveEmail, and returns
+	// the CLI exit code. When nil, AutoOnce is a no-op returning AutoCode. It is
+	// invoked WITHOUT the Fake lock held, so it may call any Fake method.
+	AutoFn func(f *Fake) int
+	// AutoCode is the exit code AutoOnce returns when AutoFn is nil (default 2,
+	// "no action").
+	AutoCode int
+	// AutoErr, if set, is returned by AutoOnce.
+	AutoErr error
+
+	// Threshold records the last ConfigSetThreshold value (test assertion).
+	Threshold float64
+	// StatePath is returned by AutoStatePath (test seeding for the watcher).
+	StatePath string
+	// quarantine is number->email, returned by ReadQuarantine.
+	quarantine map[string]string
 }
 
 type fakeAccount struct {
@@ -30,7 +48,11 @@ type fakeAccount struct {
 
 // NewFake returns an empty Fake.
 func NewFake() *Fake {
-	return &Fake{accounts: make(map[string]*fakeAccount)}
+	return &Fake{
+		accounts:   make(map[string]*fakeAccount),
+		quarantine: make(map[string]string),
+		AutoCode:   2, // no action by default
+	}
 }
 
 func (f *Fake) log(format string, a ...any) {
@@ -153,7 +175,93 @@ func (f *Fake) Status(ctx context.Context) (*StatusResult, error) {
 	return res, nil
 }
 
+// SwitchStrategy models `tsamx switch --strategy`: it activates the first
+// enabled, non-active account (deterministic by insertion order).
+func (f *Fake) SwitchStrategy(_ context.Context, strategy string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log("switch --strategy %s", strategy)
+	for _, e := range f.order {
+		acc := f.accounts[e]
+		if e != f.active && !acc.disabled {
+			f.active = e
+			return nil
+		}
+	}
+	return nil
+}
+
+// ConfigSetThreshold records the injected threshold.
+func (f *Fake) ConfigSetThreshold(_ context.Context, pct float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log("config set autoswitch.threshold %g", pct)
+	f.Threshold = pct
+	return nil
+}
+
+// AutoOnce runs the programmed tick (AutoFn) under the lock and returns its exit
+// code, or AutoCode when AutoFn is nil.
+func (f *Fake) AutoOnce(_ context.Context) (int, error) {
+	f.mu.Lock()
+	f.log("auto --once")
+	autoErr := f.AutoErr
+	fn := f.AutoFn
+	code := f.AutoCode
+	f.mu.Unlock()
+	// AutoFn is invoked without the lock so it can call locked Fake methods.
+	if autoErr != nil {
+		return 1, autoErr
+	}
+	if fn != nil {
+		return fn(f), nil
+	}
+	return code, nil
+}
+
+// AutoStatePath returns the seeded state-file path (empty disables the watcher).
+func (f *Fake) AutoStatePath() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.StatePath
+}
+
+// ReadQuarantine returns a copy of the in-memory quarantine map.
+func (f *Fake) ReadQuarantine(_ context.Context) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.quarantine))
+	for k, v := range f.quarantine {
+		out[k] = v
+	}
+	return out, nil
+}
+
 // --- test helpers -----------------------------------------------------------
+
+// SetQuarantine sets the quarantine map returned by ReadQuarantine.
+func (f *Fake) SetQuarantine(q map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.quarantine = make(map[string]string, len(q))
+	for k, v := range q {
+		f.quarantine[k] = v
+	}
+}
+
+// SetActiveEmail forces the active account (test seeding).
+func (f *Fake) SetActiveEmail(email string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.active = email
+}
+
+// ActiveEmail returns the current active account's email.
+func (f *Fake) ActiveEmail() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
+}
 
 // SetUsage attaches usage to an account (test seeding).
 func (f *Fake) SetUsage(email string, u *Usage) {
@@ -162,6 +270,13 @@ func (f *Fake) SetUsage(email string, u *Usage) {
 	if acc, ok := f.accounts[email]; ok {
 		acc.usage = u
 	}
+}
+
+// CallLog returns a snapshot copy of the ordered method log (race-safe).
+func (f *Fake) CallLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.Calls...)
 }
 
 // Has reports whether an account exists.
