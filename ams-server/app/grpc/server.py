@@ -194,7 +194,35 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
 
         kek = signing.new_kek()
         key_id = signing.new_key_id()
-        setup = self._build_session_setup(server_credential, kek, key_id, agent_id)
+        # C2 per-agent KEK wrapping (proto §6.2, §7). Seal the session KEK to the
+        # agent's ephemeral X25519 public key (NaCl sealed box) so it is never
+        # cleartext even where TLS terminates ahead of AMS. A capable agent (one
+        # that sent a public key) is always sealed — never downgraded — while a
+        # keyless agent is refused unless AMX_ALLOW_RAW_KEK is set (dev fallback).
+        allow_raw = os.environ.get("AMX_ALLOW_RAW_KEK") == "1"
+        try:
+            wrapped_key = signing.wrap_kek(
+                kek, reg.agent_public_key, allow_raw=allow_raw
+            )
+        except signing.InvalidAgentPublicKey:
+            # Public key is malformed/unusable. Refuse before any KEK leaves AMS;
+            # the KEK itself is never mentioned (§7).
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "invalid agent_public_key"
+            )
+        except signing.RawKekNotAllowed:
+            # Keyless agent and no dev opt-in: the session cannot receive a KEK it
+            # can protect, so it is refused rather than handed a raw KEK.
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, "agent_public_key required"
+            )
+        if not reg.agent_public_key:
+            _logger.warning(
+                "session KEK delivered RAW (AMX_ALLOW_RAW_KEK=1, no agent_public_key) "
+                "for server %s — dev only, not for production (§7)",
+                server_id,
+            )
+        setup = self._build_session_setup(server_credential, wrapped_key, key_id, agent_id)
         write_lock = asyncio.Lock()
         async with write_lock:
             await context.write(setup)
@@ -526,14 +554,16 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         return deliver
 
     def _build_session_setup(
-        self, server_credential: str, kek: bytes, key_id: str, agent_id: str
+        self, server_credential: str, wrapped_key: bytes, key_id: str, agent_id: str
     ) -> pb.AmsCommand:
         setup = pb.SessionSetup(
             server_credential=server_credential or "",
             keys=[
                 pb.SessionSetup.WrappedKey(
                     key_id=key_id,
-                    wrapped_key=kek,  # transit confidentiality is TLS (D9); memory-only on the agent
+                    # Sealed to the agent's X25519 public key (C2, §6.2); the raw
+                    # KEK only when AMX_ALLOW_RAW_KEK is set. Memory-only on the agent.
+                    wrapped_key=wrapped_key,
                     algorithm=pb.ENCRYPTION_ALGORITHM_AES_256_GCM,
                 )
             ],
@@ -922,6 +952,16 @@ def create_server(
         session_factory=session_factory,
         poll_interval=poll_interval,
     )
+    if os.environ.get("AMX_ALLOW_RAW_KEK") == "1":
+        # Startup guard (ADVERSARY a): if this ever leaks into production it hands
+        # a raw KEK to any keyless client. Real AMA always sends a public key so
+        # the raw path is unreachable, but there is no prod/dev hard gate — so we
+        # shout once at startup, in addition to the per-fallback warning.
+        _logger.warning(
+            "SECURITY: AMX_ALLOW_RAW_KEK=1 — raw KEK fallback enabled for keyless "
+            "agents. This is a DEV/TEST-ONLY option and MUST NOT be set in "
+            "production (§7)."
+        )
     server = grpc.aio.server()
     pb_grpc.add_AmxControlPlaneServicer_to_server(servicer, server)
     return server, servicer

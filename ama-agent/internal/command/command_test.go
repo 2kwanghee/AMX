@@ -11,6 +11,7 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
+	"golang.org/x/crypto/nacl/box"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -20,12 +21,24 @@ const (
 )
 
 type harness struct {
-	h     *Handler
-	fake  *tsamx.Fake
-	priv  ed25519.PrivateKey
-	kek   []byte
-	store *store.Store
-	appl  *store.AppliedLog
+	h        *Handler
+	fake     *tsamx.Fake
+	priv     ed25519.PrivateKey
+	kek      []byte
+	agentPub *[32]byte // this session's X25519 public key (from h.NewSession)
+	store    *store.Store
+	appl     *store.AppliedLog
+}
+
+// sealKEK seals raw to the handler's current session public key exactly as AMS
+// would: nacl.SealedBox(agent_public_key).encrypt(kek).
+func (hn *harness) sealKEK(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	sealed, err := box.SealAnonymous(nil, raw, hn.agentPub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sealed
 }
 
 func newHarness(t *testing.T) *harness {
@@ -58,11 +71,19 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	hn := &harness{h: h, fake: fake, priv: priv, kek: bytes.Repeat([]byte{0x33}, crypto.KEKSize), store: st, appl: appl}
-	// Deliver the KEK via a signed SessionSetup, as AMS would each session.
+	// Establish the session key pair (as OnConnect does before Register), then
+	// capture the public key so the KEK can be sealed to it as AMS would.
+	pubBytes, err := h.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hn.agentPub = new([32]byte)
+	copy(hn.agentPub[:], pubBytes)
+	// Deliver the KEK via a signed SessionSetup, sealed to the session key.
 	hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
 		CommandId: "setup-1",
 		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
-			Keys:        []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: hn.kek}},
+			Keys:        []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: hn.sealKEK(t, hn.kek)}},
 			ActiveKeyId: testKeyID,
 		}},
 	}))
@@ -392,13 +413,23 @@ func TestServerCredentialPersistsAcrossRestart(t *testing.T) {
 	}
 
 	h1 := build()
+	pubBytes, err := h1.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPub := new([32]byte)
+	copy(agentPub[:], pubBytes)
+	sealedKEK, err := box.SealAnonymous(nil, bytes.Repeat([]byte{0x33}, crypto.KEKSize), agentPub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd := &amxv1.AmsCommand{
 		CommandId:     "setup-1",
 		TargetAgentId: testAgentID,
 		IssuedAt:      timestamppb.New(time.Now()),
 		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
 			ServerCredential: "cred-xyz",
-			Keys:             []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: bytes.Repeat([]byte{0x33}, crypto.KEKSize)}},
+			Keys:             []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: sealedKEK}},
 			ActiveKeyId:      testKeyID,
 		}},
 	}
@@ -419,6 +450,109 @@ func TestServerCredentialPersistsAcrossRestart(t *testing.T) {
 	h2 := build()
 	if got := h2.ServerCredential(); got != "cred-xyz" {
 		t.Fatalf("credential after restart = %q, want cred-xyz", got)
+	}
+}
+
+// TestSessionSetupRejectsRawKEK: with a session established, a SessionSetup whose
+// wrapped_key is a raw (unsealed) KEK is REJECTED — the C2 downgrade defense.
+func TestSessionSetupRejectsRawKEK(t *testing.T) {
+	hn := newHarness(t)
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "setup-raw",
+		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
+			Keys: []*amxv1.SessionSetup_WrappedKey{{KeyId: "k2", WrappedKey: bytes.Repeat([]byte{0x44}, crypto.KEKSize)}},
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_REJECTED || ack.ErrorCode != "kek_unwrap" {
+		t.Fatalf("raw KEK: convergence=%v code=%q, want REJECTED/kek_unwrap", ack.Convergence, ack.ErrorCode)
+	}
+}
+
+// TestNewSessionRotatesKeyPair: a reconnect installs a fresh key pair, so a KEK
+// sealed to the PRIOR session public key can no longer be unwrapped, while one
+// sealed to the new key succeeds.
+func TestNewSessionRotatesKeyPair(t *testing.T) {
+	hn := newHarness(t)
+	oldPub := new([32]byte)
+	copy(oldPub[:], hn.agentPub[:])
+
+	newPubBytes, err := hn.h.NewSession() // simulate reconnect
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(oldPub[:], newPubBytes) {
+		t.Fatal("reconnect did not rotate the session key")
+	}
+
+	staleSealed, err := box.SealAnonymous(nil, hn.kek, oldPub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "setup-stale",
+		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
+			Keys: []*amxv1.SessionSetup_WrappedKey{{KeyId: "k2", WrappedKey: staleSealed}},
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_REJECTED {
+		t.Fatalf("KEK sealed to rotated-away key: convergence=%v, want REJECTED", ack.Convergence)
+	}
+
+	hn.agentPub = new([32]byte)
+	copy(hn.agentPub[:], newPubBytes)
+	ack = hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "setup-fresh",
+		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
+			Keys:        []*amxv1.SessionSetup_WrappedKey{{KeyId: "k2", WrappedKey: hn.sealKEK(t, hn.kek)}},
+			ActiveKeyId: "k2",
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("KEK sealed to fresh key: convergence=%v detail=%q, want CONVERGED", ack.Convergence, ack.Detail)
+	}
+}
+
+// TestSessionSetupNoSessionKeyRejected: a SessionSetup carrying keys before any
+// session key pair is established is rejected rather than silently dropping keys.
+func TestSessionSetupNoSessionKeyRejected(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	keks := store.NewKEKHolder()
+	st, err := store.Open(dir, testAgentID, keks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appl, err := store.OpenAppliedLog(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(Config{
+		AgentID: testAgentID, PublicKey: pub, Store: st, KEKs: keks,
+		Applied: appl, Bridge: tsamx.NewFake(), Now: time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No NewSession() call: no ephemeral key pair yet.
+	cmd := &amxv1.AmsCommand{
+		CommandId:     "setup-early",
+		TargetAgentId: testAgentID,
+		IssuedAt:      timestamppb.New(time.Now()),
+		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
+			Keys: []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: bytes.Repeat([]byte{0x33}, crypto.KEKSize)}},
+		}},
+	}
+	sig, err := crypto.SignCommand(priv, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Signature = sig
+	ack := h.Handle(context.Background(), cmd)
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_REJECTED || ack.ErrorCode != "no_session_key" {
+		t.Fatalf("early SessionSetup: convergence=%v code=%q, want REJECTED/no_session_key", ack.Convergence, ack.ErrorCode)
 	}
 }
 

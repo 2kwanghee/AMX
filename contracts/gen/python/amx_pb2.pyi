@@ -294,7 +294,7 @@ class CredentialUpdate(_message.Message):
     def __init__(self, account: _Optional[_Union[AccountRef, _Mapping]] = ..., encrypted_credential: _Optional[_Union[EncryptedCredential, _Mapping]] = ..., server_credential: _Optional[str] = ..., observed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class Register(_message.Message):
-    __slots__ = ("agent_id", "server_id", "enroll_token", "server_credential", "hostname", "agent_version", "tsamx_version", "switch_mode", "accounts", "applied_command_ids")
+    __slots__ = ("agent_id", "server_id", "enroll_token", "server_credential", "hostname", "agent_version", "tsamx_version", "switch_mode", "accounts", "applied_command_ids", "agent_public_key")
     AGENT_ID_FIELD_NUMBER: _ClassVar[int]
     SERVER_ID_FIELD_NUMBER: _ClassVar[int]
     ENROLL_TOKEN_FIELD_NUMBER: _ClassVar[int]
@@ -305,6 +305,7 @@ class Register(_message.Message):
     SWITCH_MODE_FIELD_NUMBER: _ClassVar[int]
     ACCOUNTS_FIELD_NUMBER: _ClassVar[int]
     APPLIED_COMMAND_IDS_FIELD_NUMBER: _ClassVar[int]
+    AGENT_PUBLIC_KEY_FIELD_NUMBER: _ClassVar[int]
     agent_id: str
     server_id: str
     enroll_token: str
@@ -315,7 +316,8 @@ class Register(_message.Message):
     switch_mode: SwitchMode
     accounts: _containers.RepeatedCompositeFieldContainer[AccountUsage]
     applied_command_ids: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, agent_id: _Optional[str] = ..., server_id: _Optional[str] = ..., enroll_token: _Optional[str] = ..., server_credential: _Optional[str] = ..., hostname: _Optional[str] = ..., agent_version: _Optional[str] = ..., tsamx_version: _Optional[str] = ..., switch_mode: _Optional[_Union[SwitchMode, str]] = ..., accounts: _Optional[_Iterable[_Union[AccountUsage, _Mapping]]] = ..., applied_command_ids: _Optional[_Iterable[str]] = ...) -> None: ...
+    agent_public_key: bytes
+    def __init__(self, agent_id: _Optional[str] = ..., server_id: _Optional[str] = ..., enroll_token: _Optional[str] = ..., server_credential: _Optional[str] = ..., hostname: _Optional[str] = ..., agent_version: _Optional[str] = ..., tsamx_version: _Optional[str] = ..., switch_mode: _Optional[_Union[SwitchMode, str]] = ..., accounts: _Optional[_Iterable[_Union[AccountUsage, _Mapping]]] = ..., applied_command_ids: _Optional[_Iterable[str]] = ..., agent_public_key: _Optional[bytes] = ...) -> None: ...
 
 class Heartbeat(_message.Message):
     __slots__ = ("agent_id", "sent_at", "active_account", "switch_mode", "tsamx_healthy", "outbox_depth")

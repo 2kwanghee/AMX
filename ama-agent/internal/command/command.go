@@ -66,6 +66,16 @@ type Handler struct {
 	// lastSwitchedAt records the time of the last manual switch (informational,
 	// design note §3). Memory-only.
 	lastSwitchedAt time.Time
+	// sessMu guards the ephemeral X25519 session key pair below. It is separate
+	// from mu so a KEK unwrap in handleSessionSetup never contends with the
+	// credential/policy state under mu.
+	sessMu sync.Mutex
+	// sessionPub/sessionPriv are this connection's ephemeral X25519 key pair (C2
+	// §7). NewSession installs a fresh pair on every (re)connect; the private key
+	// lives in memory only and is zeroized when replaced. nil until the first
+	// NewSession — a SessionSetup arriving before then is rejected.
+	sessionPub  *[32]byte
+	sessionPriv *[32]byte
 	// lastPolicyIssuedAt is the issued_at of the most recently applied SetPolicy.
 	// SetPolicy is re-asserted every session and is NOT gated by the applied log
 	// (re-application is idempotent), so this memory-only high-water mark is the
@@ -151,6 +161,40 @@ func (h *Handler) ServerCredential() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.serverCredential
+}
+
+// NewSession generates a fresh ephemeral X25519 key pair for a new AMS
+// connection and returns the public key (32 raw bytes) to advertise in
+// Register.agent_public_key (C2 §7). It must be called before the Register that
+// opens a session; the matching private key is retained in session-scoped memory
+// to unwrap the KEKs that SessionSetup seals to this public key. Any prior
+// private key is zeroized, so a reconnect always uses a fresh pair and an old
+// session's KEK envelope can never be unwrapped after reconnect.
+func (h *Handler) NewSession() ([]byte, error) {
+	pub, priv, err := crypto.GenerateSessionKeyPair()
+	if err != nil {
+		return nil, err
+	}
+	h.sessMu.Lock()
+	defer h.sessMu.Unlock()
+	if h.sessionPriv != nil {
+		for i := range h.sessionPriv {
+			h.sessionPriv[i] = 0
+		}
+	}
+	h.sessionPub = pub
+	h.sessionPriv = priv
+	out := make([]byte, len(pub))
+	copy(out, pub[:])
+	return out, nil
+}
+
+// sessionKeyPair returns the current ephemeral key pair for KEK unwrap, or
+// (nil, nil) if no session has been established yet.
+func (h *Handler) sessionKeyPair() (pub, priv *[32]byte) {
+	h.sessMu.Lock()
+	defer h.sessMu.Unlock()
+	return h.sessionPub, h.sessionPriv
 }
 
 // SwitchMode returns the last mode set by SetSwitchMode.

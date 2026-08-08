@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
+	"golang.org/x/crypto/nacl/box"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -33,6 +34,10 @@ const (
 	KEKSize = 32
 	// NonceSize is the 96-bit GCM nonce length in bytes.
 	NonceSize = 12
+	// X25519KeySize is the raw X25519 public/private key length in bytes (C2 §7).
+	// The public key advertised in Register.agent_public_key is these 32 raw
+	// bytes — NOT a PEM/DER wrapper.
+	X25519KeySize = 32
 )
 
 // Environment sources for the AMS Ed25519 verification key. Hardcoding the key
@@ -189,19 +194,41 @@ func WireAAD(amsAccountID, agentID string) []byte {
 	return []byte(amsAccountID + "\x00" + agentID)
 }
 
-// UnwrapKEK recovers the raw AES-256 KEK from the wrapped form delivered in
-// SessionSetup.WrappedKey.wrapped_key.
+// GenerateSessionKeyPair creates a fresh ephemeral X25519 key pair for one AMA
+// session (C2 §7). AMA advertises the public key in Register.agent_public_key;
+// AMS seals every per-agent KEK to it with a NaCl sealed box. A new pair is
+// generated on each (re)connect and the private key lives in session-scoped
+// memory only — it is never persisted or logged (§7). The returned keys are the
+// raw 32-byte X25519 values box uses.
+func GenerateSessionKeyPair() (pub, priv *[X25519KeySize]byte, err error) {
+	return box.GenerateKey(rand.Reader)
+}
+
+// UnwrapKEK recovers the raw AES-256 KEK sealed in
+// SessionSetup.WrappedKey.wrapped_key by opening a NaCl sealed box (anonymous
+// box: X25519 + XSalsa20-Poly1305). AMS produced it as
+// SealedBox(agent_public_key).encrypt(kek); the sealed envelope already carries
+// the ephemeral sender public key and nonce, so no side channel is needed.
 //
-// TODO(P2): production must unwrap with a per-agent transport key (an
-// enrollment-derived key, or KMS). For P2 the KEK arrives over the
-// TLS-protected, Ed25519-authenticated SessionSetup command, so the wrapped
-// bytes ARE the KEK. This function is the single choke point to replace when
-// real key wrapping lands — callers never touch raw wrapped bytes directly.
-func UnwrapKEK(wrapped []byte) ([]byte, error) {
-	if len(wrapped) != KEKSize {
-		return nil, fmt.Errorf("wrapped KEK must be %d bytes (P2 passthrough), got %d", KEKSize, len(wrapped))
+// pub/priv are this session's ephemeral key pair (from GenerateSessionKeyPair).
+// A raw (unsealed) KEK, a KEK sealed to a different public key, or any tampered
+// envelope fails to open and is rejected — this is the C2 downgrade defense:
+// because AMA always advertises a public key, it accepts ONLY sealed boxes and
+// never a raw KEK. Never log the KEK or the private key (§7).
+func UnwrapKEK(sealed []byte, pub, priv *[X25519KeySize]byte) ([]byte, error) {
+	if pub == nil || priv == nil {
+		return nil, errors.New("no session key pair for KEK unwrap")
 	}
-	out := make([]byte, KEKSize)
-	copy(out, wrapped)
-	return out, nil
+	kek, ok := box.OpenAnonymous(nil, sealed, pub, priv)
+	if !ok {
+		// Opaque: do not distinguish causes or echo inputs (§7).
+		return nil, errors.New("sealed-box KEK unwrap failed")
+	}
+	if len(kek) != KEKSize {
+		for i := range kek {
+			kek[i] = 0
+		}
+		return nil, fmt.Errorf("unwrapped KEK must be %d bytes, got %d", KEKSize, len(kek))
+	}
+	return kek, nil
 }
