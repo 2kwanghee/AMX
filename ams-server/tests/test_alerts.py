@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
+from app.core import crypto
 from app.db import get_sessionmaker
 from app.grpc import signing
 from app.grpc.proto import pb
@@ -185,6 +186,75 @@ def test_report_drift_is_per_account_on_autoresolve(app_env):
     )
     still_open = _open_alerts(server_id, "drift")
     assert len(still_open) == 1 and still_open[0].account_id == account_b
+
+
+# -- unary ReportUsage fallback: same effects as the streaming path -----------
+def _bind_credential(server_id) -> str:
+    """Give a seeded server a known server_credential and return it."""
+    credential = "cred_" + uuid.uuid4().hex
+    with get_sessionmaker()() as db:
+        server = db.get(Server, server_id)
+        server.server_cred_hash = crypto.hash_token(credential)
+        db.commit()
+    return credential
+
+
+def _report_envelope(server_credential: str, report: pb.UsageReport) -> pb.ReportEnvelope:
+    env = pb.ReportEnvelope(server_credential=server_credential)
+    env.report.CopyFrom(report)
+    return env
+
+
+def test_unary_report_opens_all_exhausted_and_drift_and_resolves_offline(app_env):
+    # The unary fallback must do everything the streaming path does: open
+    # all_exhausted + drift alerts, and (being the only liveness signal a
+    # fallback-only server has) resolve a standing offline alert.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("unary@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "active")
+    credential = _bind_credential(server_id)
+    svc = _servicer()
+    svc._mark_offline(server_id)
+    assert len(_open_alerts(server_id, "server_offline")) == 1
+
+    accepted = svc._store_report_envelope(_report_envelope(credential, _usage_report(True)))
+    assert accepted is True
+    # all_exhausted + drift fired from the unary report...
+    assert len(_open_alerts(server_id, "all_exhausted")) == 1
+    drift_open = _open_alerts(server_id, "drift")
+    assert len(drift_open) == 1 and drift_open[0].account_id == account_id
+    # ...and the report cleared the offline alert (liveness).
+    assert _open_alerts(server_id, "server_offline") == []
+    with get_sessionmaker()() as db:
+        assert db.get(Server, server_id).status == "online"
+
+
+def test_unary_report_autoresolves_when_healthy(app_env):
+    # A subsequent clean unary report auto-resolves the alerts it had opened,
+    # identical to the streaming path's reconcile-on-report behavior.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("unary2@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "active")
+    credential = _bind_credential(server_id)
+    svc = _servicer()
+
+    svc._store_report_envelope(_report_envelope(credential, _usage_report(True)))
+    assert len(_open_alerts(server_id, "all_exhausted")) == 1
+    assert len(_open_alerts(server_id, "drift")) == 1
+
+    svc._store_report_envelope(
+        _report_envelope(
+            credential,
+            _usage_report(False, {str(account_id): pb.ALLOCATION_STATUS_ACTIVE}),
+        )
+    )
+    assert _open_alerts(server_id, "all_exhausted") == []
+    assert _open_alerts(server_id, "drift") == []
+
+
+def test_unary_report_rejects_unknown_credential(app_env):
+    svc = _servicer()
+    assert svc._store_report_envelope(_report_envelope("nope", _usage_report(True))) is False
 
 
 # -- offline: mark_offline + sweeper ------------------------------------------

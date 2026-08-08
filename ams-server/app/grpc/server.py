@@ -587,6 +587,69 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 )
                 db.commit()
 
+    def _persist_usage_report(
+        self,
+        db: Session,
+        server: Server,
+        report: pb.UsageReport,
+        *,
+        report_type: str,
+    ) -> None:
+        """Persist one usage report: snapshot + reconcile + alerts + liveness.
+
+        Shared by the streaming usage path and the unary ``ReportUsage``
+        fallback so both enforce the same drift correction, all_exhausted/drift
+        alert sync, and offline-resolve — in a single transaction the caller
+        commits (design note §4). A fallback-only server has no stream
+        heartbeat, so this is its only path to those effects.
+        """
+        snapshot = UsageSnapshot(
+            tenant_id=server.tenant_id,
+            server_id=server.id,
+            account_id=None,
+            report_type=report_type,
+            payload=MessageToDict(report, preserving_proto_field_name=True),
+        )
+        db.add(snapshot)
+        db.flush()  # assign snapshot.id before reconcile marks drift on it
+        # reconcile-on-report (design note decision 3): the report is the
+        # actual authority. Translate proto AllocationStatus to the strings
+        # reconcile compares, then let it detect drift + narrow corrections.
+        reported = {
+            a.account.ams_account_id: _ALLOCATION_STATUS.get(
+                a.allocation_status, reconcile.ACTUAL_ABSENT
+            )
+            for a in report.accounts
+            if a.account.ams_account_id
+        }
+        drift_entries = reconcile.reconcile_from_report(
+            db,
+            tenant_id=server.tenant_id,
+            server_id=server.id,
+            reported=reported,
+            snapshot=snapshot,
+        )
+        # Alerts are reconciled from the SAME report in the SAME transaction
+        # (design note §4): all_exhausted and drift open/refresh, and their
+        # absence auto-resolves the matching open alert. Because it is driven
+        # by usage_snapshots.drift + pool_summary rather than the best-effort
+        # event stream, a lost switch_event still self-heals here (§8).
+        alerts.sync_from_report(
+            db,
+            tenant_id=server.tenant_id,
+            server_id=server.id,
+            all_exhausted=bool(report.pool_summary.all_exhausted),
+            drift_entries=drift_entries,
+            source_snapshot_id=snapshot.id,
+        )
+        # A usage report proves liveness, so refresh last_seen and clear any
+        # standing offline alert (mirrors _touch_last_seen on heartbeat). This
+        # is what lets a fallback-only server auto-resolve its offline alert.
+        server.last_seen_at = _now()
+        server.status = "online"
+        server.updated_at = _now()
+        alerts.resolve(db, server_id=server.id, kind="server_offline")
+
     def _store_usage(
         self,
         server_id: uuid.UUID,
@@ -596,45 +659,10 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         report_type: str,
     ) -> None:
         with self._sm() as db:
-            snapshot = UsageSnapshot(
-                tenant_id=tenant_id,
-                server_id=server_id,
-                account_id=None,
-                report_type=report_type,
-                payload=MessageToDict(report, preserving_proto_field_name=True),
-            )
-            db.add(snapshot)
-            db.flush()  # assign snapshot.id before reconcile marks drift on it
-            # reconcile-on-report (design note decision 3): the report is the
-            # actual authority. Translate proto AllocationStatus to the strings
-            # reconcile compares, then let it detect drift + narrow corrections.
-            reported = {
-                a.account.ams_account_id: _ALLOCATION_STATUS.get(
-                    a.allocation_status, reconcile.ACTUAL_ABSENT
-                )
-                for a in report.accounts
-                if a.account.ams_account_id
-            }
-            drift_entries = reconcile.reconcile_from_report(
-                db,
-                tenant_id=tenant_id,
-                server_id=server_id,
-                reported=reported,
-                snapshot=snapshot,
-            )
-            # Alerts are reconciled from the SAME report in the SAME transaction
-            # (design note §4): all_exhausted and drift open/refresh, and their
-            # absence auto-resolves the matching open alert. Because it is driven
-            # by usage_snapshots.drift + pool_summary rather than the best-effort
-            # event stream, a lost switch_event still self-heals here (§8).
-            alerts.sync_from_report(
-                db,
-                tenant_id=tenant_id,
-                server_id=server_id,
-                all_exhausted=bool(report.pool_summary.all_exhausted),
-                drift_entries=drift_entries,
-                source_snapshot_id=snapshot.id,
-            )
+            server = db.get(Server, server_id)
+            if server is None:
+                return
+            self._persist_usage_report(db, server, report, report_type=report_type)
             db.commit()
 
     def _store_event(
@@ -687,18 +715,10 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             )
             if server is None:
                 return False
-            db.add(
-                UsageSnapshot(
-                    tenant_id=server.tenant_id,
-                    server_id=server.id,
-                    account_id=None,
-                    report_type="usage",
-                    payload=MessageToDict(
-                        envelope.report, preserving_proto_field_name=True
-                    ),
-                )
-            )
-            server.last_seen_at = _now()
+            # Same helper as the streaming path: the unary fallback must also
+            # reconcile drift and fire/resolve all_exhausted + offline alerts,
+            # not merely store a snapshot (design note §4).
+            self._persist_usage_report(db, server, envelope.report, report_type="usage")
             db.commit()
         return True
 

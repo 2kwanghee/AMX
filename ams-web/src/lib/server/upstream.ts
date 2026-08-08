@@ -41,6 +41,13 @@ export interface ProxyResult {
 
 export function isAllowedPath(path: string): boolean {
   // path is the segment portion after /bff/api/, query already stripped.
+  // Reject encoded slash/backslash outright: uvicorn decodes them upstream, so
+  // a `%2f`/`%5c` smuggled inside an id segment would slip a raw path past the
+  // structural allowlist (id segments are `[^/:]+`) while the *decoded* path
+  // uvicorn actually routes reaches a deeper route the allowlist never vetted.
+  if (/%2f|%5c/i.test(path)) {
+    return false;
+  }
   let decoded: string;
   try {
     decoded = decodeURIComponent(path);
@@ -54,7 +61,9 @@ export function isAllowedPath(path: string): boolean {
   for (let i = 0; i < decoded.length; i++) {
     if (decoded.charCodeAt(i) < 0x20) return false;
   }
-  return ALLOWLIST.some((re) => re.test(path));
+  // Match the allowlist against the DECODED path so the vetted surface equals
+  // the path uvicorn will route after it decodes percent-escapes.
+  return ALLOWLIST.some((re) => re.test(decoded));
 }
 
 /**

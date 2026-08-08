@@ -44,6 +44,22 @@ describe('isAllowedPath', () => {
       expect(isAllowedPath(p), p).toBe(false);
     }
   });
+
+  it('rejects encoded-slash/backslash smuggled inside an id segment', () => {
+    // `%2f`/`%5c` pass the raw structural regex (id is `[^/:]+`) but uvicorn
+    // decodes them to `/` `\` and reaches a deeper, unvetted route.
+    for (const p of [
+      'tenants/a/servers/b%2fsecret',
+      'tenants/a/servers/b%2Fsecret',
+      'tenants/a/servers/b%5csecret',
+      'tenants/a/servers/b%5Csecret',
+      'tenants/a%2f..%2fb/servers/c',
+    ]) {
+      expect(isAllowedPath(p), p).toBe(false);
+    }
+    // A normal tenant-scoped path is unaffected.
+    expect(isAllowedPath('tenants/ten-1/servers/srv-1/usage')).toBe(true);
+  });
 });
 
 describe('proxy rejects disallowed paths after auth', () => {
