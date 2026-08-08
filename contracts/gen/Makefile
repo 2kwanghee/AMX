@@ -60,7 +60,12 @@ $(GEN_DIR)/typescript/node_modules: $(GEN_DIR)/typescript/package.json
 
 ## --------------------------------------------------------------- verification
 
-verify: verify-go verify-python verify-typescript verify-schemas ## Compile-check all three languages + the JSON schemas
+verify: verify-breaking verify-go verify-python verify-typescript verify-schemas ## Breaking-change check + compile-check all three languages + the JSON schemas
+
+# Wire compatibility against the last contract merged to origin/main. Needs the
+# origin/main ref locally — `git fetch origin main` first if it is stale.
+verify-breaking:
+	cd $(CONTRACTS) && $(BUF) breaking --against "$(CONTRACTS)/../.git#branch=origin/main,subdir=contracts"
 
 verify-go:
 	cd $(GO_OUT) && GOFLAGS=-mod=mod go build ./... && go vet ./...

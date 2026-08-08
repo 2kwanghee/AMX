@@ -18,3 +18,8 @@ lint:
 breaking:
   use:
     - FILE
+  except:
+    # go_package is a Go source-path option, not wire format. The generated Go
+    # is committed in-repo and its module path is owned by this monorepo, so
+    # path renames (e.g. the placeholder → real-repo fix) are allowed.
+    - FILE_SAME_GO_PACKAGE

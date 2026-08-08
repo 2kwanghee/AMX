@@ -2804,8 +2804,8 @@ const file_amx_proto_rawDesc = "" +
 	" ENCRYPTION_ALGORITHM_AES_256_GCM\x10\x012|\n" +
 	"\x0fAmxControlPlane\x125\n" +
 	"\aSession\x12\x12.amx.v1.AmaMessage\x1a\x12.amx.v1.AmsCommand(\x010\x01\x122\n" +
-	"\vReportUsage\x12\x16.amx.v1.ReportEnvelope\x1a\v.amx.v1.AckBA\n" +
-	"\tio.amx.v1P\x01Z)github.com/amx/amx/contracts/gen/go;amxv1\xaa\x02\x06Amx.V1b\x06proto3"
+	"\vReportUsage\x12\x16.amx.v1.ReportEnvelope\x1a\v.amx.v1.AckBG\n" +
+	"\tio.amx.v1P\x01Z/github.com/2kwanghee/AMX/contracts/gen/go;amxv1\xaa\x02\x06Amx.V1b\x06proto3"
 
 var (
 	file_amx_proto_rawDescOnce sync.Once

@@ -1,6 +1,6 @@
 // Generated AMX contract stubs. Consumed by ama-agent (D6) as a module
 // replace/require; regenerate with `make go` in contracts/gen.
-module github.com/amx/amx/contracts/gen/go
+module github.com/2kwanghee/AMX/contracts/gen/go
 
 go 1.24
 
