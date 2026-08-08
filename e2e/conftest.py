@@ -329,7 +329,14 @@ class AgentHost:
             return []
         return json.loads(path.read_text())["records"]
 
-    def start(self, ams_addr: str, enroll_token: str, public_key: str, log_dir: Path) -> None:
+    def start(
+        self,
+        ams_addr: str,
+        enroll_token: str,
+        public_key: str,
+        log_dir: Path,
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
         env = self.env()
         env.update(
             {
@@ -341,6 +348,8 @@ class AgentHost:
                 "AMX_AMS_PUBKEY": public_key,
             }
         )
+        if extra_env:
+            env.update(extra_env)
         self.process = Process(f"ama-{self.label}", [str(self.ama_binary)], env, self.root, log_dir)
 
     def stop(self) -> None:

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -26,6 +27,14 @@ import (
 
 // reportInterval is the usage-report cadence (SSOT §6.5, design note §1).
 const reportInterval = 5 * time.Minute
+
+// eventFlushInterval is how often the live outbox drain attempts delivery of
+// queued AccountEvents on an already-connected session (see the drain goroutine).
+const eventFlushInterval = 1 * time.Second
+
+// errOutboxSendUnavailable re-queues an event when the transport send buffer is
+// full or disconnected; the next flush (or OnConnect) retries it.
+var errOutboxSendUnavailable = errors.New("ama: outbox send unavailable")
 
 func main() {
 	if err := run(); err != nil {
@@ -66,12 +75,24 @@ func run() error {
 	// Engine lock (R3): the single mutex serializing every tsamx mutation
 	// sequence across the scheduler tick and the command handlers (decision 4).
 	engine := &sync.Mutex{}
+	// AMX_TICK_INTERVAL overrides the scheduler's base tick period (a Go
+	// duration, e.g. "1s"). Unset/invalid keeps the DefaultInterval. Primarily a
+	// test hook to force a prompt tick; production leaves it unset.
+	var tickInterval time.Duration
+	if v := os.Getenv("AMX_TICK_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			tickInterval = d
+		} else {
+			log.Printf("AMX_TICK_INTERVAL %q: %v (using default)", v, err)
+		}
+	}
 	sched := scheduler.New(scheduler.Config{
 		AgentID:  agentID,
 		Bridge:   bridge,
 		Reporter: rep,
 		Outbox:   outbox,
 		Engine:   engine,
+		Interval: tickInterval,
 		Now:      time.Now,
 		Logf:     log.Printf,
 	})
@@ -157,6 +178,33 @@ func run() error {
 					continue
 				}
 				client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Usage{Usage: r}})
+			}
+		}
+	}()
+
+	// Live AccountEvent drain. The scheduler tick and the manual-switch handler
+	// enqueue events to the offline Outbox; OnConnect flushes on reconnect, but a
+	// long-lived session also needs a live drain so an at-limit switch reaches AMS
+	// promptly rather than waiting for a reconnect that may not come. TrySend
+	// re-queues (via the error) whenever the buffer is full or disconnected, so
+	// nothing is lost — the next tick or OnConnect retries the remainder.
+	go func() {
+		t := time.NewTicker(eventFlushInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if outbox.Depth() == 0 {
+					continue
+				}
+				_ = outbox.Flush(func(ev *amxv1.AccountEvent) error {
+					if client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Event{Event: ev}}) {
+						return nil
+					}
+					return errOutboxSendUnavailable
+				})
 			}
 		}
 	}()
