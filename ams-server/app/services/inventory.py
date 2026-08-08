@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.errors import bad_request, conflict, not_found
-from app.models import Account, Assignment, Server, Tenant, UsageSnapshot
+from app.models import Account, Alert, Assignment, Server, Tenant, UsageSnapshot
 
 _ACTIVE_ASSIGNMENT_STATES = (
     "pending",
@@ -371,6 +371,84 @@ def latest_usage_snapshot(
         .order_by(UsageSnapshot.reported_at.desc())
         .limit(1)
     ).first()
+
+
+def list_switch_events(
+    db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID, *, limit: int, offset: int
+) -> tuple[list[UsageSnapshot], int]:
+    """Switch/quarantine/all_exhausted events for one server, newest first.
+
+    Reads the ``switch_event`` rows of ``usage_snapshots`` (there is no separate
+    event table). Resolves the server first, so a cross-tenant id is a 404."""
+    get_server(db, tenant_id, server_id)
+    where = [
+        UsageSnapshot.tenant_id == tenant_id,
+        UsageSnapshot.server_id == server_id,
+        UsageSnapshot.report_type == "switch_event",
+    ]
+    total = db.scalar(select(func.count()).select_from(UsageSnapshot).where(*where)) or 0
+    rows = db.scalars(
+        select(UsageSnapshot)
+        .where(*where)
+        .order_by(UsageSnapshot.reported_at.desc(), UsageSnapshot.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return list(rows), total
+
+
+# -- Alerts -------------------------------------------------------------------
+def list_alerts(
+    db: Session,
+    tenant_id: uuid.UUID,
+    *,
+    status: str | None,
+    kind: str | None,
+    limit: int,
+    offset: int,
+) -> tuple[list[Alert], int]:
+    get_tenant(db, tenant_id)
+    where = [Alert.tenant_id == tenant_id]
+    if status:
+        where.append(Alert.status == status)
+    if kind:
+        where.append(Alert.kind == kind)
+    total = db.scalar(select(func.count()).select_from(Alert).where(*where)) or 0
+    rows = db.scalars(
+        select(Alert)
+        .where(*where)
+        .order_by(Alert.created_at.desc(), Alert.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return list(rows), total
+
+
+def get_alert(db: Session, tenant_id: uuid.UUID, alert_id: uuid.UUID) -> Alert:
+    alert = db.get(Alert, alert_id)
+    # Same tenant re-check as every other lookup here (§7 defence in depth): a
+    # guessed id from another tenant is indistinguishable from a missing one.
+    if alert is None or alert.tenant_id != tenant_id:
+        raise not_found("alert")
+    return alert
+
+
+def ack_alert(
+    db: Session, tenant_id: uuid.UUID, alert_id: uuid.UUID, *, acked_by: str | None
+) -> Alert:
+    alert = get_alert(db, tenant_id, alert_id)
+    if alert.status == "resolved":
+        raise conflict("alert.resolved", "A resolved alert cannot be acknowledged.")
+    if alert.status == "open":
+        alert.status = "acked"
+        alert.acked_at = _now()
+    # Re-acking an already-acked alert refreshes who/when, staying idempotent.
+    alert.acked_by = acked_by or "admin"
+    if alert.acked_at is None:
+        alert.acked_at = _now()
+    db.commit()
+    db.refresh(alert)
+    return alert
 
 
 def assigned_account_count(db: Session, server_id: uuid.UUID) -> int:

@@ -35,12 +35,23 @@ from app.db import get_sessionmaker
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
-from app.services import commands, reconcile
+from app.services import alerts, commands, reconcile
 
 _logger = logging.getLogger("ams.grpc")
 
 POLL_INTERVAL_SECONDS = float(os.environ.get("AMX_GRPC_POLL_INTERVAL", "0.5"))
 DEFAULT_PORT = int(os.environ.get("AMX_GRPC_PORT", "50051"))
+# Offline detection (design note §8). AMA heartbeats on this cadence; a server
+# unseen for 3 beats is presumed offline even if its gRPC stream is half-open,
+# so the sweeper forces it offline and alarms. The sweeper itself wakes once per
+# heartbeat interval.
+HEARTBEAT_INTERVAL_SECONDS = float(os.environ.get("AMX_HEARTBEAT_INTERVAL", "30"))
+OFFLINE_AFTER_SECONDS = float(
+    os.environ.get("AMX_OFFLINE_AFTER", str(3 * HEARTBEAT_INTERVAL_SECONDS))
+)
+SWEEP_INTERVAL_SECONDS = float(
+    os.environ.get("AMX_OFFLINE_SWEEP_INTERVAL", str(HEARTBEAT_INTERVAL_SECONDS))
+)
 
 _CREDENTIAL_TYPE = {
     "oauth": pb.CREDENTIAL_TYPE_OAUTH,
@@ -74,6 +85,35 @@ _ALLOCATION_STATUS = {
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _event_detail(payload: dict) -> dict:
+    """Small, credential-free alert detail lifted from an AccountEvent (§7)."""
+    return {
+        "event_id": payload.get("event_id"),
+        "kind": payload.get("kind"),
+        "trigger": payload.get("trigger"),
+        "pool_summary": payload.get("pool_summary"),
+        "detail": payload.get("detail"),
+    }
+
+
+def _event_account_id(payload: dict) -> uuid.UUID | None:
+    """The account an event is about: ``to`` if present, else ``from``.
+
+    Quarantine leaves ``to`` unset (proto §6.5), so the quarantined account is
+    carried in ``from``. A malformed id degrades to a server-scoped alert rather
+    than raising inside the session thread."""
+    for field in ("to", "from"):
+        ref = payload.get(field)
+        if isinstance(ref, dict):
+            raw = ref.get("ams_account_id")
+            if raw:
+                try:
+                    return uuid.UUID(str(raw))
+                except (ValueError, TypeError):
+                    return None
+    return None
 
 
 def _now_ts() -> Timestamp:
@@ -241,6 +281,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 server.enroll_token_hash = None
                 server.enroll_token_expires_at = None
                 self._touch_server(server, reg)
+                alerts.resolve(db, server_id=server.id, kind="server_offline")
                 db.commit()
                 return (server.id, server.tenant_id, credential)
             if which == "server_credential":
@@ -252,6 +293,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 if server is None:
                     return None
                 self._touch_server(server, reg)
+                alerts.resolve(db, server_id=server.id, kind="server_offline")
                 db.commit()
                 return (server.id, server.tenant_id, "")
             return None
@@ -524,6 +566,9 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 server.last_seen_at = _now()
                 server.status = "online"
                 server.updated_at = _now()
+                # A live heartbeat clears any standing offline alert (auto-resolve
+                # on reconnect / recovery from a sweeper false-positive).
+                alerts.resolve(db, server_id=server_id, kind="server_offline")
                 db.commit()
 
     def _mark_offline(self, server_id: uuid.UUID) -> None:
@@ -532,6 +577,14 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             if server is not None:
                 server.status = "offline"
                 server.updated_at = _now()
+                alerts.open_alert(
+                    db,
+                    tenant_id=server.tenant_id,
+                    server_id=server_id,
+                    kind="server_offline",
+                    severity="warning",
+                    detail={"reason": "session closed"},
+                )
                 db.commit()
 
     def _store_usage(
@@ -562,28 +615,65 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 for a in report.accounts
                 if a.account.ams_account_id
             }
-            reconcile.reconcile_from_report(
+            drift_entries = reconcile.reconcile_from_report(
                 db,
                 tenant_id=tenant_id,
                 server_id=server_id,
                 reported=reported,
                 snapshot=snapshot,
             )
+            # Alerts are reconciled from the SAME report in the SAME transaction
+            # (design note §4): all_exhausted and drift open/refresh, and their
+            # absence auto-resolves the matching open alert. Because it is driven
+            # by usage_snapshots.drift + pool_summary rather than the best-effort
+            # event stream, a lost switch_event still self-heals here (§8).
+            alerts.sync_from_report(
+                db,
+                tenant_id=tenant_id,
+                server_id=server_id,
+                all_exhausted=bool(report.pool_summary.all_exhausted),
+                drift_entries=drift_entries,
+                source_snapshot_id=snapshot.id,
+            )
             db.commit()
 
     def _store_event(
         self, server_id: uuid.UUID, tenant_id: uuid.UUID, event: pb.AccountEvent
     ) -> None:
+        payload = MessageToDict(event, preserving_proto_field_name=True)
         with self._sm() as db:
-            db.add(
-                UsageSnapshot(
+            snapshot = UsageSnapshot(
+                tenant_id=tenant_id,
+                server_id=server_id,
+                account_id=None,
+                report_type="switch_event",
+                payload=payload,
+            )
+            db.add(snapshot)
+            db.flush()  # assign snapshot.id so an alert can cite it
+            # Promote the P3-carried all_exhausted hook to a real alert, and open
+            # a quarantine alert, in the snapshot's transaction (design note §4).
+            if event.kind == pb.AccountEvent.KIND_ALL_EXHAUSTED:
+                alerts.open_alert(
+                    db,
                     tenant_id=tenant_id,
                     server_id=server_id,
-                    account_id=None,
-                    report_type="switch_event",
-                    payload=MessageToDict(event, preserving_proto_field_name=True),
+                    kind="all_exhausted",
+                    severity="critical",
+                    detail=_event_detail(payload),
+                    source_snapshot_id=snapshot.id,
                 )
-            )
+            elif event.kind == pb.AccountEvent.KIND_QUARANTINE:
+                alerts.open_alert(
+                    db,
+                    tenant_id=tenant_id,
+                    server_id=server_id,
+                    account_id=_event_account_id(payload),
+                    kind="quarantine",
+                    severity="warning",
+                    detail=_event_detail(payload),
+                    source_snapshot_id=snapshot.id,
+                )
             db.commit()
 
     def _store_report_envelope(self, envelope: pb.ReportEnvelope) -> bool:
@@ -673,16 +763,51 @@ def configure_port(server, port: int) -> str:
     return "insecure"
 
 
+async def _offline_sweeper(
+    session_factory: sessionmaker[Session],
+    *,
+    interval: float = SWEEP_INTERVAL_SECONDS,
+    stale_after: float = OFFLINE_AFTER_SECONDS,
+) -> None:
+    """Periodically force stale-heartbeat servers offline (design note §8).
+
+    Runs in the gRPC process — no separate scheduler. A sweep failure is logged
+    and the loop continues, exactly like the command poll loop."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            swept = await asyncio.to_thread(
+                _sweep_once, session_factory, stale_after
+            )
+            if swept:
+                _logger.info("offline sweeper marked %d server(s) offline", len(swept))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("offline sweep iteration failed", exc_info=False)
+
+
+def _sweep_once(
+    session_factory: sessionmaker[Session], stale_after: float
+) -> list[uuid.UUID]:
+    with session_factory() as db:
+        return alerts.sweep_offline(db, stale_after_seconds=stale_after)
+
+
 async def serve(port: int = DEFAULT_PORT) -> None:
     from app.config import get_settings
 
     get_settings()  # fail fast on missing configuration (§7)
     signer = signing.Signer.from_env_or_generate()
-    server, _ = create_server(signer)
+    server, servicer = create_server(signer)
     mode = configure_port(server, port)
     await server.start()
     _logger.info("AMS gRPC control plane listening on :%s (%s)", port, mode)
-    await server.wait_for_termination()
+    sweeper = asyncio.create_task(_offline_sweeper(servicer._sm))
+    try:
+        await server.wait_for_termination()
+    finally:
+        sweeper.cancel()
 
 
 def main() -> None:

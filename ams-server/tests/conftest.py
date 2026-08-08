@@ -108,7 +108,7 @@ def clean_tables(app_env, engine):
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE usage_snapshots, assignments, accounts, servers, tenants "
+                "TRUNCATE alerts, usage_snapshots, assignments, accounts, servers, tenants "
                 "RESTART IDENTITY CASCADE"
             )
         )
