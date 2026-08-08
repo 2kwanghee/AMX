@@ -80,10 +80,12 @@ def install_error_handlers(app: FastAPI) -> None:
             status_code=exc.status, content=body, media_type="application/problem+json"
         )
 
-    # Registered explicitly for both exception types: FastAPI installs its own
-    # RequestValidationError handler at construction time, and a
-    # pydantic.ValidationError raised while building a response model bypasses
-    # that one entirely and would otherwise surface as a 500 traceback.
+    # Registered explicitly to override FastAPI's own RequestValidationError
+    # handler (installed at construction time), which echoes the raw input back.
+    # The pydantic.ValidationError handler below is a scrubbing backstop for a
+    # bare ValidationError raised anywhere in app code; note it does NOT catch
+    # response-model failures — FastAPI raises ResponseValidationError there,
+    # which is not a subclass of pydantic.ValidationError.
     @app.exception_handler(RequestValidationError)
     async def _handle_request_validation(_: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse(
