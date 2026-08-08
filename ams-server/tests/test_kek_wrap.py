@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 
@@ -247,6 +248,102 @@ def test_malformed_public_key_is_refused(app_env, monkeypatch):
             assert exc.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
     asyncio.run(scenario())
+
+
+# -- Cross-language sealed-box fixed vector (direction B: Go seal -> Python open)
+#
+# TEST-ONLY fixed X25519 key pair + KEK (NOT real secrets). The sealed envelope
+# below was produced ONCE by Go golang.org/x/crypto/nacl/box.SealAnonymous over
+# these exact fixed (pub, priv, kek) values and hard-coded here (a sealed box
+# embeds an ephemeral sender key, so its output is non-deterministic — only the
+# open direction can be pinned as a fixed vector). This guards Go<->Python
+# sealed-box compatibility as a unit test, independent of the e2e binaries.
+_FIXED_VEC_PRIV = bytes.fromhex(
+    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+)
+_FIXED_VEC_KEK = bytes.fromhex(
+    "ababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+)
+# Produced by Go box.SealAnonymous(pub).encrypt(kek) over the fixed values above.
+_FIXED_VEC_GO_SEALED = bytes.fromhex(
+    "4b3939b6c883d80d6672f7f55ff5c90300c6dbba5f98d416edcff9de9828df5e"
+    "971cbf79e30809a2a26d33086b18fcd70c1d7bbc4793abdc905254ceb1fa7561"
+    "a46735f596d33bb1c118f9e35d5cc94a"
+)
+
+
+class _RecordCollector(logging.Handler):
+    """Captures ams.grpc log messages directly, independent of caplog quirks."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.messages: list[tuple[int, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append((record.levelno, record.getMessage()))
+
+
+def _capture_grpc_logs():
+    # NOTE: app_env runs alembic migrations in-process, and alembic's fileConfig
+    # sets disable_existing_loggers, which flips ams.grpc's ``disabled`` flag.
+    # Clear it (and restore) so this test observes the real warning logic.
+    logger = logging.getLogger("ams.grpc")
+    handler = _RecordCollector()
+    logger.addHandler(handler)
+    prev_level = logger.level
+    prev_disabled = logger.disabled
+    logger.setLevel(logging.DEBUG)
+    logger.disabled = False
+
+    def restore():
+        logger.removeHandler(handler)
+        logger.setLevel(prev_level)
+        logger.disabled = prev_disabled
+
+    return handler, restore
+
+
+def test_raw_kek_optin_logs_startup_warning(app_env, monkeypatch):
+    """AMX_ALLOW_RAW_KEK=1 emits a loud one-time warning when the server is built."""
+    monkeypatch.setenv("AMX_ALLOW_RAW_KEK", "1")
+    signer = signing.Signer.from_env_or_generate()
+    handler, restore = _capture_grpc_logs()
+    try:
+        create_server(signer, session_factory=get_sessionmaker())
+    finally:
+        restore()
+    warnings = [m for lvl, m in handler.messages if lvl >= logging.WARNING]
+    assert any(
+        "AMX_ALLOW_RAW_KEK=1" in m and "production" in m for m in warnings
+    ), warnings
+
+
+def test_raw_kek_disabled_no_startup_warning(app_env, monkeypatch):
+    """Without the opt-in, no raw-KEK startup warning is emitted."""
+    monkeypatch.delenv("AMX_ALLOW_RAW_KEK", raising=False)
+    signer = signing.Signer.from_env_or_generate()
+    handler, restore = _capture_grpc_logs()
+    try:
+        create_server(signer, session_factory=get_sessionmaker())
+    finally:
+        restore()
+    assert not any("AMX_ALLOW_RAW_KEK" in m for _lvl, m in handler.messages)
+
+
+def test_cross_lang_sealed_vector_go_to_python():
+    """A Go-produced sealed box opens with Python and recovers the exact KEK."""
+    sk = PrivateKey(_FIXED_VEC_PRIV)
+    kek = SealedBox(sk).decrypt(_FIXED_VEC_GO_SEALED)
+    assert kek == _FIXED_VEC_KEK
+
+
+def test_cross_lang_sealed_vector_tamper_rejected():
+    """Flipping one bit of the Go-sealed envelope fails authentication (Poly1305)."""
+    sk = PrivateKey(_FIXED_VEC_PRIV)
+    tampered = bytearray(_FIXED_VEC_GO_SEALED)
+    tampered[-1] ^= 0x01  # flip one bit of the tag
+    with pytest.raises(Exception):
+        SealedBox(sk).decrypt(bytes(tampered))
 
 
 # -- Unit-level: wrap_kek never downgrades a capable agent --------------------

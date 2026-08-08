@@ -3,6 +3,7 @@ package crypto
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"testing"
 
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
@@ -181,6 +182,68 @@ func TestUnwrapKEKRejectsWrongLength(t *testing.T) {
 func TestUnwrapKEKNilKeyPair(t *testing.T) {
 	if _, err := UnwrapKEK([]byte("x"), nil, nil); err == nil {
 		t.Fatal("nil key pair accepted")
+	}
+}
+
+// -- Cross-language sealed-box fixed vector (direction A: Python seal -> Go open).
+//
+// These constants are a TEST-ONLY fixed X25519 key pair and KEK — NOT real
+// secrets. The sealed envelope below was produced ONCE by Python
+// nacl.public.SealedBox(PublicKey(pub)).encrypt(kek) over these exact fixed
+// (priv, pub, kek) values and hard-coded here (a sealed box embeds an ephemeral
+// sender key, so its output is non-deterministic — only the open direction can
+// be pinned as a fixed vector). This guards Python<->Go sealed-box compatibility
+// as a unit test, independent of the e2e binaries. If nacl SealedBox and Go
+// box.OpenAnonymous ever drift on the wire, this fails.
+const (
+	fixedVecPrivHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	fixedVecPubHex  = "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"
+	fixedVecKEKHex  = "ababababababababababababababababcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+	// Produced by Python SealedBox(pub).encrypt(kek) over the fixed values above.
+	fixedVecPythonSealedHex = "749727b506e639aecac4abd633c8278adc3ad146cb4e0e8f18b3d2b85b40de01" +
+		"d0b031190f166ac83d8ee419880bb783b8f344a55c1113e7cc28c4c1f2c717d4" +
+		"9114732cf68dfe277fcb6bde3db5d1d7"
+)
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("bad fixture hex: %v", err)
+	}
+	return b
+}
+
+func fixedVecKeyPair(t *testing.T) (pub, priv *[X25519KeySize]byte) {
+	t.Helper()
+	pub, priv = new([X25519KeySize]byte), new([X25519KeySize]byte)
+	copy(pub[:], mustHex(t, fixedVecPubHex))
+	copy(priv[:], mustHex(t, fixedVecPrivHex))
+	return pub, priv
+}
+
+// TestCrossLangSealedVectorPythonToGo: a Python-produced sealed box opens with
+// Go and recovers the exact fixed KEK.
+func TestCrossLangSealedVectorPythonToGo(t *testing.T) {
+	pub, priv := fixedVecKeyPair(t)
+	sealed := mustHex(t, fixedVecPythonSealedHex)
+	kek, err := UnwrapKEK(sealed, pub, priv)
+	if err != nil {
+		t.Fatalf("Python-sealed KEK failed to open in Go: %v", err)
+	}
+	if !bytes.Equal(kek, mustHex(t, fixedVecKEKHex)) {
+		t.Fatalf("cross-lang KEK mismatch: got %x", kek)
+	}
+}
+
+// TestCrossLangSealedVectorTamperRejected: flipping one bit of the Python-sealed
+// envelope makes it fail authentication (Poly1305), so the KEK is never returned.
+func TestCrossLangSealedVectorTamperRejected(t *testing.T) {
+	pub, priv := fixedVecKeyPair(t)
+	sealed := mustHex(t, fixedVecPythonSealedHex)
+	sealed[len(sealed)-1] ^= 0x01 // flip one bit of the tag
+	if _, err := UnwrapKEK(sealed, pub, priv); err == nil {
+		t.Fatal("tampered sealed box opened (Poly1305 not enforced)")
 	}
 }
 

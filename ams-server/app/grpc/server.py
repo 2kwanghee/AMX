@@ -952,6 +952,16 @@ def create_server(
         session_factory=session_factory,
         poll_interval=poll_interval,
     )
+    if os.environ.get("AMX_ALLOW_RAW_KEK") == "1":
+        # Startup guard (ADVERSARY a): if this ever leaks into production it hands
+        # a raw KEK to any keyless client. Real AMA always sends a public key so
+        # the raw path is unreachable, but there is no prod/dev hard gate — so we
+        # shout once at startup, in addition to the per-fallback warning.
+        _logger.warning(
+            "SECURITY: AMX_ALLOW_RAW_KEK=1 — raw KEK fallback enabled for keyless "
+            "agents. This is a DEV/TEST-ONLY option and MUST NOT be set in "
+            "production (§7)."
+        )
     server = grpc.aio.server()
     pb_grpc.add_AmxControlPlaneServicer_to_server(servicer, server)
     return server, servicer

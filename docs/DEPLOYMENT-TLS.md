@@ -33,6 +33,7 @@ tenant로 바인딩한다. 따라서:
 | `AMX_GRPC_TLS_KEY` | 서버 개인키 PEM 경로 |
 | `AMX_GRPC_TLS_CA` | 설정 시 **mTLS 활성화** — 클라이언트 인증서를 이 CA로 검증하고 요구(`require_client_auth=True`) |
 | `AMX_GRPC_ALLOW_INSECURE=1` | CERT/KEY가 없을 때만 평문 기동 허용(개발 전용, 경고 로그) |
+| `AMX_ALLOW_RAW_KEK=1` | **개발/테스트 전용.** 공개키 없는(keyless) 에이전트에 KEK를 봉인 없이 원시로 발급하는 폴백. **프로덕션 금지**(§5 참조). 미설정 시 keyless 세션은 거부(fail-closed) |
 
 - CERT+KEY만: **one-way TLS**.
 - CERT+KEY+CA: **mTLS**(클라이언트 인증서 필수).
@@ -115,6 +116,18 @@ AMS의 `TLS_CA`가 발급 CA를 이미 신뢰하면 무중단.
 credential이 평문으로 와이어에 노출된다(AMS는 기동 시 경고 로그를 남긴다).
 **프로덕션에서 절대 설정하지 말 것.** 로컬 E2E 하네스(`e2e/conftest.py`)는 실
 네트워크 없이 loopback에서만 이 플래그로 기동한다.
+
+`AMX_ALLOW_RAW_KEK=1`도 마찬가지로 **개발/테스트 전용**이다. 이 플래그는 공개키를
+보내지 않는 에이전트에 KEK를 sealed box 없이 **원시(raw)로** 발급하는 폴백을
+켜므로, 프로덕션에 유입되면 TLS가 종단되는 지점 이후로 KEK가 평문 노출될 수 있다.
+실제 AMA는 항상 ephemeral X25519 공개키를 Register에 실어 보내므로 이 폴백 경로에
+도달하지 않지만, prod/dev를 강제로 구분하는 하드 가드는 없다. 따라서:
+
+- **프로덕션에서 절대 설정하지 말 것.** 미설정이 기본값이며, 이때 keyless
+  세션은 거부된다(fail-closed).
+- 이 플래그가 켜진 채 기동하면 AMS는 기동 시점에 눈에 띄는 경고 로그를 1회 남기고
+  (`ams.grpc`: "SECURITY: AMX_ALLOW_RAW_KEK=1 …"), 실제 raw 폴백이 일어날 때마다
+  추가 경고를 남긴다. 기동 로그에 이 경고가 보이면 프로덕션 구성이 아니다.
 
 ## 6. 검증 체크리스트
 
