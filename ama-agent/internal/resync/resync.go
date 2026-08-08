@@ -22,6 +22,7 @@ package resync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -125,10 +126,15 @@ func (r *Resyncer) Tick(ctx context.Context) {
 	// restamp the fingerprint) so the same rotation is not pushed again. A
 	// duplicate push would be harmless anyway — AMS keeps the newest observed_at
 	// (monotonic) — but this stops the steady-state resend.
-	if err := r.store.Upsert(rec, plaintext); err != nil {
+	// Advance the baseline of the EXISTING record only. Upsert here would re-insert
+	// a record a concurrent recall may have purged, or revive one it flipped to
+	// inactive, in the lock-free window since detect() read it (R3 race). A record
+	// gone (ErrNotFound) means the account was recalled while the push was in
+	// flight — nothing to keep a baseline for, so skip silently.
+	if err := r.store.UpdateBaseline(rec.AMSAccountID, plaintext); err != nil && !errors.Is(err, store.ErrNotFound) {
 		// Baseline not advanced -> next tick retries the push; the duplicate is
 		// harmless. Never include credential material in the log.
-		r.logf("resync: baseline upsert failed for %s: %v", rec.Email, err)
+		r.logf("resync: baseline update failed for %s: %v", rec.Email, err)
 	}
 }
 

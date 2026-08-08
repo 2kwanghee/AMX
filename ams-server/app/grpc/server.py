@@ -22,7 +22,7 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -85,6 +85,14 @@ _ALLOCATION_STATUS = {
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+# Upper bound on how far ahead of AMS wall-clock a re-sync's observed_at may sit.
+# observed_at is the monotonicity authority; without a ceiling a single push with a
+# far-future stamp would pin the account and reject every later honest rotation
+# (credential lock-in). Small enough to bound the attack, large enough to absorb
+# ordinary agent/AMS clock skew.
+_OBSERVED_AT_MAX_SKEW = timedelta(minutes=5)
 
 
 def _event_detail(payload: dict) -> dict:
@@ -574,7 +582,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             self._store_event(server_id, tenant_id, msg.event)
         elif kind == "cred_update":
             self._apply_cred_update(
-                msg.cred_update, tenant_id, agent_id, kek, key_id
+                msg.cred_update, server_id, tenant_id, agent_id, kek, key_id
             )
 
     def _touch_last_seen(self, server_id: uuid.UUID) -> None:
@@ -725,6 +733,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
     def _apply_cred_update(
         self,
         cred: pb.CredentialUpdate,
+        server_id: uuid.UUID,
         tenant_id: uuid.UUID,
         agent_id: str,
         kek: bytes,
@@ -736,8 +745,12 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         (AAD = ams_account_id‖agent_id, same envelope as DeliverAccount). AMS
         opens it, re-encrypts under the at-rest Fernet key, and stores it — but
         only when the account belongs to this session's tenant (§7: never trust a
-        client tenant) and the observed_at is strictly newer than the stored one
-        (monotonicity). Every failure path is opaque: only account identifiers
+        client tenant), is actually assigned to THIS session's server (a session
+        may only re-seal a credential it legitimately holds — otherwise any
+        session could overwrite a sibling server's account under its own KEK), and
+        the observed_at is strictly newer than the stored one (monotonicity) yet
+        not implausibly in the future (skew clamp, no lock-in). Every failure path
+        is opaque: only account identifiers
         are logged, never ciphertext, KEK, or plaintext (§7). Plaintext lives in
         memory only from open to re-seal and is dropped immediately after.
         """
@@ -753,6 +766,17 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             _logger.warning("cred_update rejected: no observed_at (account %s)", account_id)
             return
         observed_at = cred.observed_at.ToDatetime(tzinfo=UTC)
+        # observed_at drives an irreversible monotonic ratchet: once stored, every
+        # future re-sync must beat it. A stamp implausibly far in the future would
+        # therefore pin the account forever and starve honest rotations (lock-in).
+        # Reject anything past now + allowed skew; genuine agent clock drift stays
+        # under the bound, so the past/near-now monotonicity path is untouched.
+        if observed_at > _now() + _OBSERVED_AT_MAX_SKEW:
+            _logger.warning(
+                "cred_update rejected: observed_at too far in the future (account %s)",
+                account_id,
+            )
+            return
         enc = cred.encrypted_credential
 
         with self._sm() as db:
@@ -764,6 +788,25 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             if account is None:
                 # Unknown to this tenant, or cross-tenant probe — indistinguishable
                 # by design (§7 tenant isolation).
+                _logger.warning("cred_update rejected: unknown account for tenant")
+                return
+            # Ownership: this session may only re-seal a credential its own server
+            # actually holds. Without this, a session could push a set sealed under
+            # its KEK for a sibling server's account (AAD re-derives from the
+            # session agent_id, so it authenticates) and overwrite that account's
+            # at-rest secret. Require a live (non-detached) assignment of this
+            # account to THIS session's server — the same "installed here" predicate
+            # used elsewhere (§5.2). A missing assignment is refused opaquely, so an
+            # unowned account is indistinguishable from an unknown one (§7).
+            owns = db.scalar(
+                select(Assignment.id).where(
+                    Assignment.account_id == account.id,
+                    Assignment.server_id == server_id,
+                    Assignment.tenant_id == tenant_id,
+                    Assignment.state != "detached",
+                )
+            )
+            if owns is None:
                 _logger.warning("cred_update rejected: unknown account for tenant")
                 return
             # The KEK is per-session; a mismatched key_id cannot be opened with the
@@ -799,8 +842,19 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 )
                 return
 
+            # A record can authenticate (right KEK + AAD) yet carry non-UTF-8 bytes
+            # — a self-sealed malformed push. Treat a decode failure as an opaque
+            # reject, not an exception: an uncaught UnicodeDecodeError would unwind
+            # the session read loop and drop the stream. Wipe the plaintext on both
+            # paths (§7); only the account id is logged.
             try:
                 secret = plaintext.decode()
+            except UnicodeDecodeError:
+                _logger.warning(
+                    "cred_update rejected: credential is not valid UTF-8 (account %s)",
+                    account.id,
+                )
+                return
             finally:
                 del plaintext
             # Re-encrypt under the at-rest Fernet key and drop the plaintext before

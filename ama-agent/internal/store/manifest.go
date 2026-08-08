@@ -173,6 +173,49 @@ func (s *Store) Upsert(rec Record, plaintextCred []byte) error {
 	return s.persist()
 }
 
+// UpdateBaseline advances the detection baseline of an ALREADY-PRESENT record
+// after an O9 re-sync push is accepted: it re-seals plaintextCred under the
+// active KEK and restamps the envelope + fingerprint, but leaves AllocationStatus
+// (and every other metadata field) untouched, and does nothing at all when the
+// record is absent. This is deliberately NOT Upsert: Upsert runs outside the
+// engine lock after the network Send, and in that window a concurrent recall may
+// have deleted the record (purge=true) or flipped it to inactive (purge=false).
+// A blind re-insert would resurrect a purged account or revive an inactive one,
+// and reconcile would then re-inject a recalled credential. Returning ErrNotFound
+// for an absent record lets the caller skip silently (the record is gone, so
+// there is nothing left to keep a baseline for). The caller MUST wipe
+// plaintextCred afterwards.
+func (s *Store) UpdateBaseline(amsAccountID string, plaintextCred []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[amsAccountID]
+	if !ok {
+		// Deleted out from under us by a concurrent recall/purge — do not recreate.
+		return ErrNotFound
+	}
+	kek, keyID, ok := s.keks.ActiveKey()
+	if !ok {
+		return ErrNoKEK
+	}
+	defer wipe(kek)
+	nonce, err := crypto.NewNonce()
+	if err != nil {
+		return err
+	}
+	ct, err := crypto.Seal(kek, nonce, plaintextCred, s.aad(amsAccountID))
+	if err != nil {
+		return err
+	}
+	// Envelope + fingerprint only; AllocationStatus, Email, ReceivedAt, etc. are
+	// preserved so a racing recall's status change survives.
+	r.Algorithm = int32(1) // ENCRYPTION_ALGORITHM_AES_256_GCM
+	r.KeyID = keyID
+	r.Nonce = nonce
+	r.Ciphertext = ct
+	r.Fingerprint = CredentialFingerprint(plaintextCred)
+	return s.persist()
+}
+
 // OpenCredential decrypts and returns the credential set for amsAccountID. The
 // caller MUST wipe the returned bytes when done.
 func (s *Store) OpenCredential(amsAccountID string) ([]byte, error) {

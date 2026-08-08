@@ -50,6 +50,14 @@ def _oauth_secret(email: str, refresh_token: str) -> str:
     )
 
 
+def _add_server(tenant_id: uuid.UUID, name: str) -> uuid.UUID:
+    with get_sessionmaker()() as db:
+        server = inventory.create_server(
+            db, tenant_id, name=name, hostname="h", switch_mode="auto"
+        )
+        return server.id
+
+
 def _add_account(tenant_id: uuid.UUID, email: str, refresh_token: str) -> uuid.UUID:
     with get_sessionmaker()() as db:
         account = inventory.create_account(
@@ -135,6 +143,9 @@ async def _open_session(channel, token, agent_id=AGENT_ID):
 def test_cred_update_reencrypts_and_stores_latest(app_env):
     signer = signing.Signer.from_env_or_generate()
     tenant_id, account_id, server_id = _seed_tenant_account_server("resync@example.com")
+    # The account must be installed on THIS server for a re-sync to be accepted
+    # (ownership, §5.7): the agent only re-seals a credential it legitimately holds.
+    _create_assignment(tenant_id, account_id, server_id)
     token = _issue_enroll(tenant_id, server_id)
     observed = datetime.now(UTC)
     new_rt = "rt-refreshed-" + uuid.uuid4().hex
@@ -163,6 +174,10 @@ def test_cred_update_monotonic_ignores_stale(app_env):
     # A second account in the same tenant acts as an ordering sentinel: once it
     # updates, the earlier stale push to account_id has already been processed.
     sentinel_id = _add_account(tenant_id, "sentinel@example.com", "rt-sentinel-orig")
+    # Both accounts are installed on this server so the ownership gate lets the
+    # re-syncs through; the test isolates monotonicity, not ownership.
+    _create_assignment(tenant_id, account_id, server_id)
+    _create_assignment(tenant_id, sentinel_id, server_id)
     token = _issue_enroll(tenant_id, server_id)
 
     t1 = datetime.now(UTC)
@@ -203,6 +218,9 @@ def test_cred_update_cross_tenant_account_rejected(app_env):
     signer = signing.Signer.from_env_or_generate()
     tenant_a, account_a, server_a = _seed_tenant_account_server("a@ex.com")
     tenant_b, account_b, _server_b = _seed_tenant_account_server("b@ex.com")
+    # A owns account_a on server_a; account_b is never assigned to server_a, so the
+    # cross-tenant push fails the ownership gate as well as the tenant gate.
+    _create_assignment(tenant_a, account_a, server_a)
     original_b_rt = _decrypt_rt(tenant_b, account_b)
     token = _issue_enroll(tenant_a, server_a)
 
@@ -237,6 +255,8 @@ def test_cred_update_bad_aad_not_applied(app_env):
     tenant_id, account_id, server_id = _seed_tenant_account_server("aad@example.com")
     original_rt = _decrypt_rt(tenant_id, account_id)
     sentinel_id = _add_account(tenant_id, "aad-sentinel@example.com", "rt-sentinel-orig")
+    _create_assignment(tenant_id, account_id, server_id)
+    _create_assignment(tenant_id, sentinel_id, server_id)
     token = _issue_enroll(tenant_id, server_id)
 
     t = datetime.now(UTC)
@@ -297,3 +317,152 @@ def test_deliver_after_resync_sends_latest(app_env):
             return json.loads(plaintext)["claudeAiOauth"]["refreshToken"]
 
     assert asyncio.run(scenario()) == new_rt
+
+
+def test_cred_update_foreign_server_account_rejected(app_env):
+    """Fix 1: a session may only re-seal a credential its OWN server holds.
+
+    Same tenant, but the target account is installed on a DIFFERENT server. The
+    session (enrolled on server_own) pushes a set sealed under its own KEK for that
+    account; without the ownership gate the AAD re-derives from the session agent_id
+    and the write would succeed, overwriting a sibling server's account. It must be
+    refused, and the at-rest secret must stand.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_own = _seed_tenant_account_server("owner@ex.com")
+    server_other = _add_server(tenant_id, "s-other-" + uuid.uuid4().hex[:8])
+    # The account lives on the OTHER server, never on this session's server.
+    _create_assignment(tenant_id, account_id, server_other)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    # A sentinel account owned by THIS server fences the rejected push.
+    sentinel_id = _add_account(tenant_id, "owner-sentinel@ex.com", "rt-sentinel-orig")
+    _create_assignment(tenant_id, sentinel_id, server_own)
+    token = _issue_enroll(tenant_id, server_own)
+
+    t = datetime.now(UTC)
+    ts = t + timedelta(seconds=5)
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            enc = _seal(
+                kek, key_id, account_id, AGENT_ID,
+                _oauth_secret("owner@ex.com", "rt-attacker"),
+            )
+            await call.write(_cred_update(account_id, enc, "", t))
+            enc_s = _seal(
+                kek, key_id, sentinel_id, AGENT_ID,
+                _oauth_secret("owner-sentinel@ex.com", "rt-sentinel-new"),
+            )
+            await call.write(_cred_update(sentinel_id, enc_s, "", ts))
+            await asyncio.to_thread(_wait_observed, tenant_id, sentinel_id, ts)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    # Foreign-server account untouched; the session's own account was updatable.
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    assert _stored(tenant_id, account_id).credential_observed_at is None
+    assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
+
+
+def test_cred_update_future_observed_at_rejected_no_lockin(app_env):
+    """Fix 2: a far-future observed_at is refused, so it cannot pin the ratchet.
+
+    A push stamped +10 years is rejected by the skew clamp; a normal push then a
+    later (still-valid) push both apply, proving the future stamp never locked the
+    account and honest rotation still flows.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("future@ex.com")
+    _create_assignment(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    far_future = datetime.now(UTC) + timedelta(days=3650)
+    normal = datetime.now(UTC)
+    later = normal + timedelta(seconds=30)  # newer, still within the skew bound
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            # 1) Far-future stamp -> rejected by the clamp (no store, no ratchet).
+            enc_future = _seal(
+                kek, key_id, account_id, AGENT_ID,
+                _oauth_secret("future@ex.com", "rt-future"),
+            )
+            await call.write(_cred_update(account_id, enc_future, "", far_future))
+            # 2) Normal stamp -> applied.
+            enc_normal = _seal(
+                kek, key_id, account_id, AGENT_ID,
+                _oauth_secret("future@ex.com", "rt-normal"),
+            )
+            await call.write(_cred_update(account_id, enc_normal, "", normal))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, normal)
+            # 3) A later honest rotation still applies (future stamp did not stick).
+            enc_later = _seal(
+                kek, key_id, account_id, AGENT_ID,
+                _oauth_secret("future@ex.com", "rt-later"),
+            )
+            await call.write(_cred_update(account_id, enc_later, "", later))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, later)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    assert original_rt != "rt-later"
+    # The later rotation won; observed_at is the later stamp, not +10 years.
+    assert _decrypt_rt(tenant_id, account_id) == "rt-later"
+    observed = _stored(tenant_id, account_id).credential_observed_at
+    assert abs((observed - later).total_seconds()) < 1e-3
+
+
+def test_cred_update_non_utf8_rejected_session_survives(app_env):
+    """Fix 3: a self-sealed non-UTF-8 credential is rejected opaquely, not fatally.
+
+    The bytes authenticate (correct KEK + AAD) but are not decodable text; the
+    decode must be caught and turned into an opaque reject rather than an
+    exception that unwinds the session read loop. A sentinel pushed afterwards
+    must still be processed (the session survived).
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("utf8@ex.com")
+    _create_assignment(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    sentinel_id = _add_account(tenant_id, "utf8-sentinel@ex.com", "rt-sentinel-orig")
+    _create_assignment(tenant_id, sentinel_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    t = datetime.now(UTC)
+    ts = t + timedelta(seconds=5)
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            # Seal raw invalid-UTF-8 bytes under the correct KEK and AAD: opens and
+            # authenticates, but .decode() would raise.
+            bad = b"\xff\xfe\x00\x80not utf-8"
+            ciphertext, nonce = signing.seal_credential(
+                kek, bad, ams_account_id=str(account_id), agent_id=AGENT_ID
+            )
+            enc_bad = pb.EncryptedCredential(
+                algorithm=pb.ENCRYPTION_ALGORITHM_AES_256_GCM,
+                ciphertext=ciphertext,
+                nonce=nonce,
+                key_id=key_id,
+                aad_ams_account_id=str(account_id),
+                aad_agent_id=AGENT_ID,
+            )
+            await call.write(_cred_update(account_id, enc_bad, "", t))
+            # Sentinel proves the session read loop survived the bad decode.
+            enc_s = _seal(
+                kek, key_id, sentinel_id, AGENT_ID,
+                _oauth_secret("utf8-sentinel@ex.com", "rt-sentinel-new"),
+            )
+            await call.write(_cred_update(sentinel_id, enc_s, "", ts))
+            await asyncio.to_thread(_wait_observed, tenant_id, sentinel_id, ts)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    # Bad push rejected, account intact; sentinel processed => session alive.
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    assert _stored(tenant_id, account_id).credential_observed_at is None
+    assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
