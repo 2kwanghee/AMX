@@ -23,3 +23,8 @@ breaking:
     # is committed in-repo and its module path is owned by this monorepo, so
     # path renames (e.g. the placeholder → real-repo fix) are allowed.
     - FILE_SAME_GO_PACKAGE
+    # AmsCommand reserves 17-29 as planned command-expansion slots. Promoting a
+    # slot to a real oneof arm (e.g. 17 → SetPolicy, P3/O4-C) shrinks the reserved
+    # range, which this rule flags — but the number was never a live field, so the
+    # wire stays compatible. Consuming a documented expansion slot is intended.
+    - RESERVED_MESSAGE_NO_DELETE

@@ -348,6 +348,7 @@ export interface AmsCommand {
   switchNow?: SwitchNow | undefined;
   reqReport?: RequestReport | undefined;
   sessionSetup?: SessionSetup | undefined;
+  setPolicy?: SetPolicy | undefined;
 }
 
 /**
@@ -534,6 +535,24 @@ export function switchNow_SwitchStrategyToJSON(object: SwitchNow_SwitchStrategy)
     default:
       return "UNRECOGNIZED";
   }
+}
+
+/**
+ * Switching policy delivery (§6.4, O4-C hybrid). AMS owns threshold + default
+ * strategy; cooldown/hysteresis stay local to the tsamx engine. Re-asserted
+ * every session alongside SetSwitchMode, so AMA keeps it in memory only.
+ */
+export interface SetPolicy {
+  /**
+   * Injected as `tsamx config set autoswitch.threshold <pct>`. 0 keeps the
+   * local default (no injection).
+   */
+  thresholdPct: number;
+  /**
+   * Default for auto/switch_now when no strategy is named.
+   * UNSPECIFIED keeps the local default.
+   */
+  defaultStrategy: SwitchNow_SwitchStrategy;
 }
 
 /**
@@ -1700,6 +1719,7 @@ function createBaseAmsCommand(): AmsCommand {
     switchNow: undefined,
     reqReport: undefined,
     sessionSetup: undefined,
+    setPolicy: undefined,
   };
 }
 
@@ -1737,6 +1757,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
     }
     if (message.sessionSetup !== undefined) {
       SessionSetup.encode(message.sessionSetup, writer.uint32(130).fork()).join();
+    }
+    if (message.setPolicy !== undefined) {
+      SetPolicy.encode(message.setPolicy, writer.uint32(138).fork()).join();
     }
     return writer;
   },
@@ -1836,6 +1859,14 @@ export const AmsCommand: MessageFns<AmsCommand> = {
           message.sessionSetup = SessionSetup.decode(reader, reader.uint32());
           continue;
         }
+        case 17: {
+          if (tag !== 138) {
+            break;
+          }
+
+          message.setPolicy = SetPolicy.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1890,6 +1921,11 @@ export const AmsCommand: MessageFns<AmsCommand> = {
         : isSet(object.session_setup)
         ? SessionSetup.fromJSON(object.session_setup)
         : undefined,
+      setPolicy: isSet(object.setPolicy)
+        ? SetPolicy.fromJSON(object.setPolicy)
+        : isSet(object.set_policy)
+        ? SetPolicy.fromJSON(object.set_policy)
+        : undefined,
     };
   },
 
@@ -1928,6 +1964,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
     if (message.sessionSetup !== undefined) {
       obj.sessionSetup = SessionSetup.toJSON(message.sessionSetup);
     }
+    if (message.setPolicy !== undefined) {
+      obj.setPolicy = SetPolicy.toJSON(message.setPolicy);
+    }
     return obj;
   },
 
@@ -1960,6 +1999,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
       : undefined;
     message.sessionSetup = (object.sessionSetup !== undefined && object.sessionSetup !== null)
       ? SessionSetup.fromPartial(object.sessionSetup)
+      : undefined;
+    message.setPolicy = (object.setPolicy !== undefined && object.setPolicy !== null)
+      ? SetPolicy.fromPartial(object.setPolicy)
       : undefined;
     return message;
   },
@@ -2771,6 +2813,90 @@ export const SwitchNow: MessageFns<SwitchNow> = {
       : undefined;
     message.strategy = object.strategy ?? undefined;
     message.assignmentId = object.assignmentId ?? "";
+    return message;
+  },
+};
+
+function createBaseSetPolicy(): SetPolicy {
+  return { thresholdPct: 0, defaultStrategy: 0 };
+}
+
+export const SetPolicy: MessageFns<SetPolicy> = {
+  encode(message: SetPolicy, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.thresholdPct !== 0) {
+      writer.uint32(9).double(message.thresholdPct);
+    }
+    if (message.defaultStrategy !== 0) {
+      writer.uint32(16).int32(message.defaultStrategy);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SetPolicy {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSetPolicy();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.thresholdPct = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.defaultStrategy = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SetPolicy {
+    return {
+      thresholdPct: isSet(object.thresholdPct)
+        ? globalThis.Number(object.thresholdPct)
+        : isSet(object.threshold_pct)
+        ? globalThis.Number(object.threshold_pct)
+        : 0,
+      defaultStrategy: isSet(object.defaultStrategy)
+        ? switchNow_SwitchStrategyFromJSON(object.defaultStrategy)
+        : isSet(object.default_strategy)
+        ? switchNow_SwitchStrategyFromJSON(object.default_strategy)
+        : 0,
+    };
+  },
+
+  toJSON(message: SetPolicy): unknown {
+    const obj: any = {};
+    if (message.thresholdPct !== 0) {
+      obj.thresholdPct = message.thresholdPct;
+    }
+    if (message.defaultStrategy !== 0) {
+      obj.defaultStrategy = switchNow_SwitchStrategyToJSON(message.defaultStrategy);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<SetPolicy>): SetPolicy {
+    return SetPolicy.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<SetPolicy>): SetPolicy {
+    const message = createBaseSetPolicy();
+    message.thresholdPct = object.thresholdPct ?? 0;
+    message.defaultStrategy = object.defaultStrategy ?? 0;
     return message;
   },
 };
