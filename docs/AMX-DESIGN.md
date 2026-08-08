@@ -383,6 +383,22 @@ client_id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`).
 이 credential은 실제 `claude login` 산출물과 동일 형태이므로, 주입받은 서버의
 Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패한 이유는 §2.4-5.
 
+### 5.6 콘솔·경보 (P4, 설계노트 `docs/design-notes/p4-architecture.md`)
+
+- **ams-web = BFF 강제**: Next.js Route Handler를 통해서만 REST 호출. 관리자 Bearer 토큰은
+  Next 서버 프로세스 env에만, **브라우저에 노출 금지**. 브라우저↔BFF는 httpOnly·SameSite=Strict
+  세션 쿠키. 실시간 뷰는 폴링(5~10s, async 명령 수렴 모델에 정합; SSE는 확장점).
+- **경보 `alerts` 테이블(신규)**: P3가 훅으로 이월한 all_exhausted를 여기서 소비. 소스 = all_exhausted
+  이벤트 · reconcile 드리프트(`usage_snapshots.drift`) · 서버 오프라인. `dedupe_key`(server×kind[×account])로
+  open 1건 유지, 다음 UsageReport에서 조건 해소 시 auto-resolve. `GET /alerts` · `POST /alerts/{id}:ack`.
+  경보는 이벤트 유실에 강건하도록 **reconcile-on-report 재조회로도 재구성 가능**(§P3 결정8 best-effort 보완).
+- **서버 오프라인 정합**: `last_seen_at` 만료 스위퍼(주기적 `< now-3틱 → offline`) — half-open 스트림에서
+  online 고착·경보 미발화 방지.
+- **인증**: ams-server는 단일 관리자 Bearer 유지, BFF에 로그인→쿠키 세션 + `Principal` 반환형(P5 테넌트
+  RBAC 훅 자리)만 추가. 멀티테넌트 RBAC는 P5.
+- **완료판정 검증**: BFF API 레벨(Route Handler 프로그램 구동)로 전 수명주기 조작 판정 + OAuth 등록
+  마법사·deliver/recall만 실브라우저 Playwright 스모크.
+
 ---
 
 ## 6. AMA 설계 (에이전트면, Go)
@@ -562,7 +578,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | O5 | 러너 config 공유 | AMA 서버의 실행 러너(Claude Code)가 같은 `~/.claude`를 읽는지 배포 시 보장 필요. deliver 크리티컬 섹션(§6.3) 동안 러너 무중단(또는 일시 정지) 방안 포함 | P2 배포 설계 |
 | O6 | tsamx 업스트림 동기화 절차 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 검증 체크리스트 + 소유자 | P1 이후 운영 |
 | O7 | 다중 AMS 인스턴스 | 세션 레지스트리 + 내부 라우팅 (P1은 단일 인스턴스로 미룸) | SaaS 단계 |
-| O8 | ClickEye 연동 형태 | ClickEye가 AMS 조회 API를 읽는 방식·범위 (기존 seat_quota_ingest 대체 여부 포함) | P3 이후 |
+| O8 | ClickEye 연동 형태 | **P4에서 건너뜀** (2026-08-08, 사용자) — 계정 스위칭 관제에 집중. ClickEye가 AMS 조회 API를 읽는 방식·범위는 추후 결정. 권장 후보: 신규 read-only 엔드포인트 + ClickEye 전용 API 키 | 미해결 (P4 이후) |
 | O9 | refresh token 회전 | 전달 후 로컬 갱신 주체가 **둘**(tsamx `oauth.py`의 refresh + Claude Code 자체 갱신)이라 AMS 보관본이 구본화됨. refresh token이 1회용 회전이면 재배정 시 보관본 무효 가능 → AMA가 갱신 credential을 AMS로 역동기화 vs 재배정 시 재인증(§5.5 재수행) 허용. **판별법**: 실토큰으로 refresh 엔드포인트 2회 호출 — 첫 refresh 후 구 refresh token이 거부되면 회전형 | P2 착수 전 |
 | O10 | tsamx 설치 인증 (D11 파급) | 프라이빗 레포 git 설치에 필요한 서버측 인증. 1차: 읽기 전용 deploy key 공용(만료 없음·최소 권한) → 서버 증가/조직 이전 시 서버별 키 또는 machine user → P2 이후 AMS 아티팩트 서빙(wheel)으로 GitHub 의존 제거 검토 | P2 배포 설계 |
 

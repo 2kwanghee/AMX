@@ -1,0 +1,28 @@
+{
+  "name": "ams-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AMX management console (Next.js App Router BFF). All ams-server REST access is server-side; the admin Bearer token never reaches the browser.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "next": "15.5.4",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "swr": "^2.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "msw": "^2.7.0",
+    "typescript": "^5.9.0",
+    "vitest": "^2.1.9"
+  }
+}

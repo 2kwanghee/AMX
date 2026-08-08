@@ -206,3 +206,40 @@ class UsageSnapshot(Wire):
     report_type: Literal["usage", "switch_event"]
     reported_at: datetime
     payload: dict
+
+
+# -- Alert --------------------------------------------------------------------
+AlertKind = Literal["all_exhausted", "drift", "server_offline", "quarantine"]
+AlertSeverity = Literal["critical", "warning"]
+AlertStatus = Literal["open", "acked", "resolved"]
+
+
+class Alert(Wire):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    server_id: uuid.UUID | None = None
+    account_id: uuid.UUID | None = None
+    kind: AlertKind
+    severity: AlertSeverity
+    status: AlertStatus
+    dedupe_key: str
+    detail: dict | None = None
+    source_snapshot_id: uuid.UUID | None = None
+    created_at: datetime
+    acked_at: datetime | None = None
+    acked_by: str | None = None
+    resolved_at: datetime | None = None
+
+
+class AlertPage(Wire):
+    items: list[Alert]
+    page_info: PageInfo | None = None
+
+
+class AlertAckRequest(Wire):
+    acked_by: str | None = Field(default=None, max_length=200)
+
+
+class EventPage(Wire):
+    items: list[UsageSnapshot]
+    page_info: PageInfo | None = None

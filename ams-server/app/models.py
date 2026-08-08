@@ -54,6 +54,9 @@ COMMAND_TYPES = (
 )
 COMMAND_STATUSES = ("queued", "sent", "acked", "failed")
 SWITCH_STRATEGIES = ("best", "next_available")
+ALERT_KINDS = ("all_exhausted", "drift", "server_offline", "quarantine")
+ALERT_SEVERITIES = ("critical", "warning")
+ALERT_STATUSES = ("open", "acked", "resolved")
 
 
 class Base(DeclarativeBase):
@@ -283,4 +286,69 @@ class UsageSnapshot(Base):
     drift: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     reported_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Alert(Base):
+    """Operational alerts (design note §4, decision 3).
+
+    Sourced entirely inside the gRPC/service layer — no new scheduler beyond the
+    offline sweeper: all_exhausted + quarantine events (``_store_event``),
+    reconcile drift (``reconcile_from_report`` path, same transaction as the
+    snapshot), and server offline (``_mark_offline`` + the last_seen_at sweeper).
+
+    Tenant isolation reuses the P1 anchor: ``(server_id, tenant_id)`` is a
+    composite foreign key into ``servers(id, tenant_id)``, so an alert can never
+    name a server in another tenant. ``server_id`` is nullable for forward
+    compatibility, but every P4 trigger sets it.
+
+    ``dedupe_key`` = ``server_id:kind`` (server-scoped: all_exhausted,
+    server_offline) or ``server_id:kind:account_id`` (account-scoped: drift,
+    quarantine). A partial unique index keeps at most one **open** alert per
+    key, so a persistent condition reported every 5 minutes never floods.
+    """
+
+    __tablename__ = "alerts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["server_id", "tenant_id"],
+            ["servers.id", "servers.tenant_id"],
+            name="fk_alerts_server_tenant",
+            ondelete="CASCADE",
+        ),
+        # At most one OPEN alert per dedupe_key (design note §4). acked/resolved
+        # rows are exempt, so history accumulates but live noise cannot.
+        Index(
+            "uq_alerts_open_dedupe",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+        Index("ix_alerts_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    server_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # The usage_snapshots row that produced this alert (drift/all_exhausted from a
+    # report, or the switch_event). Plain column, not an FK: the snapshot cascades
+    # away with the server exactly as the alert does, so no dangling reference.
+    source_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    acked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    acked_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

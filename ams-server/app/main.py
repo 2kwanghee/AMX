@@ -10,7 +10,7 @@ import logging
 
 from fastapi import FastAPI
 
-from app.api.v1 import accounts, assignments, servers, tenants
+from app.api.v1 import accounts, alerts, assignments, servers, tenants
 from app.config import get_settings
 from app.core.errors import install_error_handlers
 from app.services.oauth_enroll import PkceFlowStore
@@ -33,6 +33,7 @@ def create_app() -> FastAPI:
     app.include_router(accounts.router, prefix=API_PREFIX)
     app.include_router(servers.router, prefix=API_PREFIX)
     app.include_router(assignments.router, prefix=API_PREFIX)
+    app.include_router(alerts.router, prefix=API_PREFIX)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:

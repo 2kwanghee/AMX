@@ -22,6 +22,25 @@ uv cache are warm, and stays well inside a minute cold.
 
 Requirements: Docker (for PostgreSQL), a Go toolchain, and `uv`.
 
+### P4 console round trip
+
+`test_p4_console_e2e.py` adds the P4 completion criterion (design note §9): the
+whole account lifecycle and the alert round trip driven through the **real
+ams-web BFF** against a live ams-server. Single command:
+
+```
+AMX_GO_BIN=/path/to/go uv run --project ams-server pytest e2e/test_p4_console_e2e.py -q
+```
+
+It additionally needs **Node** (to run the actual ams-web Route Handlers) on
+`PATH`. Unlike P2/P3 this stands the REST API up as a real HTTP process
+(uvicorn) so the BFF can `fetch` it; every console operation — create
+tenant/account/server, enroll, assign, deliver, list/ack/resolve the alert,
+recall — goes through the BFF's session + proxy handlers, and every BFF response
+is scanned so the admin token never reaches the browser side. The alert is
+induced with the P3 recipe (two accounts exhausted, an auto tick emits
+`KIND_ALL_EXHAUSTED`) and resolved by a console `:refresh-usage`.
+
 ## What actually runs
 
 | Piece | How it runs |

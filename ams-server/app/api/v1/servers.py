@@ -117,6 +117,29 @@ def get_server_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
     return schemas.UsageSnapshot.model_validate(snapshot)
 
 
+@router.get("/servers/{server_id}/events", response_model=schemas.EventPage)
+def list_server_events(
+    tenant_id: uuid.UUID,
+    server_id: uuid.UUID,
+    db: DbSession,
+    pageSize: PageSize = 50,  # noqa: N803
+    pageToken: PageToken = None,  # noqa: N803
+):
+    # Switch/quarantine/all_exhausted timeline from usage_snapshots
+    # (report_type="switch_event"); resolves the server first so a cross-tenant
+    # id is a 404 before any read.
+    offset = offset_from_token(pageToken)
+    items, total = inventory.list_switch_events(
+        db, tenant_id, server_id, limit=pageSize, offset=offset
+    )
+    return schemas.EventPage(
+        items=[schemas.UsageSnapshot.model_validate(s) for s in items],
+        page_info=schemas.PageInfo(
+            next_page_token=next_page_token(offset, pageSize, total), total_size=total
+        ),
+    )
+
+
 @router.post("/servers/{server_id}:refresh-usage", status_code=status.HTTP_202_ACCEPTED)
 def refresh_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
     # Queues a RequestReport for the connected agent; the report arrives back on
