@@ -303,6 +303,25 @@ func (h *Handler) handleSetPolicy(ctx context.Context, cmd *amxv1.AmsCommand, sp
 	h.engine.Lock()
 	defer h.engine.Unlock()
 
+	// Replay monotonicity (R3): SetPolicy is not applied-log gated, so a captured
+	// SetPolicy resent within the freshness window would otherwise re-run the
+	// effect and rewind the live threshold to a stale value. issued_at is already
+	// verified non-nil by checkFreshness. Ignore a SetPolicy strictly older than
+	// the last one applied — its value is a past one the operator has since moved
+	// past — while still applying an equal-or-newer re-assertion of the latest
+	// policy. Only past-value rewind is blocked; re-assertion idempotency holds.
+	issued := cmd.GetIssuedAt().AsTime()
+	h.mu.Lock()
+	stale := !h.lastPolicyIssuedAt.IsZero() && issued.Before(h.lastPolicyIssuedAt)
+	h.mu.Unlock()
+	if stale {
+		// The live policy already holds the newer value, so the operator's intent
+		// still stands: report CONVERGED without re-running the effect.
+		converged(ack)
+		h.record(ack, "set_policy", "", sp.GetDefaultStrategy().String())
+		return ack
+	}
+
 	if pct := sp.GetThresholdPct(); pct > 0 {
 		if err := h.bridge.ConfigSetThreshold(ctx, pct); err != nil {
 			out := diverged(ack, "tsamx_config", err)
@@ -315,6 +334,11 @@ func (h *Handler) handleSetPolicy(ctx context.Context, cmd *amxv1.AmsCommand, sp
 		h.defaultStrategy = ds
 		h.mu.Unlock()
 	}
+	h.mu.Lock()
+	if issued.After(h.lastPolicyIssuedAt) {
+		h.lastPolicyIssuedAt = issued
+	}
+	h.mu.Unlock()
 	converged(ack)
 	h.record(ack, "set_policy", "", sp.GetDefaultStrategy().String())
 	return ack

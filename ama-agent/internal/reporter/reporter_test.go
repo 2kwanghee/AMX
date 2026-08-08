@@ -2,6 +2,7 @@ package reporter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -60,5 +61,32 @@ func TestOutboxDedupeAndFlush(t *testing.T) {
 	}
 	if o.Depth() != 0 {
 		t.Fatalf("depth after flush = %d", o.Depth())
+	}
+}
+
+// TestOutboxDedupeWindowBounded: the seen-set that backs event_id dedupe must not
+// grow without bound on a long-running agent. After far more than one window of
+// distinct events, the map stays capped at outboxDedupeWindow, yet events still
+// inside the window are still deduplicated.
+func TestOutboxDedupeWindowBounded(t *testing.T) {
+	o := NewOutbox()
+	const n = outboxDedupeWindow * 3
+	for i := 0; i < n; i++ {
+		o.Enqueue(&amxv1.AccountEvent{EventId: fmt.Sprintf("e%d", i)})
+	}
+	if got := len(o.seen); got > outboxDedupeWindow {
+		t.Fatalf("seen map size = %d, want <= %d (unbounded growth)", got, outboxDedupeWindow)
+	}
+	// A recently-seen event_id (last one enqueued) is still deduplicated.
+	depth := o.Depth()
+	o.Enqueue(&amxv1.AccountEvent{EventId: fmt.Sprintf("e%d", n-1)})
+	if o.Depth() != depth {
+		t.Fatalf("recent event_id was not deduplicated: depth %d -> %d", depth, o.Depth())
+	}
+	// An event_id evicted past the window is treated as new (accepted).
+	before := o.Depth()
+	o.Enqueue(&amxv1.AccountEvent{EventId: "e0"})
+	if o.Depth() != before+1 {
+		t.Fatalf("evicted event_id not re-accepted: depth %d -> %d", before, o.Depth())
 	}
 }

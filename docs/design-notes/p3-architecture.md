@@ -22,8 +22,12 @@
 7. **reconcile 자동 교정은 좁게 게이트.** 드리프트 감지+경보는 항상, 자동 재하달은 안전·멱등 케이스
    (배정됐는데 로컬 부재→재deliver / detached인데 로컬 존재→재recall)만, 루프 방지 카운터와 함께.
    전면 자동 교정은 P3 범위 밖.
-8. **AccountEvent는 Outbox 경유, usage 리포트는 비경유.** 이벤트는 유실 불가(dedupe 아웃박스),
-   usage 스냅샷은 다음 틱이 대체하므로 두절 시 드롭 → 전송 블로킹 위험 제거.
+8. **AccountEvent는 Outbox 경유, usage 리포트는 비경유.** 이벤트는 dedupe 아웃박스 + 재연결 flush로
+   재전송하나, **전달은 best-effort**다 — Outbox가 메모리 전용이고 transport가 fire-and-forget(sendCh
+   적재 성공을 전송으로 간주)이라, 프로세스 재시작 또는 적재 직후 스트림 단절 시 인플라이트 이벤트 1건이
+   유실될 수 있다. **권위 상태는 이벤트가 아니라 5분 UsageReport + reconcile-on-report**이므로 상태 정합은
+   자가치유되고 잃는 것은 감사용 알림뿐이다(R3 리뷰 A·B 공통, ADVERSARY H4 확인). 무손실 전달(transport
+   ack 기반)은 후속 하드닝 이월. usage 스냅샷은 다음 틱이 대체하므로 두절 시 드롭 → 전송 블로킹 위험 제거.
 9. **E2E는 P2 하네스 확장** — `cache/usage.json` 프리시드로 활성계정 ≥임계 유도, 실 `auto --once` 구동,
    AMS의 AccountEvent(switch) 수신 + 활성계정 전환 + usage_snapshots 행 검증.
 

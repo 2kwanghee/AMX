@@ -66,6 +66,15 @@ type Handler struct {
 	// lastSwitchedAt records the time of the last manual switch (informational,
 	// design note §3). Memory-only.
 	lastSwitchedAt time.Time
+	// lastPolicyIssuedAt is the issued_at of the most recently applied SetPolicy.
+	// SetPolicy is re-asserted every session and is NOT gated by the applied log
+	// (re-application is idempotent), so this memory-only high-water mark is the
+	// only thing that stops a captured older SetPolicy — resent inside the
+	// freshness window — from rolling the live threshold BACK to a past value
+	// (ADVERSARY R3: a threshold 90 recaptured after the operator lowered it to
+	// 50). Only strictly-newer-or-equal issued_at is applied; strictly older is
+	// ignored.
+	lastPolicyIssuedAt time.Time
 }
 
 // Config assembles a Handler.

@@ -15,6 +15,7 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // newHarnessBridge builds a harness over a caller-supplied bridge and engine
@@ -136,6 +137,76 @@ func TestSwitchNowUsesDefaultStrategy(t *testing.T) {
 	_ = ob.Flush(func(ev *amxv1.AccountEvent) error { got = append(got, ev); return nil })
 	if len(got) != 1 || got[0].GetTrigger() != amxv1.AccountEvent_TRIGGER_MANUAL {
 		t.Fatalf("manual switch event = %+v", got)
+	}
+}
+
+// TestSetPolicyRejectsStaleReplay: after the operator lowers the threshold, a
+// captured older SetPolicy resent inside the freshness window must NOT rewind the
+// live threshold to its past value (ADVERSARY R3 monotonicity). An equal-or-newer
+// re-assertion of the latest policy still applies.
+func TestSetPolicyRejectsStaleReplay(t *testing.T) {
+	fake := tsamx.NewFake()
+	hn := newHarnessBridge(t, fake, &sync.Mutex{}, nil)
+	now := time.Now()
+
+	// Operator sets threshold 50 (recent).
+	hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-new",
+		IssuedAt:  timestamppb.New(now.Add(-30 * time.Second)),
+		Cmd:       &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{ThresholdPct: 50}},
+	}))
+	if fake.Threshold != 50 {
+		t.Fatalf("threshold after set = %v, want 50", fake.Threshold)
+	}
+
+	// Replay a captured older SetPolicy(90) still inside the 5-minute window.
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-old-replay",
+		IssuedAt:  timestamppb.New(now.Add(-2 * time.Minute)),
+		Cmd:       &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{ThresholdPct: 90}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("stale replay convergence = %v detail=%q", ack.Convergence, ack.Detail)
+	}
+	if fake.Threshold != 50 {
+		t.Fatalf("threshold rewound by stale replay = %v, want 50", fake.Threshold)
+	}
+
+	// A genuinely newer re-assertion still applies.
+	hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-newer",
+		IssuedAt:  timestamppb.New(now),
+		Cmd:       &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{ThresholdPct: 70}},
+	}))
+	if fake.Threshold != 70 {
+		t.Fatalf("newer re-assertion not applied, threshold = %v, want 70", fake.Threshold)
+	}
+}
+
+// TestSetPolicyReassertionSameIssuedAtApplies: the normal session re-assertion
+// resends the latest policy with an unchanged issued_at; monotonicity must treat
+// equal issued_at as applicable, not a stale rewind.
+func TestSetPolicyReassertionSameIssuedAtApplies(t *testing.T) {
+	fake := tsamx.NewFake()
+	hn := newHarnessBridge(t, fake, &sync.Mutex{}, nil)
+	issued := time.Now().Add(-time.Minute)
+
+	hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-a",
+		IssuedAt:  timestamppb.New(issued),
+		Cmd:       &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{ThresholdPct: 80}},
+	}))
+	// Re-assert the SAME policy (same issued_at); it must still converge and apply.
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-a-reassert",
+		IssuedAt:  timestamppb.New(issued),
+		Cmd:       &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{ThresholdPct: 80}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("re-assertion convergence = %v detail=%q", ack.Convergence, ack.Detail)
+	}
+	if fake.Threshold != 80 {
+		t.Fatalf("threshold after re-assertion = %v, want 80", fake.Threshold)
 	}
 }
 
