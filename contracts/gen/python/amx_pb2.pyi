@@ -266,18 +266,32 @@ class RequestReport(_message.Message):
     def __init__(self, report_type: _Optional[_Union[RequestReport.ReportType, str]] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class AmaMessage(_message.Message):
-    __slots__ = ("register", "hb", "usage", "ack", "event")
+    __slots__ = ("register", "hb", "usage", "ack", "event", "cred_update")
     REGISTER_FIELD_NUMBER: _ClassVar[int]
     HB_FIELD_NUMBER: _ClassVar[int]
     USAGE_FIELD_NUMBER: _ClassVar[int]
     ACK_FIELD_NUMBER: _ClassVar[int]
     EVENT_FIELD_NUMBER: _ClassVar[int]
+    CRED_UPDATE_FIELD_NUMBER: _ClassVar[int]
     register: Register
     hb: Heartbeat
     usage: UsageReport
     ack: CommandAck
     event: AccountEvent
-    def __init__(self, register: _Optional[_Union[Register, _Mapping]] = ..., hb: _Optional[_Union[Heartbeat, _Mapping]] = ..., usage: _Optional[_Union[UsageReport, _Mapping]] = ..., ack: _Optional[_Union[CommandAck, _Mapping]] = ..., event: _Optional[_Union[AccountEvent, _Mapping]] = ...) -> None: ...
+    cred_update: CredentialUpdate
+    def __init__(self, register: _Optional[_Union[Register, _Mapping]] = ..., hb: _Optional[_Union[Heartbeat, _Mapping]] = ..., usage: _Optional[_Union[UsageReport, _Mapping]] = ..., ack: _Optional[_Union[CommandAck, _Mapping]] = ..., event: _Optional[_Union[AccountEvent, _Mapping]] = ..., cred_update: _Optional[_Union[CredentialUpdate, _Mapping]] = ...) -> None: ...
+
+class CredentialUpdate(_message.Message):
+    __slots__ = ("account", "encrypted_credential", "server_credential", "observed_at")
+    ACCOUNT_FIELD_NUMBER: _ClassVar[int]
+    ENCRYPTED_CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    SERVER_CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    OBSERVED_AT_FIELD_NUMBER: _ClassVar[int]
+    account: AccountRef
+    encrypted_credential: EncryptedCredential
+    server_credential: str
+    observed_at: _timestamp_pb2.Timestamp
+    def __init__(self, account: _Optional[_Union[AccountRef, _Mapping]] = ..., encrypted_credential: _Optional[_Union[EncryptedCredential, _Mapping]] = ..., server_credential: _Optional[str] = ..., observed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class Register(_message.Message):
     __slots__ = ("agent_id", "server_id", "enroll_token", "server_credential", "hostname", "agent_version", "tsamx_version", "switch_mode", "accounts", "applied_command_ids")
