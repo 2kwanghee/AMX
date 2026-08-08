@@ -151,6 +151,14 @@ func run() error {
 	// On (re)connect, send Register first (SSOT §5.4). The auth is the enroll
 	// token on first contact, else the server credential from a prior SessionSetup.
 	client.OnConnect = func(send func(*amxv1.AmaMessage) error) error {
+		// Fresh ephemeral X25519 key pair per connection (C2 §7): AMS seals every
+		// per-agent KEK to this public key, and the matching private key (held in
+		// session-scoped memory) unwraps them in SessionSetup. A new pair every
+		// reconnect makes a captured KEK envelope unusable across sessions.
+		agentPub, kerr := handler.NewSession()
+		if kerr != nil {
+			return kerr
+		}
 		reg := &amxv1.Register{
 			AgentId:           agentID,
 			ServerId:          serverID,
@@ -158,6 +166,7 @@ func run() error {
 			AgentVersion:      "p3",
 			SwitchMode:        handler.SwitchMode(),
 			AppliedCommandIds: applied.RecentIDs(),
+			AgentPublicKey:    agentPub,
 		}
 		// Seed local reality so AMS can reconcile immediately (§5.4). `list` reads
 		// without a KEK, so this works even before SessionSetup.

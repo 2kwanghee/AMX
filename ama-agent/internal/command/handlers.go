@@ -42,9 +42,17 @@ func (h *Handler) handleSessionSetup(_ context.Context, cmd *amxv1.AmsCommand, s
 			}
 		}
 	}
-	// Install KEKs (memory only, §6.2).
+	// Install KEKs (memory only, §6.2). Each wrapped_key is a NaCl sealed box AMS
+	// sealed to this session's ephemeral X25519 public key (C2 §7); unwrap it with
+	// the matching private key. AMA always advertises a public key, so a raw KEK
+	// (or one sealed to a stale key) fails to open and is rejected — downgrade
+	// defense.
+	pub, priv := h.sessionKeyPair()
+	if len(ss.GetKeys()) > 0 && (pub == nil || priv == nil) {
+		return reject(ack, "no_session_key", errors.New("SessionSetup carries keys but no session key pair is established"))
+	}
 	for _, wk := range ss.GetKeys() {
-		raw, err := crypto.UnwrapKEK(wk.GetWrappedKey())
+		raw, err := crypto.UnwrapKEK(wk.GetWrappedKey(), pub, priv)
 		if err != nil {
 			return reject(ack, "kek_unwrap", fmt.Errorf("key %q: %w", wk.GetKeyId(), err))
 		}

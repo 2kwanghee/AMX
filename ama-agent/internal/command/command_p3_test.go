@@ -52,10 +52,16 @@ func newHarnessBridge(t *testing.T, bridge tsamx.Bridge, engine *sync.Mutex, ob 
 		t.Fatal(err)
 	}
 	hn := &harness{h: h, priv: priv, kek: bytes.Repeat([]byte{0x33}, crypto.KEKSize), store: st, appl: appl}
+	pubBytes, err := h.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hn.agentPub = new([32]byte)
+	copy(hn.agentPub[:], pubBytes)
 	hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
 		CommandId: "setup-1",
 		Cmd: &amxv1.AmsCommand_SessionSetup{SessionSetup: &amxv1.SessionSetup{
-			Keys:        []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: hn.kek}},
+			Keys:        []*amxv1.SessionSetup_WrappedKey{{KeyId: testKeyID, WrappedKey: hn.sealKEK(t, hn.kek)}},
 			ActiveKeyId: testKeyID,
 		}},
 	}))

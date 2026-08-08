@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
+	"golang.org/x/crypto/nacl/box"
 )
 
 func sampleCommand() *amxv1.AmsCommand {
@@ -95,6 +96,91 @@ func TestParsePublicKeyFormats(t *testing.T) {
 	}
 	if _, err := ParsePublicKey("not-a-key"); err == nil {
 		t.Fatal("garbage parsed as key")
+	}
+}
+
+func TestGenerateSessionKeyPairUnique(t *testing.T) {
+	pub1, priv1, err := GenerateSessionKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub2, priv2, err := GenerateSessionKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pub1) != X25519KeySize {
+		t.Fatalf("public key len = %d, want %d", len(pub1), X25519KeySize)
+	}
+	if bytes.Equal(pub1[:], pub2[:]) {
+		t.Fatal("two generated public keys are identical")
+	}
+	if bytes.Equal(priv1[:], priv2[:]) {
+		t.Fatal("two generated private keys are identical")
+	}
+}
+
+// TestUnwrapKEKSealedRoundtrip: a KEK sealed to the agent's public key (as AMS's
+// nacl.SealedBox(pub).encrypt(kek) would) opens back to the exact KEK.
+func TestUnwrapKEKSealedRoundtrip(t *testing.T) {
+	pub, priv, err := GenerateSessionKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kek := bytes.Repeat([]byte{0x33}, KEKSize)
+	sealed, err := box.SealAnonymous(nil, kek, pub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := UnwrapKEK(sealed, pub, priv)
+	if err != nil {
+		t.Fatalf("unwrap: %v", err)
+	}
+	if !bytes.Equal(got, kek) {
+		t.Fatalf("unwrapped KEK mismatch")
+	}
+}
+
+// TestUnwrapKEKRejectsRawKEK: a raw (unsealed) 32-byte KEK must be rejected —
+// this is the C2 downgrade defense (AMA advertises a public key, so it accepts
+// only sealed boxes).
+func TestUnwrapKEKRejectsRawKEK(t *testing.T) {
+	pub, priv, _ := GenerateSessionKeyPair()
+	raw := bytes.Repeat([]byte{0x33}, KEKSize)
+	if _, err := UnwrapKEK(raw, pub, priv); err == nil {
+		t.Fatal("raw KEK accepted (downgrade not prevented)")
+	}
+}
+
+// TestUnwrapKEKRejectsWrongKey: a KEK sealed to a different public key cannot be
+// opened with this session's private key.
+func TestUnwrapKEKRejectsWrongKey(t *testing.T) {
+	pub, priv, _ := GenerateSessionKeyPair()
+	otherPub, _, _ := GenerateSessionKeyPair()
+	sealed, err := box.SealAnonymous(nil, bytes.Repeat([]byte{0x33}, KEKSize), otherPub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnwrapKEK(sealed, pub, priv); err == nil {
+		t.Fatal("KEK sealed to a foreign key was opened")
+	}
+}
+
+// TestUnwrapKEKRejectsWrongLength: a validly sealed payload of the wrong length
+// is rejected (a KEK must be exactly AES-256).
+func TestUnwrapKEKRejectsWrongLength(t *testing.T) {
+	pub, priv, _ := GenerateSessionKeyPair()
+	sealed, err := box.SealAnonymous(nil, bytes.Repeat([]byte{0x33}, 16), pub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnwrapKEK(sealed, pub, priv); err == nil {
+		t.Fatal("undersized KEK accepted")
+	}
+}
+
+func TestUnwrapKEKNilKeyPair(t *testing.T) {
+	if _, err := UnwrapKEK([]byte("x"), nil, nil); err == nil {
+		t.Fatal("nil key pair accepted")
 	}
 }
 
