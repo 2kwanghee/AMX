@@ -83,6 +83,12 @@ def app_env(postgres_dsn: str):
     os.environ["AMX_ENCRYPTION_KEY"] = TEST_ENCRYPTION_KEY
     os.environ["AMX_ADMIN_TOKEN"] = TEST_ADMIN_TOKEN
     os.environ.setdefault("AMX_OAUTH_FLOW_TTL_SECONDS", "600")
+    # C2: the legacy gRPC suite opens sessions without an agent_public_key and
+    # reads the raw KEK straight out of SessionSetup. That path is now refused in
+    # production; the dev raw-KEK fallback keeps those tests valid. Sealed-box
+    # behaviour and the keyless-refusal are covered explicitly in test_kek_wrap.py,
+    # which overrides this env per-test.
+    os.environ.setdefault("AMX_ALLOW_RAW_KEK", "1")
 
     from alembic import command
     from alembic.config import Config

@@ -28,8 +28,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from nacl.public import PublicKey, SealedBox
 
 _SIGNING_KEY_ENV = "AMX_SIGNING_KEY"
+
+# A raw X25519 public key is exactly 32 bytes (proto §6.2: Register.agent_public_key
+# is the raw curve point, not PEM/DER). Sealing agreement with AMA (Go): the wire
+# value is these 32 bytes fed straight into nacl PublicKey / box.SealAnonymous.
+X25519_PUBLIC_KEY_LEN = 32
 
 
 def _b64url_decode(value: str) -> bytes:
@@ -85,6 +91,53 @@ def verify(public_key: Ed25519PublicKey, signature: bytes, message: bytes) -> bo
 def new_kek() -> bytes:
     """A fresh 256-bit key-encryption key for one session."""
     return secrets.token_bytes(32)
+
+
+class KekWrapError(Exception):
+    """Base for KEK-wrapping refusals (never carries key material)."""
+
+
+class InvalidAgentPublicKey(KekWrapError):
+    """Register.agent_public_key is absent-where-required, wrong length, or unusable."""
+
+
+class RawKekNotAllowed(KekWrapError):
+    """No agent_public_key and AMX_ALLOW_RAW_KEK is not set — the session is refused."""
+
+
+def wrap_kek(kek: bytes, agent_public_key: bytes, *, allow_raw: bool) -> bytes:
+    """Produce the ``SessionSetup.WrappedKey.wrapped_key`` bytes for this session.
+
+    C2 per-agent wrapping (proto §6.2, design §7):
+
+    * With an ``agent_public_key`` (raw 32-byte X25519 curve point), the KEK is
+      sealed to it with a NaCl **sealed box** (X25519 + XSalsa20-Poly1305,
+      ``nacl.public.SealedBox``). Only the agent's ephemeral private key opens it,
+      so the KEK is never cleartext even where TLS terminates ahead of AMS. A
+      public key is **always** sealed — no downgrade to raw even when
+      ``allow_raw`` is set, so a capable agent cannot be forced onto the raw path.
+    * A malformed public key (wrong length, or one the curve rejects) is refused;
+      the failure is opaque — it never distinguishes *why*.
+    * Absent a public key, the raw KEK is returned only when ``allow_raw`` (dev,
+      ``AMX_ALLOW_RAW_KEK=1``); otherwise the session is refused.
+
+    Never logs or returns diagnostic detail about the KEK itself (§7).
+    """
+    if agent_public_key:
+        if len(agent_public_key) != X25519_PUBLIC_KEY_LEN:
+            raise InvalidAgentPublicKey("agent_public_key must be 32 raw X25519 bytes")
+        try:
+            sealed_box = SealedBox(PublicKey(agent_public_key))
+            return sealed_box.encrypt(kek)
+        except KekWrapError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - opaque: no crypto detail leaks (§7)
+            raise InvalidAgentPublicKey("agent_public_key could not be used to seal") from exc
+    if allow_raw:
+        return kek
+    raise RawKekNotAllowed(
+        "agent_public_key required (set AMX_ALLOW_RAW_KEK=1 for a dev raw-KEK fallback)"
+    )
 
 
 def new_key_id() -> str:
