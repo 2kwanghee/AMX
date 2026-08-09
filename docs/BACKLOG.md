@@ -71,6 +71,9 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G5 | `:recover`가 501인데 §5.3은 P2 표기 — 문서-구현 정합 | P2·P3 리뷰 |
 | G6 | alert ack/open_alert 좁은 레이스 (acked+open 잠깐 공존, 다음 auto-resolve가 소거) | P4 리뷰 A |
 | G7 | ams-web `@amx/contracts`(gRPC proto codec) 미사용, REST DTO는 openapi 미러 | P4 |
+| G8 | AMA `store.FindByEmail` 중복 email 시 맵 순회 순서 의존(비결정) — 동일 email 2배정 시 잘못된 ams_account_id 스탬프 가능(단일 AMA 희소) | B1 리뷰 B |
+| G9 | deliver 재전송 no-op이 멱등 단축보다 DeliverLock 획득이 앞서 최대 5s(fail-open) 대기 — 정확성 무영향, 효율만 | B1 리뷰 B |
+| G10 | 래퍼(`amx-claude`) 미경유 직접 `claude` 실행 시 deliver sub-second 창 잔존 — 배포에서 alias/webhook 진입점 강제 필요(O5 배포 경계) | B1 ADVERSARY |
 
 ---
 
