@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import uuid
 
 import pytest
 from cryptography.fernet import Fernet
@@ -12,18 +13,22 @@ from cryptography.fernet import Fernet
 from app.config import ConfigError, load_settings
 from app.core import crypto
 
+_TID = uuid.uuid4()
+
 
 def test_encrypt_decrypt_round_trip(app_env):
+    # Flag off (conftest default): legacy Fernet path, db unused.
     plaintext = '{"claudeAiOauth": {"accessToken": "at", "refreshToken": "rt"}}'
-    ciphertext = crypto.encrypt_secret(plaintext)
+    ciphertext = crypto.encrypt_secret(plaintext, tenant_id=_TID, db=None)
     assert plaintext not in ciphertext
-    assert crypto.decrypt_secret(ciphertext) == plaintext
+    assert not ciphertext.startswith("v2:")
+    assert crypto.decrypt_secret(ciphertext, tenant_id=_TID, db=None) == plaintext
 
 
 def test_ciphertext_from_another_key_does_not_open(app_env):
     foreign = Fernet(Fernet.generate_key()).encrypt(b"secret").decode()
     with pytest.raises(crypto.CredentialDecryptionError):
-        crypto.decrypt_secret(foreign)
+        crypto.decrypt_secret(foreign, tenant_id=_TID, db=None)
 
 
 def test_mask_reveals_nothing_of_the_secret(app_env):

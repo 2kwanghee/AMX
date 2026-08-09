@@ -124,8 +124,11 @@ def _stored(tenant_id, account_id):
 
 
 def _decrypt_rt(tenant_id, account_id) -> str:
-    account = _stored(tenant_id, account_id)
-    payload = json.loads(crypto.decrypt_secret(account.encrypted_secret))
+    with get_sessionmaker()() as db:
+        account = inventory.get_account(db, tenant_id, account_id)
+        payload = json.loads(
+            crypto.decrypt_secret(account.encrypted_secret, tenant_id=tenant_id, db=db)
+        )
     return payload["claudeAiOauth"]["refreshToken"]
 
 

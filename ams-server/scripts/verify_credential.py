@@ -67,7 +67,9 @@ def main() -> int:
         print("encrypted_secret_present: true")
 
         try:
-            plaintext = decrypt_secret(account.encrypted_secret)
+            plaintext = decrypt_secret(
+                account.encrypted_secret, tenant_id=args.tenant, db=db
+            )
         except CredentialDecryptionError:
             print("decrypts: false")
             return 2

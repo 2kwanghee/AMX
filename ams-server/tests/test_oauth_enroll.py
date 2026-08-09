@@ -96,7 +96,9 @@ def test_complete_stores_the_full_credential_set_encrypted(client, app):
 
     with get_sessionmaker()() as db:
         row = db.get(Account, uuid.UUID(account["id"]))
-        stored = json.loads(decrypt_secret(row.encrypted_secret))
+        stored = json.loads(
+            decrypt_secret(row.encrypted_secret, tenant_id=row.tenant_id, db=db)
+        )
 
     oauth = stored["claudeAiOauth"]
     assert oauth["accessToken"] == "at-live"
