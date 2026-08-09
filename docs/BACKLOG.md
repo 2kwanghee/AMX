@@ -85,6 +85,9 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G19 | F2 KMS 어댑터(aws-kms/vault) 미구현 — 벤더 미정 스텁, provider_id/key_id 배관 완비. **local→KMS 혼재 시 기존 DEK 재래핑 스크립트 선행 필요**(신규 DEK만 provider swap) | F2 (사용자 KMS 결정 대기) |
 | G20 | F2 로컬 KEK MVP는 단일 env 시크릿 — 격리·구조·KMS-ready는 즉시 이득이나 기밀 강화는 실 KMS 도입 시(§7 정직성) | F2 |
 | G21 | F2 저심각: create_tenant 2-commit 비원자(DEK 실패 시 fail-loud) · O9 encrypt_secret try/except 밖(DEK 부재 시 스트림 드롭, 가용성 엣지) · `crypto._aad`·`kek._tenant_aad` 중복정의(DRY) | F2 리뷰 B |
+| G22 | F3 claim-before-write 지연 완화: 재연결 write 실패 시 해당 command_id(및 미전송 배치 tail)를 `sent→queued` 즉시 리셋하면 90s D2 지연 제거. 단 **되돌림-후-재경쟁**(되돌린 명령을 타 인스턴스가 fetch, 멱등이라 무해)이라는 새 동시성 고려 필요 → 별도 설계·검토. 현재는 지연만(정확성 무해) | F3 리뷰 A·B |
+| G23 | F3 문서: 스위퍼 "exactly one per tick"은 과장(실제 동시 배제·시차 중복 가능하나 멱등) · `alerts.sweep_offline` docstring "caller commits" 실제 내부 commit과 불일치 | F3 리뷰 B |
+| G24 | **크로스-컴포넌트 계약은 유닛 목으로 못 잡음** — F1 로그인 502(BFF snake vs 서버 camel)가 유닛 목 자기완결로 통과했다가 실 e2e에서만 노출. **각 병합 시 전체 e2e 게이트 필수**(프로세스) | 로그인 hotfix 교훈 |
 
 ---
 

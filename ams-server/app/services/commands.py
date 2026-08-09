@@ -322,23 +322,39 @@ def request_set_policy(
 
 # -- gRPC-side outbox helpers -------------------------------------------------
 def fetch_queued(db: Session, server_id: uuid.UUID) -> list[AgentCommand]:
-    """Queued commands for one online server, oldest first."""
+    """Queued commands for one online server, oldest first.
+
+    F3 multi-instance: ``FOR UPDATE SKIP LOCKED`` row-locks each returned row so
+    two AMS instances polling the same server (a split-brain reconnect, or plain
+    horizontal scale) never hand the same queued command to both agent sessions.
+    The lock is only meaningful while it is held: the caller (``_build_queued_commands``)
+    claims each row with :func:`claim_sent` and commits in *this same transaction*,
+    so a concurrent poller either skips the locked row or, once we commit, sees it
+    as ``sent`` and no longer ``queued``. A row this poller skips (build returned
+    None, or it was locked) is left ``queued`` and retried on the next tick.
+    """
     return list(
         db.scalars(
             select(AgentCommand)
             .where(AgentCommand.server_id == server_id, AgentCommand.status == "queued")
             .order_by(AgentCommand.created_at, AgentCommand.id)
+            .with_for_update(skip_locked=True)
         ).all()
     )
 
 
-def mark_sent(db: Session, command_id: str) -> None:
-    command = db.scalar(select(AgentCommand).where(AgentCommand.command_id == command_id))
-    if command is not None and command.status == "queued":
+def claim_sent(command: AgentCommand) -> None:
+    """Mark a fetched, still-locked queued command ``sent`` — no commit.
+
+    Called on rows returned by :func:`fetch_queued` (which holds their ``FOR
+    UPDATE SKIP LOCKED`` locks) so the claim lands in the same transaction as the
+    fetch; the caller commits once, atomically releasing the locks with the rows
+    now ``sent``. A push that then fails on the wire is not lost: the command_id
+    is unchanged and the D2 sent-ack sweeper re-queues it (idempotent)."""
+    if command.status == "queued":
         command.status = "sent"
         command.sent_at = _now()
         command.updated_at = _now()
-        db.commit()
 
 
 # -- D2 sent-未ack recovery ----------------------------------------------------
@@ -350,7 +366,7 @@ def sweep_sent_timeouts(
 ) -> tuple[list[str], list[str]]:
     """Re-queue or fail commands stuck in ``sent`` past the ack timeout.
 
-    A command the poll loop pushed (``mark_sent``) but the agent never acked ages
+    A command the poll loop pushed (``claim_sent``) but the agent never acked ages
     silently: ``fetch_queued`` only re-sends ``queued`` rows, so a ``sent`` row is
     never retried and its assignment stays delivering/recalling forever
     (recovery-architecture §2). This sweep, a sibling of the offline sweeper (no

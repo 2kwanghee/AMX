@@ -400,8 +400,14 @@ message AmaMessage {
 **재조정(Reconcile) 루프**: AMS는 배정 테이블(desired)과 AMA 보고(actual)를 주기 비교.
 불일치(드리프트) 감지 시 경보 + 교정 명령 재하달. 이것이 "AMA 임의 변경 불가"의 실질 집행자다.
 
-**다중 AMS 인스턴스**: gRPC 스트림은 특정 인스턴스에 붙으므로, 수평 확장 시
-세션 레지스트리(어느 AMA가 어느 인스턴스에 연결됐는지) + 내부 라우팅 필요. P1은 단일 인스턴스.
+**다중 AMS 인스턴스 (P5 F3)**: 명령 전달은 DB-큐로 디커플돼 AMS는 라우팅 관점 **stateless**다.
+각 인스턴스가 `agent_commands`를 `FOR UPDATE SKIP LOCKED`로 폴링하고 fetch→claim(`sent`)을 **단일
+트랜잭션에 커밋**해, 재연결 순간 stale+신규 세션이 같은 server를 동시 폴링해도 각 명령을 한 인스턴스만
+하달한다(중복 방지, 잔여 경합은 멱등 command_id 백스톱). 배경 스위퍼(offline/sent-ack 타임아웃)는
+트랜잭션 스코프 **advisory lock**(`pg_try_advisory_xact_lock`)으로 중복 실행을 배제한다. 세션 레지스트리·
+내부 라우팅은 불요. gRPC 세션 presence 공유(직접 push 최적화)는 미도입(O7, SaaS 단계).
+(claim-before-write 특성상 write 실패한 명령은 즉시 재전송이 아니라 sent-ack 타임아웃(§D2, 기본 90s)으로
+복구된다 — 멱등이라 유실은 없고 지연만.)
 
 ### 5.5 어카운트 등록 — AMS 중앙 OAuth 플로우
 
