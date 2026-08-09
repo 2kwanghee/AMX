@@ -161,26 +161,26 @@ export async function upstreamLogin(email: string, password: string): Promise<Lo
     return { ok: false, status };
   }
   let data: {
-    session_token?: unknown;
+    sessionToken?: unknown;
     role?: unknown;
-    tenant_ids?: unknown;
-    expires_at?: unknown;
+    tenantIds?: unknown;
+    expiresAt?: unknown;
   };
   try {
     data = (await res.json()) as typeof data;
   } catch {
     return { ok: false, status: 502 };
   }
-  const st = data.session_token;
+  const st = data.sessionToken;
   const role = data.role;
   if (typeof st !== 'string' || st.length === 0) return { ok: false, status: 502 };
   if (role !== 'global-admin' && role !== 'tenant-admin') return { ok: false, status: 502 };
-  const tenantIds = Array.isArray(data.tenant_ids)
-    ? data.tenant_ids.filter((t): t is string => typeof t === 'string')
+  const tenantIds = Array.isArray(data.tenantIds)
+    ? data.tenantIds.filter((t): t is string => typeof t === 'string')
     : [];
   let expiresAtSeconds: number | null = null;
-  if (typeof data.expires_at === 'string') {
-    const ms = Date.parse(data.expires_at);
+  if (typeof data.expiresAt === 'string') {
+    const ms = Date.parse(data.expiresAt);
     if (!Number.isNaN(ms)) expiresAtSeconds = Math.floor(ms / 1000);
   }
   return {

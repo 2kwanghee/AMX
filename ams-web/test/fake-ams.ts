@@ -80,10 +80,10 @@ async function resolver({ request }: { request: Request }) {
       return HttpResponse.json({ title: 'invalid_credentials', status: 401 }, { status: 401 });
     }
     return HttpResponse.json({
-      session_token: admin.sessionToken,
+      sessionToken: admin.sessionToken,
       role: admin.role,
-      tenant_ids: admin.tenantIds,
-      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      tenantIds: admin.tenantIds,
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     });
   }
   if (path === 'auth/logout' && m === 'POST') {
