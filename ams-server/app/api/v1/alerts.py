@@ -4,8 +4,8 @@ Tenant-scoped exactly like the rest of ``/api/v1`` (``/tenants/{tenant_id}/…``
 so the path carries the tenant and the service layer re-checks it (§7 defence in
 depth) — a cross-tenant alert id is a 404, and a cross-tenant list is empty.
 
-These paths are new in P4 and are NOT yet in ``contracts/openapi.yaml`` (the
-design note §5.3/openapi addition is a separate, contracts-owned change).
+These paths are documented in ``contracts/openapi.yaml`` under the ``alerts`` tag
+(§5.3).
 """
 
 from __future__ import annotations

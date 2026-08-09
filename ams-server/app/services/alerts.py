@@ -13,8 +13,8 @@ index ``uq_alerts_open_dedupe`` (``WHERE status = 'open'``); the database, not
 application code, guarantees at most one open alert per ``dedupe_key``.
 
 ``dedupe_key`` is derived, never client-supplied:
-    server-scoped  (all_exhausted, server_offline) -> ``{server_id}:{kind}``
-    account-scoped (drift, quarantine)              -> ``{server_id}:{kind}:{account_id}``
+    server-scoped  (all_exhausted, server_offline)                        -> ``{server_id}:{kind}``
+    account-scoped (drift, quarantine, recall_failed, command_send_failed) -> ``{server_id}:{kind}:{account_id}``
 """
 
 from __future__ import annotations
