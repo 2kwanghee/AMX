@@ -38,6 +38,7 @@ import time
 import uuid
 from pathlib import Path
 
+import httpx
 import pytest
 
 from conftest import TEST_ADMIN_TOKEN, AgentHost
@@ -47,11 +48,36 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 E2E_DIR = Path(__file__).resolve().parent
 AMS_WEB_SRC = REPO_ROOT / "ams-web" / "src"
 
-# The BFF's env. AMX_SESSION_SECRET must be >= 16 chars (env.ts guard); the
-# console password is a distinct secret from the admin token, so a leak of one is
-# not masked by the other.
+# The BFF's env. AMX_SESSION_SECRET must be >= 16 chars (env.ts guard). Since F1
+# S2c the BFF login is email+password against ams-server's /auth/login (per-admin
+# session token), so the console signs in as a real global-admin created through
+# the bootstrap root token — not a shared password. The admin credential is a
+# distinct secret from the root admin token, so a leak of one is not masked by
+# the other.
 SESSION_SECRET = "p4-e2e-session-secret-0123456789"
+CONSOLE_EMAIL = "console-admin@p4.e2e.example"
 CONSOLE_PASSWORD = "p4-console-password"
+
+
+def _create_console_admin(rest_base: str) -> None:
+    """Provision the global-admin the console logs in as.
+
+    Created directly against ams-server with the bootstrap root token
+    (``AMX_ADMIN_TOKEN``, the upstream M2M path) — the one way to mint the first
+    admin, since ``POST /admins`` is global-admin-only. The console then signs in
+    through the BFF with this admin's email+password (the S2c login contract).
+    """
+    resp = httpx.post(
+        f"{rest_base}/admins",
+        json={
+            "email": CONSOLE_EMAIL,
+            "password": CONSOLE_PASSWORD,
+            "role": "global-admin",
+        },
+        headers={"Authorization": f"Bearer {TEST_ADMIN_TOKEN}"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
 
 CONVERGENCE_TIMEOUT_S = 120.0
 ALERT_TIMEOUT_S = 60.0
@@ -79,6 +105,7 @@ def _bff(rest_base: str, steps: list[dict]) -> dict:
             "AMX_API_BASE": rest_base,
             "AMX_ADMIN_TOKEN": TEST_ADMIN_TOKEN,
             "AMX_SESSION_SECRET": SESSION_SECRET,
+            "AMX_CONSOLE_EMAIL": CONSOLE_EMAIL,
             "AMX_CONSOLE_PASSWORD": CONSOLE_PASSWORD,
         }
     )
@@ -131,6 +158,10 @@ def console(rest_server, grpc_server, signing_keys, tsamx_bin, ama_binary, workd
         pytest.skip("Node is required to drive the ams-web BFF for the P4 E2E")
     log_dir = workdir / "logs"
     log_dir.mkdir(exist_ok=True)
+
+    # The console signs in as a real global-admin (S2c email+password login);
+    # mint it via the root token before any BFF login can run.
+    _create_console_admin(rest_server)
 
     # -- Console provisioning, entirely through the BFF ----------------------
     tenant = _one(rest_server, "POST", "tenants", {"name": "p4-" + uuid.uuid4().hex[:8]})["json"]

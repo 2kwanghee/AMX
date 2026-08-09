@@ -159,9 +159,18 @@ def _account_row(tenant_id: str, account_id: str):
 def _stored_refresh_token(tenant_id: str, account_id: str) -> str:
     """Decrypt ``accounts.encrypted_secret`` and return its refresh token."""
     from app.core import crypto
+    from app.db import get_sessionmaker
+    from app.models import Account
 
-    account = _account_row(tenant_id, account_id)
-    payload = json.loads(crypto.decrypt_secret(account.encrypted_secret))
+    with get_sessionmaker()() as db:
+        account = db.get(Account, uuid.UUID(account_id))
+        payload = json.loads(
+            crypto.decrypt_secret(
+                account.encrypted_secret,
+                tenant_id=account.tenant_id,
+                db=db,
+            )
+        )
     return payload["claudeAiOauth"]["refreshToken"]
 
 

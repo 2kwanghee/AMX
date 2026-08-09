@@ -45,7 +45,10 @@ async function login() {
     new Request(`${ORIGIN}/bff/session`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: process.env.AMX_CONSOLE_PASSWORD }),
+      body: JSON.stringify({
+        email: process.env.AMX_CONSOLE_EMAIL,
+        password: process.env.AMX_CONSOLE_PASSWORD,
+      }),
     }),
   );
   const setCookie = res.headers.get('set-cookie');
