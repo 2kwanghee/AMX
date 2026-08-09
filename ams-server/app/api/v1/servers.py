@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, Query, Response, status
 
 from app import schemas
-from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
 from app.core.errors import not_found
 from app.services import commands, inventory
 
@@ -25,6 +25,7 @@ def _to_wire(db, server) -> schemas.Server:
 def list_servers(
     tenant_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     status_filter: schemas.ServerStatus | None = Query(default=None, alias="status"),
     pageSize: PageSize = 50,  # noqa: N803
     pageToken: PageToken = None,  # noqa: N803
@@ -42,7 +43,7 @@ def list_servers(
 
 
 @router.post("/servers", response_model=schemas.Server, status_code=status.HTTP_201_CREATED)
-def create_server(tenant_id: uuid.UUID, body: schemas.ServerCreate, db: DbSession):
+def create_server(tenant_id: uuid.UUID, body: schemas.ServerCreate, db: DbSession, principal: AdminPrincipal):
     server = inventory.create_server(
         db, tenant_id, name=body.name, hostname=body.hostname, switch_mode=body.switch_mode
     )
@@ -50,13 +51,13 @@ def create_server(tenant_id: uuid.UUID, body: schemas.ServerCreate, db: DbSessio
 
 
 @router.get("/servers/{server_id}", response_model=schemas.Server)
-def get_server(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
+def get_server(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     return _to_wire(db, inventory.get_server(db, tenant_id, server_id))
 
 
 @router.patch("/servers/{server_id}", response_model=schemas.Server)
 def update_server(
-    tenant_id: uuid.UUID, server_id: uuid.UUID, body: schemas.ServerUpdate, db: DbSession
+    tenant_id: uuid.UUID, server_id: uuid.UUID, body: schemas.ServerUpdate, db: DbSession, principal: AdminPrincipal
 ):
     server = inventory.update_server(
         db, tenant_id, server_id, name=body.name, hostname=body.hostname, status=body.status
@@ -79,7 +80,7 @@ def update_server(
 
 
 @router.delete("/servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_server(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession) -> Response:
+def delete_server(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession, principal: AdminPrincipal) -> Response:
     inventory.delete_server(db, tenant_id, server_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -93,6 +94,7 @@ def issue_enroll_token(
     tenant_id: uuid.UUID,
     server_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     body: schemas.EnrollTokenRequest | None = None,
 ):
     request = body or schemas.EnrollTokenRequest()
@@ -105,7 +107,7 @@ def issue_enroll_token(
 
 
 @router.get("/servers/{server_id}/usage", response_model=schemas.UsageSnapshot)
-def get_server_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
+def get_server_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     inventory.get_server(db, tenant_id, server_id)
     # A real read against the snapshot table, not a stub: it serves the DB
     # cache and never reaches out to the agent. Nothing writes to that table
@@ -122,6 +124,7 @@ def list_server_events(
     tenant_id: uuid.UUID,
     server_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     pageSize: PageSize = 50,  # noqa: N803
     pageToken: PageToken = None,  # noqa: N803
 ):
@@ -141,7 +144,7 @@ def list_server_events(
 
 
 @router.post("/servers/{server_id}:refresh-usage", status_code=status.HTTP_202_ACCEPTED)
-def refresh_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
+def refresh_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     # Queues a RequestReport for the connected agent; the report arrives back on
     # the session stream (§6.3 req_report). Resolves the server first so a
     # cross-tenant id gets 404 before anything is queued.
@@ -151,7 +154,7 @@ def refresh_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession):
 
 @router.post("/servers/{server_id}:switch-mode", response_model=schemas.Server)
 def set_switch_mode(
-    tenant_id: uuid.UUID, server_id: uuid.UUID, body: schemas.SwitchModeRequest, db: DbSession
+    tenant_id: uuid.UUID, server_id: uuid.UUID, body: schemas.SwitchModeRequest, db: DbSession, principal: AdminPrincipal
 ):
     server = commands.request_switch_mode(db, tenant_id, server_id, mode=body.mode)
     return _to_wire(db, server)

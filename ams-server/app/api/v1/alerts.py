@@ -15,7 +15,7 @@ import uuid
 from fastapi import APIRouter, Query
 
 from app import schemas
-from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
 from app.services import inventory
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["alerts"], dependencies=[AdminAuth])
@@ -25,6 +25,7 @@ router = APIRouter(prefix="/tenants/{tenant_id}", tags=["alerts"], dependencies=
 def list_alerts(
     tenant_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     status_filter: schemas.AlertStatus | None = Query(default=None, alias="status"),
     kind: schemas.AlertKind | None = Query(default=None),
     pageSize: PageSize = 50,  # noqa: N803
@@ -47,6 +48,7 @@ def ack_alert(
     tenant_id: uuid.UUID,
     alert_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     body: schemas.AlertAckRequest | None = None,
 ):
     request = body or schemas.AlertAckRequest()

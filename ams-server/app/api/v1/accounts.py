@@ -12,7 +12,7 @@ import uuid
 from fastapi import APIRouter, Query, Request, Response, status
 
 from app import schemas
-from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
 from app.config import get_settings
 from app.core import crypto
 from app.core.errors import bad_request
@@ -26,6 +26,7 @@ router = APIRouter(prefix="/tenants/{tenant_id}", tags=["accounts"], dependencie
 def list_accounts(
     tenant_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     status_filter: schemas.AccountStatus | None = Query(default=None, alias="status"),
     pageSize: PageSize = 50,  # noqa: N803
     pageToken: PageToken = None,  # noqa: N803
@@ -43,7 +44,7 @@ def list_accounts(
 
 
 @router.post("/accounts", response_model=schemas.Account, status_code=status.HTTP_201_CREATED)
-def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSession):
+def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSession, principal: AdminPrincipal):
     account = inventory.create_account(
         db,
         tenant_id,
@@ -55,13 +56,13 @@ def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSess
 
 
 @router.get("/accounts/{account_id}", response_model=schemas.Account)
-def get_account(tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession):
+def get_account(tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     return schemas.Account.model_validate(inventory.get_account(db, tenant_id, account_id))
 
 
 @router.patch("/accounts/{account_id}", response_model=schemas.Account)
 def update_account(
-    tenant_id: uuid.UUID, account_id: uuid.UUID, body: schemas.AccountUpdate, db: DbSession
+    tenant_id: uuid.UUID, account_id: uuid.UUID, body: schemas.AccountUpdate, db: DbSession, principal: AdminPrincipal
 ):
     account = inventory.update_account(
         db,
@@ -75,7 +76,7 @@ def update_account(
 
 
 @router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_account(tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession) -> Response:
+def delete_account(tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession, principal: AdminPrincipal) -> Response:
     inventory.delete_account(db, tenant_id, account_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -86,7 +87,7 @@ def delete_account(tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession) -
     status_code=status.HTTP_201_CREATED,
 )
 def start_oauth(
-    tenant_id: uuid.UUID, body: schemas.OauthStartRequest, db: DbSession, request: Request
+    tenant_id: uuid.UUID, body: schemas.OauthStartRequest, db: DbSession, request: Request, principal: AdminPrincipal
 ):
     inventory.get_tenant(db, tenant_id)
     settings = get_settings()
@@ -106,7 +107,7 @@ def start_oauth(
     status_code=status.HTTP_201_CREATED,
 )
 def complete_oauth(
-    tenant_id: uuid.UUID, body: schemas.OauthCompleteRequest, db: DbSession, request: Request
+    tenant_id: uuid.UUID, body: schemas.OauthCompleteRequest, db: DbSession, request: Request, principal: AdminPrincipal
 ):
     inventory.get_tenant(db, tenant_id)
     # take() consumes the flow before the exchange, so the verifier is gone
