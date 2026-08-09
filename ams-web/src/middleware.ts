@@ -1,15 +1,15 @@
 // Page-level guard. Unauthenticated visitors to any app page are redirected to
-// /login. The /bff/* handlers self-guard (excluded here). Session verification
-// uses Web Crypto, which runs in the Edge runtime.
+// /login. The /bff/* handlers self-guard (excluded here). Session decryption
+// uses Web Crypto (AES-GCM + HKDF), which runs in the Edge runtime.
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-import { SESSION_COOKIE, verifySessionToken } from '@/lib/server/session';
+import { SESSION_COOKIE, decryptSession } from '@/lib/server/session';
 
 export async function middleware(req: NextRequest) {
-  const token = req.cookies.get(SESSION_COOKIE)?.value;
-  const ok = await verifySessionToken(token);
-  if (!ok) {
+  const cookie = req.cookies.get(SESSION_COOKIE)?.value;
+  const session = await decryptSession(cookie);
+  if (!session) {
     const url = req.nextUrl.clone();
     url.pathname = '/login';
     url.search = '';

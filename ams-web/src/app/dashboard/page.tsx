@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
+import { readNavSession, type NavSession } from '@/lib/nav-session';
 import type { TenantPage } from '@/lib/api-client/types';
 import { AccountsPanel } from '@/components/AccountsPanel';
 import { AlertsBadge, AlertsPanel } from '@/components/AlertsPanel';
@@ -18,6 +19,11 @@ export default function Dashboard() {
   const [tenantId, setTenantId] = useState('');
   const [tab, setTab] = useState<Tab>('overview');
   const [creatingTenant, setCreatingTenant] = useState(false);
+  // Nav filter (UI convenience only; ams-server enforces scope). Read after
+  // mount so the readable nav cookie is available client-side.
+  const [nav, setNav] = useState<NavSession | null>(null);
+  useEffect(() => setNav(readNavSession()), []);
+  const isGlobalAdmin = nav?.role === 'global-admin';
 
   const active = tenantId || tenants[0]?.id || '';
 
@@ -39,7 +45,7 @@ export default function Dashboard() {
           {tenants.length === 0 && <option value="">— none —</option>}
           {tenants.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.status})</option>)}
         </select>
-        <button onClick={() => setCreatingTenant(true)}>+ Tenant</button>
+        {isGlobalAdmin && <button onClick={() => setCreatingTenant(true)}>+ Tenant</button>}
         <div style={{ flex: 1 }} />
         {active && (
           <span className="tabs" style={{ margin: 0 }}>

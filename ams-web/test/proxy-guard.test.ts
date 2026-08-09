@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { isAllowedPath } from '@/lib/server/upstream';
 import { __resetServerEnvForTests } from '@/lib/server/env';
 import { captured, resetCaptured } from './fake-ams';
-import { CONSOLE_PASSWORD } from './setup';
+import { GLOBAL_ADMIN } from './setup';
 import { POST as sessionPost } from '@/app/bff/session/route';
 import { GET as proxyGet } from '@/app/bff/api/[...path]/route';
 
@@ -73,10 +73,14 @@ describe('proxy rejects disallowed paths after auth', () => {
       new Request('http://localhost/bff/session', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: CONSOLE_PASSWORD }),
+        body: JSON.stringify({ email: GLOBAL_ADMIN.email, password: GLOBAL_ADMIN.password }),
       }),
     );
-    const cookie = login.headers.get('set-cookie')!.split(';')[0];
+    const cookie = login.headers
+      .getSetCookie()
+      .map((c) => c.split(';')[0])
+      .join('; ');
+    resetCaptured(); // drop the /auth/login call; assert the proxy never forwards
     const res = await proxyGet(
       new Request('http://localhost/bff/api/tenants/ten-1/../../etc', { headers: { cookie } }),
     );

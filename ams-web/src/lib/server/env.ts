@@ -1,22 +1,26 @@
 // SERVER ONLY. Importing this module from a Client Component breaks the build
-// (the `server-only` marker). This is the single place the admin Bearer token
-// and session secret are read; they must never be bundled for the browser.
+// (the `server-only` marker). This is the single place the break-glass admin
+// Bearer token and the session secret are read; they must never be bundled for
+// the browser.
 import 'server-only';
 
 export interface ServerEnv {
   /** ams-server REST root, including the /api/v1 prefix. */
   apiBase: string;
-  /** Administrator Bearer token for ams-server. Server-process env only. */
+  /**
+   * Break-glass root Bearer token for ams-server. Kept in the server-process
+   * env so an operator can recover, but the normal login path no longer uses
+   * it — per-admin session tokens (from POST /auth/login) are what the proxy
+   * forwards upstream. Never returned to the browser.
+   */
   adminToken: string;
   /**
-   * Password the console operator types on the login page. Falls back to the
-   * admin token when unset, so a single-secret deployment still works. Either
-   * way the secret itself is never returned to the browser.
+   * Secret from which both the AES-GCM cookie key (session token, encrypted)
+   * and the HMAC nav-cookie signing key are derived by HKDF. Never leaves the
+   * server process.
    */
-  consolePassword: string;
-  /** HMAC secret used to sign the session cookie. */
   sessionSecret: string;
-  /** Session cookie lifetime, seconds. */
+  /** Upper bound on the session cookie lifetime, seconds. */
   sessionTtlSeconds: number;
 }
 
@@ -38,10 +42,9 @@ export function serverEnv(): ServerEnv {
     throw new Error('AMX_SESSION_SECRET must be at least 16 characters');
   }
   const apiBase = req('AMX_API_BASE').replace(/\/+$/, '');
-  const consolePassword = process.env.AMX_CONSOLE_PASSWORD || adminToken;
   const ttlRaw = process.env.AMX_SESSION_TTL_SECONDS;
   const sessionTtlSeconds = ttlRaw ? Math.max(60, parseInt(ttlRaw, 10) || 0) : 60 * 60 * 8;
-  cached = { apiBase, adminToken, consolePassword, sessionSecret, sessionTtlSeconds };
+  cached = { apiBase, adminToken, sessionSecret, sessionTtlSeconds };
   return cached;
 }
 

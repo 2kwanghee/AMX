@@ -1,16 +1,19 @@
 // R3 completion gate: drive the BFF Route Handlers programmatically through the
 // full account lifecycle (enroll -> assign -> deliver -> state transitions ->
 // recall + alert ack) against a fake ams-server, asserting at every step that
-// (a) the upstream call carried the admin Bearer and (b) the admin token never
-// appears in any response body, header, or cookie handed to the browser.
+// (a) the upstream call carried the caller's PER-ADMIN session token (not the
+// shared break-glass root token) and (b) neither the root token nor the secret
+// session token ever appears in any response body, header, or cookie handed to
+// the browser. The session token now lives only inside the AES-GCM cookie.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { ADMIN_TOKEN, CONSOLE_PASSWORD } from './setup';
+import { ADMIN_TOKEN, GLOBAL_ADMIN, TENANT_ADMIN, ALL_SESSION_TOKENS, type AdminFixture } from './setup';
 import { captured, resetCaptured } from './fake-ams';
 import { __resetServerEnvForTests } from '@/lib/server/env';
 import { DELETE as sessionDelete, POST as sessionPost } from '@/app/bff/session/route';
 import { DELETE as proxyDelete, GET as proxyGet, PATCH as proxyPatch, POST as proxyPost } from '@/app/bff/api/[...path]/route';
 
 const ORIGIN = 'http://localhost:3000';
+const SECRETS = [ADMIN_TOKEN, ...ALL_SESSION_TOKENS];
 
 function proxyReq(method: string, path: string, cookie?: string, body?: unknown): Request {
   return new Request(`${ORIGIN}/bff/api/${path}`, {
@@ -29,33 +32,39 @@ async function callProxy(method: keyof typeof proxy, path: string, cookie?: stri
   return proxy[method](proxyReq(method, path, cookie, body));
 }
 
-// Assert nothing sensitive leaks to the browser side of a BFF response.
+// Assert no secret (root token OR any session token) leaks to the browser side.
 async function assertNoLeak(res: Response) {
   const cloned = res.clone();
   const text = await cloned.text();
-  expect(text).not.toContain(ADMIN_TOKEN);
+  for (const s of SECRETS) expect(text, 'body leak').not.toContain(s);
   for (const [, v] of res.headers) {
-    expect(v).not.toContain(ADMIN_TOKEN);
+    for (const s of SECRETS) expect(v, 'header leak').not.toContain(s);
   }
-  const setCookie = res.headers.get('set-cookie');
-  if (setCookie) expect(setCookie).not.toContain(ADMIN_TOKEN);
+  for (const c of res.headers.getSetCookie()) {
+    for (const s of SECRETS) expect(c, 'cookie leak').not.toContain(s);
+  }
 }
 
-async function login(): Promise<string> {
+// Log in as `admin`; returns the cookie header (both cookies) for proxy calls.
+async function login(admin: AdminFixture): Promise<string> {
   const res = await sessionPost(
     new Request(`${ORIGIN}/bff/session`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: CONSOLE_PASSWORD }),
+      body: JSON.stringify({ email: admin.email, password: admin.password }),
     }),
   );
   expect(res.status).toBe(200);
-  const setCookie = res.headers.get('set-cookie');
-  expect(setCookie).toBeTruthy();
+  const setCookies = res.headers.getSetCookie();
+  expect(setCookies.length).toBe(2);
   await assertNoLeak(res);
-  // Extract the cookie name=value pair.
-  const pair = setCookie!.split(';')[0];
-  return pair;
+  return setCookies.map((c) => c.split(';')[0]).join('; ');
+}
+
+function navCookieOf(setCookies: string[]): string {
+  const nav = setCookies.find((c) => c.startsWith('amx_nav='));
+  if (!nav) throw new Error('no amx_nav cookie');
+  return nav;
 }
 
 describe('BFF authentication', () => {
@@ -69,25 +78,44 @@ describe('BFF authentication', () => {
       new Request(`${ORIGIN}/bff/session`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: 'nope' }),
+        body: JSON.stringify({ email: GLOBAL_ADMIN.email, password: 'nope' }),
       }),
     );
     expect(res.status).toBe(401);
-    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.getSetCookie().length).toBe(0);
   });
 
-  it('issues an httpOnly, SameSite=Strict session cookie that is not the admin token', async () => {
+  it('requires both email and password', async () => {
     const res = await sessionPost(
       new Request(`${ORIGIN}/bff/session`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: CONSOLE_PASSWORD }),
+        body: JSON.stringify({ password: 'x' }),
       }),
     );
-    const setCookie = res.headers.get('set-cookie')!;
-    expect(setCookie).toContain('HttpOnly');
-    expect(setCookie).toContain('SameSite=Strict');
-    expect(setCookie).not.toContain(ADMIN_TOKEN);
+    expect(res.status).toBe(400);
+  });
+
+  it('issues httpOnly+Strict encrypted session and readable Strict nav cookie; neither holds the session token', async () => {
+    const res = await sessionPost(
+      new Request(`${ORIGIN}/bff/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: GLOBAL_ADMIN.email, password: GLOBAL_ADMIN.password }),
+      }),
+    );
+    const cookies = res.headers.getSetCookie();
+    const session = cookies.find((c) => c.startsWith('amx_session='))!;
+    const nav = cookies.find((c) => c.startsWith('amx_nav='))!;
+    // Encrypted session cookie: httpOnly, Strict, and NOT the session token.
+    expect(session).toContain('HttpOnly');
+    expect(session).toContain('SameSite=Strict');
+    expect(session).not.toContain(GLOBAL_ADMIN.sessionToken);
+    // Nav cookie: readable (no HttpOnly), Strict, carries role but no secret.
+    expect(nav).not.toContain('HttpOnly');
+    expect(nav).toContain('SameSite=Strict');
+    expect(nav).not.toContain(GLOBAL_ADMIN.sessionToken);
+    expect(nav).not.toContain(ADMIN_TOKEN);
   });
 
   it('refuses proxy requests without a valid session', async () => {
@@ -103,6 +131,44 @@ describe('BFF authentication', () => {
   });
 });
 
+describe('per-admin token forwarding + nav cookie', () => {
+  beforeEach(() => {
+    __resetServerEnvForTests();
+    resetCaptured();
+  });
+
+  it('forwards the caller-specific session token upstream, not a shared token', async () => {
+    // Two different admins log in and each drive one request.
+    const gCookie = await login(GLOBAL_ADMIN);
+    await callProxy('GET', 'tenants', gCookie);
+    const tCookie = await login(TENANT_ADMIN);
+    await callProxy('GET', 'tenants', tCookie);
+
+    const auths = captured.filter((c) => c.path === 'tenants').map((c) => c.authorization);
+    expect(auths).toContain(`Bearer ${GLOBAL_ADMIN.sessionToken}`);
+    expect(auths).toContain(`Bearer ${TENANT_ADMIN.sessionToken}`);
+    // The break-glass root token is never used by the proxy.
+    for (const c of captured) {
+      expect(c.authorization).not.toBe(`Bearer ${ADMIN_TOKEN}`);
+    }
+  });
+
+  it('tenant-admin nav cookie exposes role + own tenant only', async () => {
+    const res = await sessionPost(
+      new Request(`${ORIGIN}/bff/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: TENANT_ADMIN.email, password: TENANT_ADMIN.password }),
+      }),
+    );
+    const nav = navCookieOf(res.headers.getSetCookie());
+    const raw = decodeURIComponent(nav.split(';')[0].slice('amx_nav='.length));
+    const json = JSON.parse(Buffer.from(raw.split('.')[0].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    expect(json.role).toBe('tenant-admin');
+    expect(json.tenantIds).toEqual(['ten-1']);
+  });
+});
+
 describe('BFF full lifecycle with token isolation', () => {
   beforeEach(() => {
     __resetServerEnvForTests();
@@ -110,7 +176,7 @@ describe('BFF full lifecycle with token isolation', () => {
   });
 
   it('drives enroll -> assign -> deliver -> transitions -> recall + alert ack', async () => {
-    const cookie = await login();
+    const cookie = await login(GLOBAL_ADMIN);
 
     const steps: Array<[keyof typeof proxy, string, unknown?]> = [
       ['POST', 'tenants', { name: 'Acme' }],
@@ -133,10 +199,11 @@ describe('BFF full lifecycle with token isolation', () => {
       await assertNoLeak(res);
     }
 
-    // Every upstream request carried the admin Bearer, server-side.
-    expect(captured.length).toBe(steps.length);
-    for (const c of captured) {
-      expect(c.authorization, `auth on ${c.path}`).toBe(`Bearer ${ADMIN_TOKEN}`);
+    // Every upstream request carried the caller's session token, server-side.
+    const dataCalls = captured.filter((c) => !c.path.startsWith('auth/'));
+    expect(dataCalls.length).toBe(steps.length);
+    for (const c of dataCalls) {
+      expect(c.authorization, `auth on ${c.path}`).toBe(`Bearer ${GLOBAL_ADMIN.sessionToken}`);
       // The browser session cookie is never forwarded to ams-server.
       expect(c.cookie ?? '').not.toContain('amx_session');
     }
@@ -147,11 +214,20 @@ describe('BFF full lifecycle with token isolation', () => {
     expect(oauthCompletes[0]!.body).toContain('the-auth-code');
   });
 
-  it('logout clears the session cookie', async () => {
-    const res = await sessionDelete();
+  it('logout revokes upstream and clears both cookies', async () => {
+    const cookie = await login(GLOBAL_ADMIN);
+    resetCaptured();
+    const res = await sessionDelete(
+      new Request(`${ORIGIN}/bff/session`, { method: 'DELETE', headers: { cookie } }),
+    );
     expect(res.status).toBe(200);
-    const setCookie = res.headers.get('set-cookie')!;
-    expect(setCookie).toContain('amx_session=');
-    expect(setCookie).toContain('Max-Age=0');
+    // Upstream /auth/logout called with the caller's session token.
+    const logout = captured.find((c) => c.path === 'auth/logout');
+    expect(logout, 'logout reached upstream').toBeTruthy();
+    expect(logout!.authorization).toBe(`Bearer ${GLOBAL_ADMIN.sessionToken}`);
+    // Both cookies cleared.
+    const cleared = res.headers.getSetCookie();
+    expect(cleared.some((c) => c.startsWith('amx_session=') && c.includes('Max-Age=0'))).toBe(true);
+    expect(cleared.some((c) => c.startsWith('amx_nav=') && c.includes('Max-Age=0'))).toBe(true);
   });
 });

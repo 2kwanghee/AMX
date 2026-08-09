@@ -3,6 +3,7 @@
 import { useState } from 'react';
 
 export default function LoginPage() {
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -15,7 +16,7 @@ export default function LoginPage() {
       const res = await fetch('/bff/session', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ email, password }),
         credentials: 'same-origin',
       });
       if (res.ok) {
@@ -34,13 +35,22 @@ export default function LoginPage() {
     <div className="container" style={{ maxWidth: 380, marginTop: '12vh' }}>
       <div className="panel">
         <h1>AMX Console</h1>
-        <p className="muted">Sign in with the operator password.</p>
+        <p className="muted">Sign in with your administrator email and password.</p>
         <form onSubmit={submit}>
+          <label htmlFor="email">Email</label>
+          <input
+            id="email"
+            type="email"
+            autoComplete="username"
+            autoFocus
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
           <label htmlFor="pw">Password</label>
           <input
             id="pw"
             type="password"
-            autoFocus
+            autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
