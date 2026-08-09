@@ -24,6 +24,7 @@ from app.models import (
     Admin,
     Alert,
     Assignment,
+    BillingEvent,
     Server,
     Tenant,
     TenantDek,
@@ -108,6 +109,11 @@ def update_tenant(
 
 
 def delete_tenant(db: Session, tenant_id: uuid.UUID) -> None:
+    # G25: billing_events.tenant_id is FK CASCADE, so a delete would silently
+    # drop the tenant's billing ledger. A *pending* (un-exported) event is
+    # un-recovered revenue and blocks the delete like the other anchors below.
+    # An *exported*-only ledger is allowed to go: export is the ledger's terminal
+    # role, so those rows may cascade away with the tenant.
     tenant = get_tenant(db, tenant_id)
     live = db.scalar(
         select(func.count())
@@ -132,6 +138,16 @@ def delete_tenant(db: Session, tenant_id: uuid.UUID) -> None:
     ) or 0
     if admins:
         raise conflict("tenant.has_admins", "Remove the tenant's admins first.")
+    pending_billing = db.scalar(
+        select(func.count())
+        .select_from(BillingEvent)
+        .where(BillingEvent.tenant_id == tenant_id, BillingEvent.status == "pending")
+    ) or 0
+    if pending_billing:
+        raise conflict(
+            "tenant.has_pending_billing",
+            "Export or void the tenant's pending billing events first.",
+        )
     # The tenant's DEKs are FK RESTRICT (an isolation anchor, not a cascade — a
     # tenant with live accounts must never lose its keys out from under their
     # ciphertext). By here accounts and servers are already gone, so no

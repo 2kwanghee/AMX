@@ -23,11 +23,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.core.errors import not_found
+from app.core.errors import conflict, not_found
 from app.models import BillingCursor, BillingEvent, UsageSnapshot
 from app.services.inventory import get_tenant
 
 KIND = "usage_daily"
+# G26 post-export correction. The original row is immutable; a void is a separate
+# reversal event and the corrected re-aggregation is a third event. All three
+# share (tenant_id, period_start) but differ in ``kind``, so they coexist under
+# the UNIQUE (tenant_id, kind, period_start) anchor without touching the original.
+VOID_KIND = "usage_daily_void"
+REAGG_KIND = "usage_daily_reagg"
 # Distinct from the offline (…01) and sent-ack (…02) sweep locks so all three
 # can run concurrently on different instances.
 _BILLING_SWEEP_LOCK_KEY = 0x414D580F03
@@ -232,3 +238,109 @@ def export_billing_event(
         db.commit()
         db.refresh(event)
     return event
+
+
+def _aggregate_period(
+    db: Session, tenant_id: uuid.UUID, period_start: datetime
+) -> dict:
+    """Re-aggregate one (tenant, UTC day) from the *current* usage_snapshots.
+
+    Same shape as the sweep's ``_aggregate_day``, but reads live rows so a late
+    snapshot that landed after the watermark passed is now included — that is the
+    whole point of a post-export re-aggregation.
+    """
+    day = _floor_day(period_start)
+    rows = db.execute(
+        select(UsageSnapshot.payload, UsageSnapshot.server_id).where(
+            UsageSnapshot.tenant_id == tenant_id,
+            UsageSnapshot.report_type == "usage",
+            UsageSnapshot.reported_at >= day,
+            UsageSnapshot.reported_at < day + timedelta(days=1),
+        )
+    ).all()
+    return _aggregate_day([(payload, server_id) for payload, server_id in rows])
+
+
+def void_billing_event(
+    db: Session, tenant_id: uuid.UUID, event_id: uuid.UUID
+) -> BillingEvent:
+    """G26 post-export correction — reverse an exported event, then re-aggregate.
+
+    The original row is never mutated. A ``usage_daily_void`` event records the
+    reversal (its payload references the original id and aggregate), and the day
+    is atomically re-aggregated into a fresh pending ``usage_daily_reagg`` event
+    from current snapshots. Net over the day = original − void + reagg = reagg.
+
+    Only an *exported* ``usage_daily`` event is voidable: a pending event is
+    corrected by re-sweeping before export, not by a void (409). A second void of
+    the same event is an idempotent no-op (200) returning the existing void row —
+    the UNIQUE anchor makes the re-insert a conflict, which we treat as success.
+
+    Re-aggregation is folded into the void (not a separate endpoint, not the
+    sweep) so the reversal and its replacement commit atomically, and the sweep's
+    watermark idempotency is left completely untouched — the day sits behind the
+    watermark and the original ``usage_daily`` row still guards its slot, so a
+    re-run never re-creates it.
+    """
+    original = get_billing_event(db, tenant_id, event_id)
+    if original.kind != KIND:
+        raise conflict(
+            "billing.void_not_applicable",
+            "Only a usage_daily billing event can be voided.",
+        )
+    if original.status != "exported":
+        raise conflict(
+            "billing.void_requires_exported",
+            "Only an exported billing event can be voided; a pending one is "
+            "corrected by re-sweeping before export.",
+        )
+
+    void_id = uuid.uuid4()
+    inserted = db.execute(
+        pg_insert(BillingEvent)
+        .values(
+            id=void_id,
+            tenant_id=tenant_id,
+            kind=VOID_KIND,
+            period_start=original.period_start,
+            period_end=original.period_end,
+            payload={
+                "voids_event_id": str(original.id),
+                "voided_payload": original.payload,
+            },
+            status="pending",
+        )
+        .on_conflict_do_nothing(index_elements=["tenant_id", "kind", "period_start"])
+        .returning(BillingEvent.id)
+    ).all()
+
+    if not inserted:
+        # Already voided — idempotent no-op. Return the existing void row.
+        db.rollback()
+        return db.scalar(
+            select(BillingEvent).where(
+                BillingEvent.tenant_id == tenant_id,
+                BillingEvent.kind == VOID_KIND,
+                BillingEvent.period_start == original.period_start,
+            )
+        )
+
+    agg = _aggregate_period(db, tenant_id, original.period_start)
+    if agg["snapshot_count"] > 0:
+        db.execute(
+            pg_insert(BillingEvent)
+            .values(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                kind=REAGG_KIND,
+                period_start=original.period_start,
+                period_end=original.period_end,
+                payload=agg,
+                status="pending",
+            )
+            .on_conflict_do_nothing(
+                index_elements=["tenant_id", "kind", "period_start"]
+            )
+        )
+    db.commit()
+    return db.get(BillingEvent, void_id)

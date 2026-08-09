@@ -293,7 +293,7 @@ tenant_deks (
 billing_events (
   id UUID PK,
   tenant_id UUID FK → tenants ON DELETE CASCADE,
-  kind TEXT,                            -- usage_daily
+  kind TEXT,                            -- usage_daily | usage_daily_void | usage_daily_reagg (G26 정정)
   period_start, period_end TIMESTAMPTZ, -- 닫힌 UTC 일 경계 [D, D+1)
   payload JSONB,                        -- account_days · account_ids · server_count · snapshot_count · max_utilization_pct
   status TEXT DEFAULT 'pending',        -- pending | exported
@@ -308,6 +308,13 @@ billing_cursors (
   updated_at TIMESTAMPTZ
 )
 ```
+
+**void/재집계 시맨틱 (G26)** — export 후 정정은 원본 불변. `POST …/void`가 exported `usage_daily`를
+반전하는 `usage_daily_void` 이벤트(payload에 원본 id·집계 참조)를 남기고, 같은 일을 현재
+snapshot으로 재집계한 신규 pending `usage_daily_reagg`를 원자적으로 생성한다. 세 kind가 같은
+`period_start`를 공유해도 `UNIQUE(tenant_id, kind, period_start)`로 공존하며, 일 순합 = 원본 − void +
+reagg. 스윕 워터마크 멱등은 불변(해당 일은 워터마크 뒤). 삭제 가드: pending 이벤트가 있으면 테넌트
+삭제 거부(G25), exported만 남으면 허용.
 
 **★ 테넌트 격리 불변식 (요구 AMS-7)**
 Account·Server의 `UNIQUE(id, tenant_id)`를 앵커로, Assignment가 **복합 FK 2개**로 참조한다.
