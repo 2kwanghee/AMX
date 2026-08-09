@@ -14,12 +14,14 @@ import type {
   AssignmentState,
   CommandAccepted,
   EnrollTokenResponse,
+  EventPage,
   OauthCompleteRequest,
   OauthStartRequest,
   OauthStartResponse,
   Server,
   ServerCreate,
   ServerPage,
+  ServerUpdate,
   SwitchMode,
   Tenant,
   TenantCreate,
@@ -88,6 +90,13 @@ export const api = {
   listServers: (t: string) => bff<ServerPage>('GET', `tenants/${t}/servers`),
   createServer: (t: string, b: ServerCreate) =>
     bff<Server>('POST', `tenants/${t}/servers`, b),
+  updateServer: (t: string, id: string, b: ServerUpdate) =>
+    bff<Server>('PATCH', `tenants/${t}/servers/${id}`, b),
+  listServerEvents: (t: string, id: string, pageToken?: string) =>
+    bff<EventPage>(
+      'GET',
+      `tenants/${t}/servers/${id}/events${pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : ''}`,
+    ),
   deleteServer: (t: string, id: string) =>
     bff<void>('DELETE', `tenants/${t}/servers/${id}`),
   issueEnrollToken: (t: string, id: string) =>

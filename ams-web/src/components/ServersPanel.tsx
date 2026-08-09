@@ -3,7 +3,16 @@
 import { useState } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
-import type { EnrollTokenResponse, Server, ServerPage, UsageSnapshot } from '@/lib/api-client/types';
+import type {
+  EnrollTokenResponse,
+  EventPage,
+  Server,
+  ServerPage,
+  ServerUpdate,
+  SwitchStrategy,
+  UsageSnapshot,
+} from '@/lib/api-client/types';
+import { formatEventRow } from '@/lib/event-format';
 import { Badge, Modal, fmtTime, useAction } from './common';
 
 const POLL = 7000;
@@ -16,6 +25,8 @@ export function ServersPanel({ tenantId }: { tenantId: string }) {
   );
   const [creating, setCreating] = useState(false);
   const [usageOf, setUsageOf] = useState<Server | null>(null);
+  const [policyOf, setPolicyOf] = useState<Server | null>(null);
+  const [eventsOf, setEventsOf] = useState<Server | null>(null);
   const [tokenOf, setTokenOf] = useState<EnrollTokenResponse | null>(null);
   const act = useAction();
   const servers = data?.items ?? [];
@@ -59,6 +70,8 @@ export function ServersPanel({ tenantId }: { tenantId: string }) {
                     Refresh usage
                   </button>
                   <button onClick={() => setUsageOf(s)}>Usage</button>
+                  <button onClick={() => setEventsOf(s)}>Events</button>
+                  <button onClick={() => setPolicyOf(s)}>Policy</button>
                   <button
                     disabled={act.busy}
                     onClick={() =>
@@ -89,6 +102,15 @@ export function ServersPanel({ tenantId }: { tenantId: string }) {
         <CreateServer tenantId={tenantId} onClose={() => setCreating(false)} onDone={() => { setCreating(false); mutate(); }} />
       )}
       {usageOf && <UsageModal tenantId={tenantId} server={usageOf} onClose={() => setUsageOf(null)} />}
+      {eventsOf && <EventsModal tenantId={tenantId} server={eventsOf} onClose={() => setEventsOf(null)} />}
+      {policyOf && (
+        <PolicyModal
+          tenantId={tenantId}
+          server={policyOf}
+          onClose={() => setPolicyOf(null)}
+          onDone={() => { setPolicyOf(null); mutate(); }}
+        />
+      )}
       {tokenOf && (
         <Modal title="Enrollment token (shown once)" onClose={() => setTokenOf(null)}>
           <p className="muted">Copy now — it cannot be retrieved again.</p>
@@ -135,6 +157,125 @@ function CreateServer({
       >
         Create
       </button>
+    </Modal>
+  );
+}
+
+// E1 — central policy editor (design §O4). Each numeric field is optional: a
+// blank field is submitted as null, which clears the central override and lets
+// the agent fall back to its tsamx-local default. Ranges mirror the server-side
+// ServerUpdate validation so the UI blocks obviously bad input before the PATCH.
+function PolicyModal({
+  tenantId,
+  server,
+  onClose,
+  onDone,
+}: {
+  tenantId: string;
+  server: Server;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const numStr = (n?: number | null) => (n === null || n === undefined ? '' : String(n));
+  const [threshold, setThreshold] = useState(numStr(server.thresholdPct));
+  const [strategy, setStrategy] = useState<'' | SwitchStrategy>(server.defaultStrategy ?? '');
+  const [cooldown, setCooldown] = useState(numStr(server.cooldownSeconds));
+  const [hysteresis, setHysteresis] = useState(numStr(server.hysteresisPct));
+  const act = useAction();
+
+  // '' -> null (clear override); otherwise the parsed number. Returns undefined
+  // when the value is present but not a valid number in [min,max].
+  function parse(v: string, min: number, max: number): number | null | undefined {
+    if (v.trim() === '') return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < min || n > max) return undefined;
+    return n;
+  }
+
+  function save() {
+    const thresholdPct = parse(threshold, 0, 100);
+    const cooldownSeconds = parse(cooldown, 0, 86400);
+    const hysteresisPct = parse(hysteresis, 0, 50);
+    if (thresholdPct === undefined) return act.setError('threshold must be 0–100');
+    if (cooldownSeconds === undefined) return act.setError('cooldown must be 0–86400 seconds');
+    if (hysteresisPct === undefined) return act.setError('hysteresis must be 0–50');
+    const body: ServerUpdate = {
+      thresholdPct,
+      defaultStrategy: strategy === '' ? null : strategy,
+      cooldownSeconds,
+      hysteresisPct,
+    };
+    return act.run(() => api.updateServer(tenantId, server.id, body), onDone);
+  }
+
+  return (
+    <Modal title={`Policy — ${server.name}`} onClose={onClose}>
+      <p className="muted">Blank a field to clear the central override (agent uses its local default).</p>
+      <label>Switch threshold (%)</label>
+      <input value={threshold} onChange={(e) => setThreshold(e.target.value)} placeholder="e.g. 95" />
+      <label>Default strategy</label>
+      <select value={strategy} onChange={(e) => setStrategy(e.target.value as '' | SwitchStrategy)}>
+        <option value="">(local default)</option>
+        <option value="best">best</option>
+        <option value="next_available">next_available</option>
+      </select>
+      <label>Cooldown (seconds)</label>
+      <input value={cooldown} onChange={(e) => setCooldown(e.target.value)} placeholder="e.g. 300" />
+      <label>Hysteresis (%)</label>
+      <input value={hysteresis} onChange={(e) => setHysteresis(e.target.value)} placeholder="e.g. 5" />
+      {act.error && <p className="err">{act.error}</p>}
+      <button className="primary" style={{ marginTop: 14 }} disabled={act.busy} onClick={save}>
+        Save policy
+      </button>
+    </Modal>
+  );
+}
+
+// E2 — switch/quarantine/all_exhausted timeline. Rows arrive most recent first,
+// as ams-server orders them; formatEventRow (src/lib/event-format.ts) turns each
+// raw AccountEvent payload into display fields.
+function EventsModal({
+  tenantId,
+  server,
+  onClose,
+}: {
+  tenantId: string;
+  server: Server;
+  onClose: () => void;
+}) {
+  const { data, error } = useSWR<EventPage>(
+    ['events', tenantId, server.id],
+    () => api.listServerEvents(tenantId, server.id),
+    { refreshInterval: POLL },
+  );
+  const events = data?.items ?? [];
+  return (
+    <Modal title={`Events — ${server.name}`} onClose={onClose}>
+      {error && <p className="muted">No events available.</p>}
+      {!error && events.length === 0 && <p className="muted">No events yet.</p>}
+      {events.length > 0 && (
+        <table>
+          <thead>
+            <tr><th>When</th><th>Event</th><th>From → To</th><th>Detail</th></tr>
+          </thead>
+          <tbody>
+            {events.map((ev, i) => {
+              const row = formatEventRow(ev);
+              return (
+                <tr key={ev.id ?? i}>
+                  <td className="muted">{fmtTime(row.reportedAt)}</td>
+                  <td>
+                    <Badge value={row.kind} />
+                    {row.trigger && <span className="muted"> {row.trigger}</span>}
+                  </td>
+                  <td>{row.transition ?? '—'}</td>
+                  <td className="muted">{row.detail}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </Modal>
   );
 }
