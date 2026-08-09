@@ -41,6 +41,62 @@ func TestBuildUsageReport(t *testing.T) {
 	}
 }
 
+// TestBuildUsageReportStampsAmsAccountID (B1b review item 5): with an ID resolver
+// installed, every account KNOWN to the manifest is stamped with its
+// ams_account_id (and UUID); an account the resolver does not know (never
+// assigned by AMS) stays email-only. AMS reconcile-on-report keys drift on
+// ams_account_id, so a missing stamp reads as "absent" and triggers the redeliver
+// loop that clobbers O9 rotations.
+func TestBuildUsageReportStampsAmsAccountID(t *testing.T) {
+	f := tsamx.NewFake()
+	ctx := context.Background()
+	_ = f.Add(ctx, tsamx.AddRequest{Email: "known@x.io", Enable: true})
+	_ = f.Add(ctx, tsamx.AddRequest{Email: "stranger@x.io", Enable: true})
+
+	r := New("ama_test", f, func() time.Time { return time.Unix(1700000000, 0) })
+	// Resolver models the manifest: only "known@x.io" is an AMS-assigned account.
+	r.SetIDResolver(func(email string) (string, string, bool) {
+		if email == "known@x.io" {
+			return "acc-known", "uuid-known", true
+		}
+		return "", "", false
+	})
+
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byEmail := map[string]*amxv1.AccountRef{}
+	for _, au := range rep.GetAccounts() {
+		byEmail[au.GetAccount().GetEmail()] = au.GetAccount()
+	}
+	known := byEmail["known@x.io"]
+	if known == nil || known.GetAmsAccountId() != "acc-known" || known.GetAccountUuid() != "uuid-known" {
+		t.Fatalf("manifest account not stamped: %+v", known)
+	}
+	stranger := byEmail["stranger@x.io"]
+	if stranger == nil || stranger.GetAmsAccountId() != "" || stranger.GetAccountUuid() != "" {
+		t.Fatalf("unassigned account must stay email-only, got %+v", stranger)
+	}
+}
+
+// TestBuildUsageReportNoResolverEmailOnly: without a resolver (the default), no
+// account is stamped — reports remain email-only, unchanged from before f45508b.
+func TestBuildUsageReportNoResolverEmailOnly(t *testing.T) {
+	f := tsamx.NewFake()
+	ctx := context.Background()
+	_ = f.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true})
+
+	r := New("ama_test", f, func() time.Time { return time.Unix(1700000000, 0) })
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.GetAccounts()) != 1 || rep.GetAccounts()[0].GetAccount().GetAmsAccountId() != "" {
+		t.Fatalf("expected email-only account without a resolver, got %+v", rep.GetAccounts())
+	}
+}
+
 func TestOutboxDedupeAndFlush(t *testing.T) {
 	o := NewOutbox()
 	o.Enqueue(&amxv1.AccountEvent{EventId: "e1"})
