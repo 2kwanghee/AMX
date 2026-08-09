@@ -8,8 +8,8 @@ Export is an internal-only state transition (pending -> exported); it is
 additionally gated by ``GlobalAdmin``, ordered after the router's ``TenantScope``
 so a cross-tenant caller sees 404 before a same-tenant tenant-admin sees 403.
 
-These paths are new in F5 and are NOT yet in ``contracts/openapi.yaml`` (a
-separate, contracts-owned change).
+These paths are documented in ``contracts/openapi.yaml`` under the ``billing``
+tag (design note p5 §6).
 """
 
 from __future__ import annotations

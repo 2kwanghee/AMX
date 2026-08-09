@@ -44,6 +44,10 @@ security:
   - bearerAuth: []
 
 tags:
+  - name: auth
+    description: Session login/logout (F1 RBAC, §3). `login` is the only unauthenticated endpoint.
+  - name: admins
+    description: Administrator CRUD, global-admin only (F1 RBAC, S2b).
   - name: tenants
     description: Tenant CRUD (AMS-1).
   - name: accounts
@@ -52,8 +56,153 @@ tags:
     description: AMA server CRUD, enrollment tokens, switch mode and usage (AMS-4).
   - name: assignments
     description: Account-to-server assignment lifecycle (AMS-6, §5.2).
+  - name: alerts
+    description: Alert console — list and acknowledge (P4, design note §4).
+  - name: billing
+    description: Internal usage billing events — list, export and void (F5/G26, design note p5 §6).
 
 paths:
+  # ---------------------------------------------------------------------------
+  # Auth (F1 RBAC, §3)
+  # ---------------------------------------------------------------------------
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Exchange email + password for a session token
+      description: |
+        The one unauthenticated endpoint. Returns an opaque session token to send
+        as `Authorization: Bearer` on every other call, together with the
+        administrator's role and tenant reach. Neither the password nor the token
+        is logged (§7).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Revoke the presented session
+      description: |
+        Deletes the row for whatever Bearer token was presented. Idempotent when
+        the token is the bootstrap root token or an already-revoked session.
+      responses:
+        '204':
+          description: Session revoked.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------------------------------------------------------------------
+  # Admins (F1 RBAC, S2b) — global-admin only
+  # ---------------------------------------------------------------------------
+  /admins:
+    get:
+      tags: [admins]
+      operationId: listAdmins
+      summary: List administrators
+      parameters:
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of administrators. No password hash is ever included.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminPage'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admins]
+      operationId: createAdmin
+      summary: Create an administrator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminCreate'
+      responses:
+        '201':
+          description: Administrator created; password hash never echoed back.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Admin'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admins/{adminId}:
+    parameters:
+      - $ref: '#/components/parameters/AdminId'
+    get:
+      tags: [admins]
+      operationId: getAdmin
+      summary: Get an administrator
+      responses:
+        '200':
+          description: Administrator.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Admin'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [admins]
+      operationId: updateAdmin
+      summary: Update an administrator
+      description: |
+        Deliberately narrow (§7): only account state (`disabled`) and a password
+        reset are mutable. Role and tenant are immutable — delete and recreate to
+        move an admin across the isolation boundary. Disabling the last enabled
+        global-admin is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminUpdate'
+      responses:
+        '200':
+          description: Updated administrator.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Admin'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [admins]
+      operationId: deleteAdmin
+      summary: Delete an administrator
+      description: Deleting the last enabled global-admin is rejected.
+      responses:
+        '204':
+          description: Deleted.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
   # ---------------------------------------------------------------------------
   # Tenants
   # ---------------------------------------------------------------------------
@@ -130,7 +279,7 @@ paths:
       tags: [tenants]
       operationId: deleteTenant
       summary: Delete a tenant
-      description: Rejected while the tenant still owns accounts, servers or non-detached assignments.
+      description: Rejected while the tenant still owns accounts, servers, admins or non-detached assignments.
       responses:
         '204':
           description: Deleted.
@@ -437,6 +586,30 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /tenants/{tenantId}/servers/{serverId}/events:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [servers]
+      operationId: listServerEvents
+      summary: List the server's switch/quarantine event timeline
+      description: |
+        The `switch_event` timeline recorded from the agent's reports
+        (switch / quarantine / all_exhausted). Served from the AMS database; each
+        item is a `UsageSnapshot` with `reportType: switch_event`.
+      parameters:
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of switch-event snapshots, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPage'
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /tenants/{tenantId}/servers/{serverId}:refresh-usage:
     parameters:
       - $ref: '#/components/parameters/TenantId'
@@ -451,11 +624,7 @@ paths:
         then shows up on `GET /usage`.
       responses:
         '202':
-          description: Command queued for the agent.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CommandAccepted'
+          description: Command queued for the agent. No response body.
         '409':
           description: The agent has no live session.
           content:
@@ -484,12 +653,14 @@ paths:
             schema:
               $ref: '#/components/schemas/SwitchModeRequest'
       responses:
-        '202':
-          description: Command queued for the agent.
+        '200':
+          description: |
+            Updated server. The mode change is queued for the agent and converges
+            on its ack; the returned `switchMode` reflects the recorded value.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CommandAccepted'
+                $ref: '#/components/schemas/Server'
         '409':
           description: The agent has no live session.
           content:
@@ -554,6 +725,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Assignment'
+        '400':
+          description: '`deliverImmediately` is not yet supported; create without it and call `:deliver`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '409':
           description: The account is already assigned, or the account and server belong to different tenants.
           content:
@@ -622,7 +799,7 @@ paths:
         locally and AMS never sees or names it (§2.4-3). On the agent's ack the
         state becomes `active`.
       responses:
-        '202':
+        '200':
           description: Command queued; assignment moved to `delivering`.
           content:
             application/json:
@@ -642,13 +819,29 @@ paths:
         `{active, inactive, quarantined}` → `recalling` → `detached` on ack. If
         the account is the live credential, the agent switches away first, then
         runs `tsamx remove`. The row is kept after detaching, for audit.
+
+        D1 escape hatch: past the retry cap a plain recall 409s. A global-admin
+        may send `force: true` to bypass the cap and re-arm a permanently stranded
+        recall; a tenant-admin that sets it gets 403.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecallRequest'
       responses:
-        '202':
+        '200':
           description: Command queued; assignment moved to `recalling`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Assignment'
+        '403':
+          description: '`force` was set by a caller that is not a global-admin.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '409': { $ref: '#/components/responses/InvalidStateTransition' }
 
   /tenants/{tenantId}/assignments/{assignmentId}:activate:
@@ -661,7 +854,7 @@ paths:
       summary: Return the account to rotation
       description: '`inactive` → `active`. Agent runs `tsamx enable`.'
       responses:
-        '202':
+        '200':
           description: Command queued.
           content:
             application/json:
@@ -681,7 +874,7 @@ paths:
         `active` → `inactive`. Agent runs `tsamx disable`; the credential stays
         installed, only rotation skips it.
       responses:
-        '202':
+        '200':
           description: Command queued.
           content:
             application/json:
@@ -702,7 +895,7 @@ paths:
         `SetAccountActive(active, clear_quarantine)` to the agent; the state
         moves on the ack, not on this call.
       responses:
-        '202':
+        '200':
           description: Command queued.
           content:
             application/json:
@@ -729,18 +922,152 @@ paths:
             schema:
               $ref: '#/components/schemas/SwitchNowRequest'
       responses:
-        '202':
-          description: Command queued for the agent.
+        '200':
+          description: |
+            Command queued for the agent; the assignment is returned unchanged
+            (a manual switch changes no assignment state). Convergence arrives
+            later as a CommandAck.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CommandAccepted'
+                $ref: '#/components/schemas/Assignment'
         '409':
           description: The agent has no live session, or the assignment is not installed on it.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  # ---------------------------------------------------------------------------
+  # Alerts (P4, design note §4)
+  # ---------------------------------------------------------------------------
+  /tenants/{tenantId}/alerts:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [alerts]
+      operationId: listAlerts
+      summary: List alerts
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AlertStatus'
+        - name: kind
+          in: query
+          schema:
+            $ref: '#/components/schemas/AlertKind'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of alerts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPage'
+
+  /tenants/{tenantId}/alerts/{alertId}:ack:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AlertId'
+    post:
+      tags: [alerts]
+      operationId: ackAlert
+      summary: Acknowledge an alert
+      description: |
+        Moves an `open` alert to `acked`, recording who acknowledged it. A
+        resolved alert cannot be acknowledged (409). Idempotent on an
+        already-acked alert.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertAckRequest'
+      responses:
+        '200':
+          description: The acknowledged alert.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------------------
+  # Billing (F5/G26, design note p5 §6) — internal usage billing
+  # ---------------------------------------------------------------------------
+  /tenants/{tenantId}/billing/events:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [billing]
+      operationId: listBillingEvents
+      summary: List billing events
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/BillingStatus'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of billing events, newest period first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingEventPage'
+
+  /tenants/{tenantId}/billing/events/{eventId}/export:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/EventId'
+    post:
+      tags: [billing]
+      operationId: exportBillingEvent
+      summary: Mark a billing event exported
+      description: |
+        Internal-only transition `pending` → `exported`; global-admin only. A
+        cross-tenant id is 404 (before the 403 a same-tenant tenant-admin sees).
+        Re-exporting an already-exported event is an idempotent 200.
+      responses:
+        '200':
+          description: The exported event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingEvent'
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tenants/{tenantId}/billing/events/{eventId}/void:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/EventId'
+    post:
+      tags: [billing]
+      operationId: voidBillingEvent
+      summary: Void an exported billing event and re-aggregate the day
+      description: |
+        G26 post-export correction; global-admin only. Reverses an exported
+        `usage_daily` event (the original row is immutable) with a
+        `usage_daily_void` event and re-aggregates the day into a fresh pending
+        `usage_daily_reagg` event. Returns the void event. Only an exported
+        `usage_daily` event is voidable — a pending or non-usage event is 409. A
+        second void of the same event is an idempotent 200 returning the existing
+        void row. A cross-tenant id is 404 (before the 403).
+      responses:
+        '200':
+          description: The void (reversal) event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingEvent'
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
 components:
   securitySchemes:
@@ -773,6 +1100,27 @@ components:
         format: uuid
     AssignmentId:
       name: assignmentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AdminId:
+      name: adminId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AlertId:
+      name: alertId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    EventId:
+      name: eventId
       in: path
       required: true
       schema:
@@ -1066,6 +1414,11 @@ components:
       type: string
       enum: [auto, manual]
 
+    SwitchStrategy:
+      description: Central switch-candidate ranking strategy (O4-C). `null` clears central control back to the tsamx-local default.
+      type: string
+      enum: [best, next_available]
+
     Server:
       type: object
       required: [id, tenantId, name, switchMode, status]
@@ -1082,6 +1435,23 @@ components:
           type: string
         switchMode:
           $ref: '#/components/schemas/SwitchMode'
+        thresholdPct:
+          description: Central switch threshold (O4-C). `null` means the tsamx-local default applies.
+          type: number
+          minimum: 0
+          maximum: 100
+        defaultStrategy:
+          $ref: '#/components/schemas/SwitchStrategy'
+        cooldownSeconds:
+          description: Central switch cooldown (F4/O4-B). `null` means the tsamx-local default applies; `0` is a real value.
+          type: number
+          minimum: 0
+          maximum: 86400
+        hysteresisPct:
+          description: Central switch hysteresis (F4/O4-B). `null` means the tsamx-local default applies.
+          type: number
+          minimum: 0
+          maximum: 50
         status:
           $ref: '#/components/schemas/ServerStatus'
         agentId:
@@ -1122,6 +1492,11 @@ components:
           $ref: '#/components/schemas/SwitchMode'
 
     ServerUpdate:
+      description: |
+        PATCH semantics: only fields present in the body are written; omitted
+        fields are left untouched. For the central policy fields
+        (`thresholdPct`, `defaultStrategy`, `cooldownSeconds`, `hysteresisPct`)
+        an explicit `null` clears central control back to the tsamx-local default.
       type: object
       properties:
         name:
@@ -1130,6 +1505,20 @@ components:
           type: string
         status:
           $ref: '#/components/schemas/ServerStatus'
+        thresholdPct:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100
+        defaultStrategy:
+          $ref: '#/components/schemas/SwitchStrategy'
+        cooldownSeconds:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 86400
+        hysteresisPct:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 50
 
     ServerPage:
       type: object
@@ -1274,7 +1663,7 @@ components:
           type: boolean
           default: false
         deliverImmediately:
-          description: Create and deliver in one call, skipping a separate `:deliver`.
+          description: Reserved. Not yet supported — sending `true` is rejected with 400; create in `pending` and call `:deliver`.
           type: boolean
           default: false
 
@@ -1313,3 +1702,267 @@ components:
         serverId:
           type: string
           format: uuid
+
+    RecallRequest:
+      description: |
+        Optional body for `:recall`. `force` is a global-admin-only D1 escape
+        hatch that bypasses the retry cap to re-arm a permanently stranded recall.
+      type: object
+      properties:
+        force:
+          type: boolean
+          default: false
+
+    # -- Auth (F1 RBAC) -------------------------------------------------------
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          writeOnly: true
+
+    LoginResponse:
+      type: object
+      required: [sessionToken, role, tenantIds, expiresAt]
+      properties:
+        sessionToken:
+          description: Opaque bearer token for subsequent requests. Never logged (§7).
+          type: string
+          readOnly: true
+        role:
+          $ref: '#/components/schemas/AdminRole'
+        tenantIds:
+          description: Tenants the session may reach. Empty for a global-admin (which reaches all).
+          type: array
+          items:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    # -- Admin (F1 RBAC, S2b) -------------------------------------------------
+    AdminRole:
+      type: string
+      enum: [global-admin, tenant-admin]
+
+    Admin:
+      description: Read model. There is no password-hash field, so the bcrypt hash can never be serialised out.
+      type: object
+      required: [id, email, role, disabled, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/AdminRole'
+        tenantId:
+          description: Set for a tenant-admin; null/absent for a global-admin.
+          type: string
+          format: uuid
+        disabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+        updatedAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    AdminCreate:
+      type: object
+      required: [email, password, role]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          writeOnly: true
+        role:
+          $ref: '#/components/schemas/AdminRole'
+        tenantId:
+          description: Required for a tenant-admin; must be omitted for a global-admin.
+          type: string
+          format: uuid
+
+    AdminUpdate:
+      description: |
+        Deliberately narrow (§7): only `disabled` and a password reset are
+        mutable. Role and tenant are immutable — delete and recreate to move an
+        admin across the isolation boundary.
+      type: object
+      properties:
+        disabled:
+          type: boolean
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          writeOnly: true
+
+    AdminPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Admin'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    # -- Alert (P4) -----------------------------------------------------------
+    AlertKind:
+      type: string
+      enum: [all_exhausted, drift, server_offline, quarantine]
+
+    AlertSeverity:
+      type: string
+      enum: [critical, warning]
+
+    AlertStatus:
+      type: string
+      enum: [open, acked, resolved]
+
+    Alert:
+      type: object
+      required: [id, tenantId, kind, severity, status, dedupeKey, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        serverId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        kind:
+          $ref: '#/components/schemas/AlertKind'
+        severity:
+          $ref: '#/components/schemas/AlertSeverity'
+        status:
+          $ref: '#/components/schemas/AlertStatus'
+        dedupeKey:
+          description: Stable key used to coalesce repeated occurrences of the same condition.
+          type: string
+        detail:
+          type: object
+          additionalProperties: true
+        sourceSnapshotId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+        ackedAt:
+          type: string
+          format: date-time
+          readOnly: true
+        ackedBy:
+          type: string
+          readOnly: true
+        resolvedAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    AlertPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alert'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    AlertAckRequest:
+      type: object
+      properties:
+        ackedBy:
+          description: Optional label recorded as the acknowledging operator.
+          type: string
+          maxLength: 200
+
+    # -- Event page (server switch/quarantine timeline) -----------------------
+    EventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageSnapshot'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    # -- Billing (F5/G26) -----------------------------------------------------
+    BillingStatus:
+      type: string
+      enum: [pending, exported]
+
+    BillingEvent:
+      description: |
+        Internal usage billing event. `kind` is `usage_daily` for a sweep
+        aggregate, `usage_daily_void` for a G26 reversal, or `usage_daily_reagg`
+        for the post-void re-aggregation.
+      type: object
+      required: [id, tenantId, kind, periodStart, periodEnd, status, payload, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+        periodStart:
+          type: string
+          format: date-time
+        periodEnd:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/BillingStatus'
+        payload:
+          type: object
+          additionalProperties: true
+        exportedAt:
+          type: string
+          format: date-time
+          readOnly: true
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    BillingEventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BillingEvent'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'

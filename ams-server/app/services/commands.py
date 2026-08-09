@@ -524,9 +524,12 @@ def _revert_assignment_on_send_failure(
     recall is left ``recalling`` with the pending marker cleared — the settled,
     non-in-flight state the D1 reconcile/REST recall path recovers; activate/
     deactivate keep their resting state and only drop the marker. Server-scoped
-    commands (assignment_id NULL) and switch_now (never sets a pending marker)
-    revert nothing — marking the command ``failed`` is enough, and a session
-    re-assertion re-applies server-scoped policy on the next connect.
+    commands (assignment_id NULL) revert nothing — marking the command ``failed``
+    is enough, and a session re-assertion re-applies server-scoped policy on the
+    next connect. ``switch_now`` is marker-less (it never set a pending marker and
+    changes no assignment state), but it still falls through to record
+    ``last_error`` on its assignment and return non-None, so a permanently-failed
+    manual switch is surfaced as a send-failure alert.
 
     Returns the reverted assignment, or None when nothing was reverted (no
     assignment, or a newer command already owns it). The caller opens the
