@@ -464,7 +464,7 @@ Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패�
 - **완료판정 검증**: BFF API 레벨(Route Handler 프로그램 구동)로 전 수명주기 조작 판정 + OAuth 등록
   마법사·deliver/recall만 실브라우저 Playwright 스모크.
 
-### 5.7 Credential 역동기화 (O9 회전형 대응, 구현 대기)
+### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
 O9가 **회전형**으로 판별됨(§8): 계정이 서버에서 활성으로 돌면 그 서버의 Claude Code/tsamx가
 refresh하며 refresh token을 회전 → AMS 보관본(`accounts.encrypted_secret`)이 무효화된다. 같은 서버
@@ -477,14 +477,20 @@ refresh하며 refresh token을 회전 → AMS 보관본(`accounts.encrypted_secr
 - **전송**: `AmaMessage`에 신규 `CredentialUpdate`(proto 변경, AmaMessage oneof 확장) — `{ams_account_id,
   EncryptedCredential(갱신본), server_credential}`. P2 보안 준수: AAD 바인딩(amsAccountId‖agentId),
   세션 서명·TLS. credential은 채널에만 실리고 로그·DB 평문 저장 금지(§7).
-- **AMS 갱신**: 수신 → server_credential/tenant 검증 → `accounts.encrypted_secret`을 `AMX_ENCRYPTION_KEY`로
-  재암호화 저장. 이후 크로스서버 재배정 deliver는 최신본을 보낸다.
-- **경합**: 역동기화와 재배정 deliver가 겹칠 수 있으므로, AMS는 `credential_version`(단조 증가)으로
-  최신본을 판별하고 stale 역동기화는 무시(P3 SetPolicy 단조성 패턴 재사용).
+- **AMS 갱신**: 수신(`_apply_cred_update`) → observed_at 필수·미래 skew clamp → 테넌트 조회 → 소유권
+  검증(이 서버에 active/inactive/quarantined 배정만; pending/recalling 배제) → key_id 일치 → sealed box
+  개봉(AAD 로컬 재유도) → `crypto.encrypt_secret` **초크포인트** 경유 재암호화(F2 봉투암호화 자동 준수).
+- **경합·단조성**: 설계 초안의 `credential_version`(정수) 대신 **`accounts.credential_observed_at`
+  (에이전트 관측 시각, 벽시계 단조 래칫)** 채택 — 리부트 후에도 카운터 없이 생존, 원자적 조건부
+  UPDATE(WHERE observed_at 가드)로 F3 다중 인스턴스·중복·롤백 재생을 거부. NULL = 최초 무조건 수락.
+  (2026-08-09 소급 확인·승인 — as-built 우선, 정수 version 컬럼 없음.)
+- **관찰 경계**: AMA resyncer는 활성 계정의 `.credentials.json`만 관찰한다. 활성이었다가 회전 직후
+  tick 전에 전환·recall된 계정의 회전은 놓칠 수 있음 — 아래 폴백으로 정합성은 유지되므로 수용.
 - **폴백**: 역동기화 실패·유실 시 재배정은 §5.5 재인증으로 폴백(현 동작 유지) — 자동화 최적화이지
   정합성 필수 경로는 아님.
 
-구현은 P2 채널 확장(R3 — credential 흐름·서명·경합). 규모·의존성은 BACKLOG A1.
+구현: proto `CredentialUpdate`(AmaMessage 15) · AMA `internal/resync/` · AMS `_apply_cred_update` ·
+마이그레이션 0005 · E2E `e2e/test_o9_resync_e2e.py`. 이월: 가용성 격리(encrypt 실패 시 스트림 유지) 패치 별도.
 
 ---
 
@@ -681,7 +687,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | O6 | tsamx 업스트림 동기화 절차 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 검증 체크리스트 + 소유자 | P1 이후 운영 |
 | O7 | 다중 AMS 인스턴스 | 세션 레지스트리 + 내부 라우팅 (P1은 단일 인스턴스로 미룸) | SaaS 단계 |
 | O8 | ClickEye 연동 형태 | **P4에서 건너뜀** (2026-08-08, 사용자) — 계정 스위칭 관제에 집중. ClickEye가 AMS 조회 API를 읽는 방식·범위는 추후 결정. 권장 후보: 신규 read-only 엔드포인트 + ClickEye 전용 API 키 | 미해결 (P4 이후) |
-| O9 | refresh token 회전 | **판별: 회전형 확정** (2026-08-08, 실계정 실험 `tools/o9_refresh_probe.py` — 1회 refresh 후 구 refresh token이 `invalid_grant`로 거부됨). **결정: credential 역동기화 채택** — AMA가 로컬 refresh로 갱신된 credential 세트를 AMS로 역전송해 `accounts.encrypted_secret`을 최신화, 크로스서버 재배정을 사람 개입 없이 자동화. 같은 서버 재배정은 O2(로컬 보존)로 이미 커버. 구현은 P2 채널 확장(§5.7) — BACKLOG A1 | ✅ 판별·방향 확정 (구현 대기) |
+| O9 | refresh token 회전 | **판별: 회전형 확정** (2026-08-08, 실계정 실험 `tools/o9_refresh_probe.py` — 1회 refresh 후 구 refresh token이 `invalid_grant`로 거부됨). **결정: credential 역동기화 채택** — AMA가 로컬 refresh로 갱신된 credential 세트를 AMS로 역전송해 `accounts.encrypted_secret`을 최신화, 크로스서버 재배정을 사람 개입 없이 자동화. 같은 서버 재배정은 O2(로컬 보존)로 이미 커버. **구현 완료**(§5.7 — proto `CredentialUpdate`, AMA resync, AMS `_apply_cred_update`, `credential_observed_at` 단조 래칫, E2E). 잔여: 가용성 격리 패치(진행 중) | ✅ 구현 완료 |
 | O10 | tsamx 설치 인증 (D11 파급) | 프라이빗 레포 git 설치에 필요한 서버측 인증. 1차: 읽기 전용 deploy key 공용(만료 없음·최소 권한) → 서버 증가/조직 이전 시 서버별 키 또는 machine user → P2 이후 AMS 아티팩트 서빙(wheel)으로 GitHub 의존 제거 검토 | P2 배포 설계 |
 
 ---

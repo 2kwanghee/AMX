@@ -14,7 +14,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 
 | # | 항목 | 출처 | 내용 | 의존성 |
 |---|---|---|---|---|
-| A1 | ~~O9 refresh 회전 판별~~ → **credential 역동기화 구현** | §8 O9 · §5.7 · P2 | **판별 완료(회전형 확정, 2026-08-08 `tools/o9_refresh_probe.py`)** + 방향 결정(역동기화 채택). 이제 **구현 항목**: AMA가 refresh 갱신본을 AMS로 역전송(신규 proto `CredentialUpdate`, AMA 감지, AMS `encrypted_secret` 갱신, credential_version 단조성). 크로스서버 재배정 자동화. **R3**(credential 흐름·서명·경합), P2 채널 확장 | 착수 대기 (사용자 우선순위) |
+| A1 | ~~credential 역동기화~~ **구현 완료** | §8 O9 · §5.7 · P2 | proto `CredentialUpdate`(AmaMessage 15) + AMA `internal/resync/` + AMS `_apply_cred_update` + `credential_observed_at` 단조 래칫(설계의 credential_version 대체, §5.7) + E2E `test_o9_resync_e2e.py`로 **구현·병합 완료**(p2b-cred-resync). 2026-08-09 소급 확인 — 이 행이 stale였음. 잔여: 가용성 격리 패치(encrypt 실패 시 스트림 유지, 진행 중) | ✅ 완료 |
 | A2 | **O8 ClickEye 연동 형태** | §8 O8 · P4 | P4에서 건너뜀. ClickEye가 AMS 조회 API를 읽는 방식·범위. 권장 = 신규 read-only 엔드포인트 + ClickEye 전용 API 키(관리자 토큰과 분리) | ClickEye 요구 확정 시 |
 | A3 | **O3 API-key 계정 관리 포함 범위** | §8 O3 · P1 | P1에서 api_key 계정은 POST accounts 암호화 경로로 저장 가능하게 구현됨. 다만 구독 쿼터가 없어 95% 임계가 무의미 — 스위칭 풀에 포함할지 정책 미확정 | P3 스위칭 정책과 연동 |
 
@@ -32,7 +32,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | # | 항목 | 출처 | 심각도 | 내용 |
 |---|---|---|---|---|
 | C1 | **AccountEvent 전달 무손실화** | P3 결정8 · 리뷰 A·B | 중 | Outbox 메모리 전용 + transport fire-and-forget이라 프로세스 재시작/적재 직후 단절 시 인플라이트 이벤트 1건 유실 가능. 현재 상태 정합은 usage report reconcile로 자가치유(감사 알림만 손실). 무손실은 transport ack 기반 재설계 필요 |
-| C2 | **UnwrapKEK per-agent 래핑** | P2 | 중 | 현재 WrappedKey는 원시 KEK passthrough, 전송 기밀성은 TLS(B4)에 위임. 프로덕션 전 per-agent transport key/KMS 래핑 필요(코드 TODO 명시) |
+| C2 | ~~UnwrapKEK per-agent 래핑~~ **구현 완료** | P2 | 중 | 세션 KEK를 에이전트별 ephemeral X25519 **NaCl sealed box**로 봉인(c2-kek-wrap 병합, `crypto.go:199-214` UnwrapKEK가 raw KEK·타 키 봉인·변조 거부, §7 In-transit 반영). 2026-08-09 소급 확인 — 이 행이 stale였음 |
 | C3 | **BFF allowlist %2f 우회** | P4 ADVERSARY | 낮(하드닝) | P4에서 %2f/%5c 명시 거부 + 디코드 후 검사로 **처리 완료**. 향후 allowlisted prefix 아래 라우트 추가 시 재검토 |
 
 ## D. 회복 엣지 (P3 reconcile로 부분 완화, 완전한 처리는 후속)
@@ -48,7 +48,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 |---|---|---|---|
 | E1 | **set-policy UI 어포던스** | P4 리뷰 B | 백엔드·BFF는 threshold/strategy 편집 지원, ams-web UI에 편집 버튼 없음(서버 PATCH 자체가 UI 부재). 완료판정은 BFF 레벨이라 비차단 |
 | E2 | **events 엔드포인트 UI 소비자** | P4 | `GET …/servers/{sid}/events`는 BFF allowlist에 있으나 UI 소비자 없음 |
-| E3 | **Principal 훅 미구현** | P4 리뷰 B | 설계 결정5는 `require_admin`→`Principal` 반환형 리팩터(P5 테넌트 스코핑 자리)를 요구했으나 미구현. 단일 관리자라 P5 강제 재작업은 아님 |
+| E3 | ~~Principal 훅~~ **구현 완료** | P4 리뷰 B | P5 S1에서 `require_admin`→`Principal` 반환형 리팩터 구현·병합 완료(`app/api/deps.py`, F1 RBAC이 이 위에 구축됨). 2026-08-09 소급 확인 — 이 행이 stale였음 |
 
 ## F. P5 SaaS 준비 (장기)
 

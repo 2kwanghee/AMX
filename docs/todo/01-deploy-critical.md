@@ -31,25 +31,24 @@ opt-in fail-closed, AMA 쪽 TLS/tls 테스트(`transport_tls_test.go`) 존재. *
 **완료조건**: 스크립트로 발급한 cert로 AMS 기동 + AMA 접속이 TLS로 성립하고(E2E 또는 스모크 스크립트),
 `AMX_GRPC_ALLOW_INSECURE` 미설정 상태에서 평문 접속이 거부된다.
 
-## A1 — O9 credential 역동기화 — R3 (2인 정족수 + ADVERSARY)
+## A1 — O9 credential 역동기화 — **소급 확인 결과 구현 완료** (2026-08-09)
 
-**배경**: refresh token은 회전형으로 판별 완료(2026-08-08, `tools/o9_refresh_probe.py`).
-AMA가 로컬 refresh로 갱신한 credential 세트를 AMS로 역전송해 `accounts.encrypted_secret`을 최신화해야
-크로스서버 재배정이 사람 개입 없이 자동화된다. 같은 서버 재배정은 O2(로컬 보존)로 이미 커버.
+착수 전 설계 조사(REASONER)에서 **A1이 이미 구현·병합 완료**임을 확인했다 — BACKLOG A1 행이
+stale였다(C2·E3와 동일 사례). as-built: proto `CredentialUpdate`(AmaMessage 15, 3-lang codegen 반영),
+AMA `internal/resync/`(fingerprint 감지, lock 밖 전송, 수락 시 baseline 전진), AMS
+`_apply_cred_update`(소유권·key_id·sealed box AAD 재유도·`crypto.encrypt_secret` 초크포인트·원자적
+조건부 UPDATE), 마이그레이션 0005, E2E `e2e/test_o9_resync_e2e.py`. 상세는 §5.7(정정 완료).
 
-**할 일** (착수 전 설계 선행 — proto 변경이라 P0 계약 관례대로 계약부터)
-- proto: 신규 `CredentialUpdate` 메시지(AMA→AMS 방향), 3-lang codegen 재생성
-- AMA: refresh 갱신 감지(tsamx 캐시/credential 파일 변화) → 세션 KEK 봉인 후 역전송, 재시도·outbox 정합
-- AMS: 수신 → `encrypted_secret` 갱신, **credential_version 단조성**(구버전 역전 거부), 봉투암호화 초크포인트(`crypto.encrypt_secret`) 경유
-- 경합 처리: deliver/recall 인플라이트 중 역전송 도착, 동시 다중 세션(F3) 중복 수신
-- E2E: refresh 갱신 → 역동기화 → 크로스서버 재배정 성공
+**설계 이탈 수용 기록**: 초안의 `credential_version`(정수) 대신 `credential_observed_at`(벽시계 단조
+래칫) — 리부트 생존·시계 되감김 안전측. as-built 우선으로 승인, §5.7에 기록.
 
-**완료조건**: E2E — 서버 X에서 refresh 회전이 일어난 계정을 recall 후 서버 Y에 deliver 했을 때
-**갱신된** credential이 하달되어 인증이 성립한다(구 credential이면 invalid_grant로 실패했을 시나리오).
-credential_version 역전 시도는 거부 로그와 함께 무시된다.
-
-**주의**: 인증·암호·외부 입력 파싱 전부 해당 → R3. 리뷰는 2인 정족수 + ADVERSARY 필수.
-관련: §5.7, §8 O9, BACKLOG A1, G12(이벤트 무손실과 별개 — 혼동 금지).
+**A1 잔여 작업** (이것만 남음)
+1. **가용성 격리 패치 (R2, 진행 중)**: `_apply_cred_update`의 `crypto.encrypt_secret`가 try/except 밖 —
+   DEK 부재/KEK 오류 시 세션 스트림 전체가 드롭. 해당 건만 거부하고 스트림 유지하도록 격리.
+   완료조건: DEK 미구성 상태 cred_update 수신 시 스트림 유지 테스트 통과.
+2. **ADVERSARY 소급 반증 (진행 중)**: R3 코드가 ADVERSARY 리뷰 이력 없이 병합돼 있어 소급 수행
+   (위조 주입·롤백 재생·경합·DoS·암호 경계·NULL 선점 6개 각도).
+3. 문서 정정(§5.7·§8 O9·BACKLOG A1) — 완료.
 
 ## C2 확인 기록 (2026-08-09, 이 순위에서 제외)
 
