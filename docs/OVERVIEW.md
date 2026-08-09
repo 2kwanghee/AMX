@@ -141,6 +141,12 @@ AMX/
 
 ## 5. 사용 방법
 
+> **한 번에 켜기:** `bash deploy/fullstack-run.sh up all --insecure-grpc` — DB·서버(REST+gRPC)·웹을 한 번에 띄웁니다.
+> 처음부터 끝까지(노트북 에이전트 연결·실계정 왕복 포함) 따라 하는 절차는 **`docs/DEV-TEST-GUIDE.md`** 에 있습니다.
+>
+> **주의:** 관리자 화면(ams-web)은 개발 모드(`next dev`)로 뜨지 않습니다 — 보안정책(CSP)이 `next dev`가 요구하는
+> 스크립트 실행을 막아 화면이 죽습니다. 반드시 **운영 빌드**(`npm run build && npm start`)로 띄우세요. 위 스크립트는 자동으로 그렇게 합니다.
+
 ### 개발 환경에서 시험 돌리기
 
 ```sh
