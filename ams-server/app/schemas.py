@@ -252,6 +252,27 @@ class EventPage(Wire):
     page_info: PageInfo | None = None
 
 
+# -- F5 billing ---------------------------------------------------------------
+BillingStatus = Literal["pending", "exported"]
+
+
+class BillingEvent(Wire):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    kind: str
+    period_start: datetime
+    period_end: datetime
+    status: BillingStatus
+    payload: dict
+    exported_at: datetime | None = None
+    created_at: datetime
+
+
+class BillingEventPage(Wire):
+    items: list[BillingEvent]
+    page_info: PageInfo | None = None
+
+
 # -- F1 RBAC (P5 S2a) ---------------------------------------------------------
 class LoginRequest(Wire):
     email: EmailStr

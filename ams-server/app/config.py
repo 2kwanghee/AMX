@@ -32,6 +32,10 @@ class Settings:
     kek: str | None = None
     oauth_flow_ttl_seconds: int = 600
     http_timeout_seconds: float = 15.0
+    # F5 billing: a UTC day D is only "closed" (eligible for a billing_events
+    # row) once now >= D+1 00:00 + this grace, so a late-arriving usage report
+    # for D still lands before the day is aggregated.
+    billing_close_grace_seconds: int = 3600
 
 
 def _require(name: str) -> str:
@@ -78,6 +82,9 @@ def load_settings() -> Settings:
         kek=kek,
         oauth_flow_ttl_seconds=int(os.environ.get("AMX_OAUTH_FLOW_TTL_SECONDS", "600")),
         http_timeout_seconds=float(os.environ.get("AMX_HTTP_TIMEOUT_SECONDS", "15")),
+        billing_close_grace_seconds=int(
+            os.environ.get("AMX_BILLING_CLOSE_GRACE_SECONDS", "3600")
+        ),
     )
 
 

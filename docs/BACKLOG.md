@@ -58,7 +58,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | F2 | 봉투암호화 (테넌트별 DEK를 KMS KEK로) | §7 · P5 |
 | F3 | **O7 다중 AMS 인스턴스** — `_online` 인프로세스 레지스트리 → 공유 저장/내부 라우팅 | §8 O7 |
 | F4 | **O4-B 전체 정책 중앙화** — SetPolicy에 cooldown/hysteresis 필드 추가 | §8 O4 |
-| F5 | 과금 훅 | 로드맵 P5 |
+| F5 | ~~과금 훅~~ **완료** — `billing_events` outbox(usage_snapshots 원장 → 테넌트×닫힌 UTC 일 집계, 멱등 스윕 락 …03, REST list/export). 내부 청구 스키마, 외부 결제 미연동·proto 무변경. | 로드맵 P5 |
 
 ## G. 정리·nit (R0, 완료조건 무관)
 
