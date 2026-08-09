@@ -19,7 +19,7 @@
 | ① | 배포 필수 — B1(PR #23) · B4(PR #24) · A1(기구현 확인 + 가용성 패치 PR #25 · 소급 반증 완료) | [01-deploy-critical.md](01-deploy-critical.md) | **작업 완료** — PR 3건 머지 대기 |
 | ② | 청구 하드닝 — G25·G26 (PR #26, void/재집계 + 삭제 가드) | [02-billing-hardening.md](02-billing-hardening.md) | **작업 완료** — 머지 대기 |
 | ③ | 운영 안정화 — D1(PR #27) · D2(PR #28, 측정 후 경보 T2) · C1(기구현 확인) | [03-ops-stabilization.md](03-ops-stabilization.md) | **완료** — 전부 머지됨 |
-| ④ | 나머지 — E1·E2(콘솔), B2·B3(운영 절차), 문서 정정, G nits | [04-low-cost-misc.md](04-low-cost-misc.md) | 대기 |
+| ④ | 나머지 — E1·E2(PR #30) · B2·B3(PR #29) · G33 openapi(PR #31) · G27·G28(PR #32) · 문서 정정 | [04-low-cost-misc.md](04-low-cost-misc.md) | **완료** — 잔여 G nits는 선별 결과 이월(04 파일 참조) |
 | 보류 | 상용 SaaS 준비 — F2 실 KMS, SaaS 하드닝, A2, A3 | [on-hold-saas.md](on-hold-saas.md) | 보류 |
 
 ## 완료된 것 (요약)
