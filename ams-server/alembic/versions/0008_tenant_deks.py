@@ -70,4 +70,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Refuse if any credential is still v2: dropping tenant_deks would strand its
+    # DEK and make that ciphertext permanently unopenable (ADVERSARY H4). The
+    # operator must first run `rewrap_secrets.py --reverse` to fold v2 back to
+    # legacy Fernet, then downgrade.
+    bind = op.get_bind()
+    orphaned = bind.execute(
+        sa.text("SELECT 1 FROM accounts WHERE encrypted_secret LIKE 'v2:%' LIMIT 1")
+    ).first()
+    if orphaned is not None:
+        raise RuntimeError(
+            "downgrade refused: v2 (tenant-DEK) credentials exist. Run "
+            "`AMX_ENVELOPE_WRITE unset python scripts/rewrap_secrets.py --reverse` "
+            "to fold them back to legacy Fernet before dropping tenant_deks."
+        )
     op.drop_table("tenant_deks")

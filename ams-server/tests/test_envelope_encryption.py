@@ -13,6 +13,8 @@ Covers the S3a/S3b/S3c surface:
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import json
 import os
 import uuid
@@ -20,6 +22,7 @@ from datetime import UTC, datetime
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from sqlalchemy import text
 
 from app.core import crypto, kek
 from app.core.kek import KekProvider, LocalKekProvider
@@ -27,6 +30,8 @@ from app.db import get_sessionmaker
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, Tenant, TenantDek
 from app.services import inventory
+
+rewrap = importlib.import_module("scripts.rewrap_secrets")
 
 
 # -- Fixtures / helpers -------------------------------------------------------
@@ -351,3 +356,189 @@ def test_deliver_routes_through_dek(write_on):
             await call.done_writing()
 
     asyncio.run(scenario())
+
+
+# -- R3 fix 3: unwrap dispatches on the row's provider, not the active one ----
+def test_provider_for_dispatches_by_id(monkeypatch):
+    kek.invalidate_dek_cache()
+    assert isinstance(kek._provider_for("local"), LocalKekProvider)
+    with pytest.raises(kek.KekError):
+        kek._provider_for("aws-kms")
+    with pytest.raises(kek.KekError):
+        kek._provider_for("vault")
+    # With a fake provider active, its id resolves to that instance, yet 'local'
+    # still builds a real local provider — dispatch follows the row's id.
+    fake = _FakeKms()
+    monkeypatch.setattr(kek, "get_kek_provider", lambda: fake)
+    assert kek._provider_for("fake-kms") is fake
+    assert isinstance(kek._provider_for("local"), LocalKekProvider)
+
+
+def test_unwrap_uses_row_provider_not_active(write_on):
+    # The DEK is really wrapped by the active local provider, so unwrapping under
+    # 'local' would succeed. Re-tag the row as an unimplemented provider: unwrap
+    # must now fail *via that provider*, proving it dispatches on row.kek_provider
+    # rather than blindly using the active local one.
+    tenant_id = _new_tenant()
+    with get_sessionmaker()() as db:
+        row = kek.active_dek(db, tenant_id)
+        row.kek_provider = "vault"
+        db.commit()
+    kek.invalidate_dek_cache(tenant_id)
+    with get_sessionmaker()() as db:
+        with pytest.raises(kek.KekError):
+            kek.unwrap_dek_version(db, tenant_id, 1)
+
+
+# -- R3 fix 1: rewrap forward is CAS lost-update safe -------------------------
+def _mk_legacy_account(tenant_id, email, rt) -> uuid.UUID:
+    with get_sessionmaker()() as db:
+        account = inventory.create_account(
+            db, tenant_id, email=email, credential_type="oauth", secret=_oauth(email, rt)
+        )
+        assert not (account.encrypted_secret or "").startswith("v2:")
+        return account.id
+
+
+def test_rewrap_forward_promotes_legacy_to_v2(monkeypatch, write_off):
+    tenant_id = _new_tenant()
+    account_id = _mk_legacy_account(tenant_id, "fwd@example.com", "rt-fwd")
+    monkeypatch.setenv("AMX_ENVELOPE_WRITE", "1")
+    monkeypatch.setattr("sys.argv", ["rewrap", "--tenant", str(tenant_id)])
+    assert rewrap.main() == 0
+    with get_sessionmaker()() as db:
+        row = db.get(Account, account_id)
+        assert row.encrypted_secret.startswith("v2:")
+        payload = json.loads(
+            crypto.decrypt_secret(row.encrypted_secret, tenant_id=tenant_id, db=db)
+        )
+        assert payload["claudeAiOauth"]["refreshToken"] == "rt-fwd"
+
+
+def test_rewrap_forward_cas_skips_concurrent_change(monkeypatch, write_off):
+    # A newer credential committed (O9-style) between the rewrap's read and its
+    # write must NOT be overwritten by the stale plaintext the rewrap holds.
+    tenant_id = _new_tenant()
+    account_id = _mk_legacy_account(tenant_id, "cas@example.com", "rt-stale")
+    monkeypatch.setenv("AMX_ENVELOPE_WRITE", "1")
+
+    real_encrypt = crypto.encrypt_secret
+    state = {"injected": False}
+
+    def racing_encrypt(plaintext, *, tenant_id, db):
+        # Fire the concurrent write exactly once, after the rewrap has read the
+        # old value but before its CAS UPDATE lands.
+        if not state["injected"]:
+            state["injected"] = True
+            with get_sessionmaker()() as other:
+                a = other.get(Account, account_id)
+                a.encrypted_secret = real_encrypt(
+                    _oauth("cas@example.com", "rt-o9-newer"),
+                    tenant_id=a.tenant_id, db=other,
+                )
+                other.commit()
+        return real_encrypt(plaintext, tenant_id=tenant_id, db=db)
+
+    monkeypatch.setattr(rewrap.crypto, "encrypt_secret", racing_encrypt)
+    monkeypatch.setattr("sys.argv", ["rewrap", "--tenant", str(tenant_id)])
+    assert rewrap.main() == 0
+    # The O9 credential survives; the stale rewrap did not resurrect rt-stale.
+    with get_sessionmaker()() as db:
+        row = db.get(Account, account_id)
+        payload = json.loads(
+            crypto.decrypt_secret(row.encrypted_secret, tenant_id=tenant_id, db=db)
+        )
+        assert payload["claudeAiOauth"]["refreshToken"] == "rt-o9-newer"
+    assert state["injected"] is True
+
+
+# -- R3 fix 2b: reverse rewrap folds v2 -> Fernet -----------------------------
+def test_rewrap_reverse_folds_v2_to_fernet(monkeypatch):
+    tenant_id = _new_tenant()
+    monkeypatch.setenv("AMX_ENVELOPE_WRITE", "1")
+    with get_sessionmaker()() as db:
+        account = inventory.create_account(
+            db, tenant_id, email="rev@example.com", credential_type="oauth",
+            secret=_oauth("rev@example.com", "rt-rev"),
+        )
+        account_id = account.id
+        assert account.encrypted_secret.startswith("v2:")
+    # Reverse is a rollback tool: independent of the write flag. Unset it to prove.
+    monkeypatch.delenv("AMX_ENVELOPE_WRITE", raising=False)
+    monkeypatch.setattr("sys.argv", ["rewrap", "--reverse", "--tenant", str(tenant_id)])
+    assert rewrap.main() == 0
+    with get_sessionmaker()() as db:
+        row = db.get(Account, account_id)
+        assert not row.encrypted_secret.startswith("v2:")  # back to legacy Fernet
+        payload = json.loads(
+            crypto.decrypt_secret(row.encrypted_secret, tenant_id=tenant_id, db=db)
+        )
+        assert payload["claudeAiOauth"]["refreshToken"] == "rt-rev"
+
+
+# -- R3 fix 2a: 0008 downgrade refuses while any v2 credential exists ----------
+def _load_migration_0008():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "alembic", "versions", "0008_tenant_deks.py")
+    spec = importlib.util.spec_from_file_location("_mig_0008", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeResult:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+def test_downgrade_refuses_while_v2_exists(monkeypatch):
+    mig = _load_migration_0008()
+    from alembic import op as alembic_op
+
+    monkeypatch.setattr(
+        alembic_op, "get_bind", lambda: type(
+            "B", (), {"execute": lambda self, *a: _FakeResult((1,))}
+        )()
+    )
+    with pytest.raises(RuntimeError, match="downgrade refused"):
+        mig.downgrade()
+
+
+def test_downgrade_allowed_when_no_v2(monkeypatch):
+    mig = _load_migration_0008()
+    from alembic import op as alembic_op
+
+    dropped = {"called": False}
+    monkeypatch.setattr(
+        alembic_op, "get_bind", lambda: type(
+            "B", (), {"execute": lambda self, *a: _FakeResult(None)}
+        )()
+    )
+    monkeypatch.setattr(
+        alembic_op, "drop_table", lambda name: dropped.__setitem__("called", True)
+    )
+    mig.downgrade()
+    assert dropped["called"] is True
+
+
+def test_reverse_rewrap_clears_downgrade_guard(monkeypatch):
+    # The migration's guard predicate is `... LIKE 'v2:%'`. A v2 row trips it;
+    # after --reverse the predicate is empty, so downgrade would proceed.
+    tenant_id = _new_tenant()
+    monkeypatch.setenv("AMX_ENVELOPE_WRITE", "1")
+    with get_sessionmaker()() as db:
+        inventory.create_account(
+            db, tenant_id, email="guard@example.com", credential_type="oauth",
+            secret=_oauth("guard@example.com", "rt-guard"),
+        )
+    guard = text("SELECT 1 FROM accounts WHERE encrypted_secret LIKE 'v2:%' LIMIT 1")
+    with get_sessionmaker()() as db:
+        assert db.execute(guard).first() is not None
+    monkeypatch.delenv("AMX_ENVELOPE_WRITE", raising=False)
+    monkeypatch.setattr("sys.argv", ["rewrap", "--reverse", "--tenant", str(tenant_id)])
+    assert rewrap.main() == 0
+    with get_sessionmaker()() as db:
+        assert db.execute(guard).first() is None

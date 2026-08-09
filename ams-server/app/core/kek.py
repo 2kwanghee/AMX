@@ -146,20 +146,43 @@ def _load_local_kek() -> bytes:
     return key
 
 
-def build_kek_provider() -> KekProvider:
-    provider = get_settings().kek_provider
-    if provider == "local":
+def build_provider_by_id(provider_id: str) -> KekProvider:
+    """Construct the provider named by a stored DEK's ``kek_provider``.
+
+    Independent of the currently-configured provider, so a DEK wrapped by one
+    provider still unwraps after the config is switched to another (mixed
+    local/KMS). Only ``local`` has an adapter today; ``aws-kms``/``vault`` raise
+    until a vendor is chosen, which is why the mismatch surfaces loudly rather
+    than being silently mis-unwrapped by whatever is active.
+    """
+    if provider_id == "local":
         return LocalKekProvider(_load_local_kek())
-    # aws-kms / vault: config validated the name, but no adapter exists yet.
     raise KekError(
-        f"KEK provider {provider!r} has no implementation yet "
+        f"KEK provider {provider_id!r} has no implementation yet "
         "(KMS vendor undecided; F2 ships the local provider)"
     )
+
+
+def build_kek_provider() -> KekProvider:
+    return build_provider_by_id(get_settings().kek_provider)
 
 
 @lru_cache(maxsize=1)
 def get_kek_provider() -> KekProvider:
     return build_kek_provider()
+
+
+def _provider_for(provider_id: str) -> KekProvider:
+    """Resolve the provider a stored DEK was wrapped with.
+
+    When the DEK's provider is the one currently active, reuse that instance
+    (honours a test-injected or cached provider); otherwise build it by id.
+    Dispatch is on the row's ``kek_provider``, never blindly on the active one.
+    """
+    active = get_kek_provider()
+    if provider_id == active.provider_id:
+        return active
+    return build_provider_by_id(provider_id)
 
 
 # -- Unwrapped-DEK cache ------------------------------------------------------
@@ -228,7 +251,7 @@ def _unwrap_cached(row: TenantDek) -> bytes:
     hit = _dek_cache.get(key)
     if hit is not None:
         return hit
-    provider = get_kek_provider()
+    provider = _provider_for(row.kek_provider)
     dek = provider.unwrap_dek(
         bytes(row.wrapped_dek), tenant_id=row.tenant_id, key_id=row.kek_key_id
     )

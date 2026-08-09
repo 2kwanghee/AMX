@@ -69,6 +69,16 @@ def encrypt_secret(plaintext: str, *, tenant_id: uuid.UUID | str, db: Session) -
     )
 
 
+def encrypt_secret_fernet(plaintext: str) -> str:
+    """Force a legacy Fernet write, independent of AMX_ENVELOPE_WRITE.
+
+    Only the rollback tool (`rewrap_secrets.py --reverse`) uses this, to fold v2
+    ciphertext back to legacy before a code/schema downgrade. Still routes
+    through this chokepoint module — no independent ciphertext path.
+    """
+    return _fernet().encrypt(plaintext.encode()).decode()
+
+
 def decrypt_secret(ciphertext: str, *, tenant_id: uuid.UUID | str, db: Session) -> str:
     """Open stored credential ciphertext.
 

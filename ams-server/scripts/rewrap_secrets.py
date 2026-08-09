@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
-"""Batch rewrap legacy (Fernet) credentials into v2 tenant-DEK envelopes.
+"""Batch rewrap credentials between legacy Fernet and v2 tenant-DEK envelopes.
 
-Step C of the F2 rollout (design §4-C). Write-path traffic (enroll, update, O9
-re-sync) lazily promotes rows to v2 on their next write; this script sweeps the
-cold rows that never get written, so the legacy Fernet key can eventually be
-retired.
+Forward (default) — step C of the F2 rollout (design §4-C): legacy Fernet rows
+that write-path traffic never promotes get swept to v2. Requires
+``AMX_ENVELOPE_WRITE=1``.
 
-Idempotent and safe to re-run: rows already tagged ``v2:`` are skipped. Requires
-``AMX_ENVELOPE_WRITE=1`` (v2 writes must be enabled, i.e. the rollback boundary
-is already crossed) so a rewrap can never silently re-emit Fernet. Never prints
-credential material — only counts and account ids.
+Reverse (``--reverse``) — the rollback tool: fold v2 rows back to legacy Fernet
+before a code/schema downgrade, so no ciphertext is stranded when ``tenant_deks``
+goes away (0008 downgrade refuses while any v2 remains). Independent of
+``AMX_ENVELOPE_WRITE``.
+
+Both directions are lost-update safe. O9 (`_apply_cred_update`) may commit a
+newer credential between our read and our write; a blind UPDATE would resurrect
+the stale plaintext we hold (its observed_at stays at the newer value, so the
+stale copy would then be delivered and never corrected). So every write is a
+compare-and-swap: ``UPDATE ... WHERE encrypted_secret = <exact value we read>``.
+rowcount 0 means it changed underneath us — that copy is already current, so we
+skip it, never overwrite. Never prints credential material — only counts and ids.
 
     AMX_DATABASE_URL=... AMX_ENCRYPTION_KEY=... AMX_ADMIN_TOKEN=... \\
     AMX_ENVELOPE_WRITE=1 python scripts/rewrap_secrets.py [--tenant <uuid>] [--dry-run]
+    # rollback:
+    python scripts/rewrap_secrets.py --reverse [--tenant <uuid>] [--dry-run]
 """
 
 from __future__ import annotations
@@ -21,7 +30,7 @@ import argparse
 import sys
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core import crypto, kek
 from app.core.crypto import CredentialDecryptionError
@@ -33,13 +42,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tenant", type=uuid.UUID, default=None, help="limit to one tenant")
     parser.add_argument("--dry-run", action="store_true", help="report, do not write")
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="fold v2 -> legacy Fernet (rollback), independent of the write flag",
+    )
     args = parser.parse_args()
 
-    if not args.dry_run and not kek.envelope_write_enabled():
+    if not args.reverse and not args.dry_run and not kek.envelope_write_enabled():
         print("refusing: AMX_ENVELOPE_WRITE=1 is required to write v2 (rollback boundary)")
         return 2
 
-    scanned = rewrapped = skipped = failed = 0
+    want_prefix = not args.reverse  # forward wants v2 out; reverse wants no v2
+    scanned = rewrapped = skipped = failed = lost = 0
     sm = get_sessionmaker()
     with sm() as db:
         where = [Account.encrypted_secret.is_not(None)]
@@ -55,36 +70,56 @@ def main() -> int:
             if account is None or not account.encrypted_secret:
                 continue
             scanned += 1
-            if account.encrypted_secret.startswith("v2:"):
+            old = account.encrypted_secret
+            is_v2 = old.startswith("v2:")
+            # Forward skips rows already v2; reverse skips rows already legacy.
+            if is_v2 == want_prefix:
                 skipped += 1
                 continue
             try:
                 plaintext = crypto.decrypt_secret(
-                    account.encrypted_secret, tenant_id=account.tenant_id, db=db
+                    old, tenant_id=account.tenant_id, db=db
                 )
             except CredentialDecryptionError:
                 failed += 1
                 print(f"failed(decrypt): account={account_id}")
                 continue
             try:
-                new_ct = crypto.encrypt_secret(
-                    plaintext, tenant_id=account.tenant_id, db=db
-                )
+                if args.reverse:
+                    new_ct = crypto.encrypt_secret_fernet(plaintext)
+                else:
+                    new_ct = crypto.encrypt_secret(
+                        plaintext, tenant_id=account.tenant_id, db=db
+                    )
             finally:
                 del plaintext
-            if not new_ct.startswith("v2:"):
-                # AMX_ENVELOPE_WRITE not honoured — do not overwrite with Fernet.
+            if new_ct.startswith("v2:") != want_prefix:
+                # Wrong direction produced (e.g. forward without the write flag);
+                # never overwrite with the unintended format.
                 failed += 1
-                print(f"failed(not v2): account={account_id}")
+                print(f"failed(wrong format): account={account_id}")
                 continue
-            rewrapped += 1
-            if not args.dry_run:
-                account.encrypted_secret = new_ct
-                db.commit()
+            if args.dry_run:
+                rewrapped += 1
+                continue
+            # Compare-and-swap: only write if the stored value is still exactly
+            # what we decrypted. If O9 (or anyone) changed it since our read,
+            # rowcount is 0 and we skip — the newer copy stands (no stale revival).
+            result = db.execute(
+                update(Account)
+                .where(Account.id == account_id, Account.encrypted_secret == old)
+                .values(encrypted_secret=new_ct)
+            )
+            db.commit()
+            if result.rowcount:
+                rewrapped += 1
+            else:
+                lost += 1  # changed underneath us — already current, left as-is
 
     print(
-        f"scanned={scanned} rewrapped={rewrapped} skipped_v2={skipped} "
-        f"failed={failed} dry_run={str(args.dry_run).lower()}"
+        f"mode={'reverse' if args.reverse else 'forward'} scanned={scanned} "
+        f"rewrapped={rewrapped} skipped={skipped} raced={lost} failed={failed} "
+        f"dry_run={str(args.dry_run).lower()}"
     )
     return 0 if failed == 0 else 1
 
