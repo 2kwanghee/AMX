@@ -58,7 +58,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | F2 | 봉투암호화 (테넌트별 DEK를 KMS KEK로) | §7 · P5 |
 | F3 | **O7 다중 AMS 인스턴스** — `_online` 인프로세스 레지스트리 → 공유 저장/내부 라우팅 | §8 O7 |
 | F4 | **O4-B 전체 정책 중앙화** — SetPolicy에 cooldown/hysteresis 필드 추가 | §8 O4 |
-| F5 | 과금 훅 | 로드맵 P5 |
+| F5 | ~~과금 훅~~ **완료** — `billing_events` outbox(usage_snapshots 원장 → 테넌트×닫힌 UTC 일 집계, 멱등 스윕 락 …03, REST list/export). 내부 청구 스키마, 외부 결제 미연동·proto 무변경. | 로드맵 P5 |
 
 ## G. 정리·nit (R0, 완료조건 무관)
 
@@ -88,6 +88,10 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G22 | F3 claim-before-write 지연 완화: 재연결 write 실패 시 해당 command_id(및 미전송 배치 tail)를 `sent→queued` 즉시 리셋하면 90s D2 지연 제거. 단 **되돌림-후-재경쟁**(되돌린 명령을 타 인스턴스가 fetch, 멱등이라 무해)이라는 새 동시성 고려 필요 → 별도 설계·검토. 현재는 지연만(정확성 무해) | F3 리뷰 A·B |
 | G23 | F3 문서: 스위퍼 "exactly one per tick"은 과장(실제 동시 배제·시차 중복 가능하나 멱등) · `alerts.sweep_offline` docstring "caller commits" 실제 내부 commit과 불일치 | F3 리뷰 B |
 | G24 | **크로스-컴포넌트 계약은 유닛 목으로 못 잡음** — F1 로그인 502(BFF snake vs 서버 camel)가 유닛 목 자기완결로 통과했다가 실 e2e에서만 노출. **각 병합 시 전체 e2e 게이트 필수**(프로세스) | 로그인 hotfix 교훈 |
+| G25 | F5 테넌트 삭제 시 청구 원장 소실 — `billing_events.tenant_id` FK가 CASCADE라 미export(pending) 원장이 조용히 소멸. `delete_tenant` 가드 체인(inventory.py)에 pending billing 검사 추가 또는 DEK처럼 RESTRICT 검토 | F5 리뷰 B |
+| G26 | F5 export 후 정정 수단 부재 — void/재집계 API 없음, `ON CONFLICT DO NOTHING`이라 재스윕으로도 못 덮음(정정은 수동 SQL뿐). 내부 청구 정정 플로우는 과금 대상 확정 시 설계 | F5 리뷰 B |
+| G27 | F5 시계 앞점프(VM resume/NTP step) 시 watermark가 미래로 전진해 그 구간 스냅샷 영구 미청구 가능(되감김은 안전). `reported_at < watermark` 도착 행 카운터·경보 없어 누락이 조용함 | F5 리뷰 B |
+| G28 | F5 저심각: 첫 실행/장기 다운 후 전 구간 usage 행 `.all()` 일괄 로드(일 단위 chunk 권장) · `_try_advisory_xact_lock` grpc/server.py·billing.py 중복 정의(DRY) | F5 리뷰 A·B |
 
 ---
 

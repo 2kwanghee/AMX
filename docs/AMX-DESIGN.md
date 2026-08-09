@@ -288,6 +288,25 @@ tenant_deks (
   created_at TIMESTAMPTZ, retired_at TIMESTAMPTZ NULL,
   UNIQUE (tenant_id, version)
 )
+
+-- 내부 청구 outbox (P5 F5, usage_snapshots 원장 기반; 외부 결제 연동 없음)
+billing_events (
+  id UUID PK,
+  tenant_id UUID FK → tenants ON DELETE CASCADE,
+  kind TEXT,                            -- usage_daily
+  period_start, period_end TIMESTAMPTZ, -- 닫힌 UTC 일 경계 [D, D+1)
+  payload JSONB,                        -- account_days · account_ids · server_count · snapshot_count · max_utilization_pct
+  status TEXT DEFAULT 'pending',        -- pending | exported
+  exported_at TIMESTAMPTZ NULL, created_at TIMESTAMPTZ,
+  UNIQUE (tenant_id, kind, period_start),  -- 멱등성 앵커(스윕 ON CONFLICT DO NOTHING)
+  INDEX (tenant_id, status)
+)
+
+billing_cursors (
+  kind TEXT PK,                         -- usage_daily
+  watermark TIMESTAMPTZ,                -- 마지막으로 집계한 닫힌 일의 끝(다음 스윕 시작점)
+  updated_at TIMESTAMPTZ
+)
 ```
 
 **★ 테넌트 격리 불변식 (요구 AMS-7)**

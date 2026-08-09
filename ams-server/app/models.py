@@ -481,3 +481,63 @@ class Alert(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class BillingEvent(Base):
+    """F5 internal billing outbox — one aggregated row per (tenant, closed UTC day).
+
+    Derived from the ``usage_snapshots`` ledger by ``services.billing.sweep_billing``
+    (design note p5 §6). This is an *internal* charging schema; there is no
+    external payment integration. The ``UniqueConstraint(tenant_id, kind,
+    period_start)`` is the idempotency anchor — the sweep re-runs safely and an
+    ``ON CONFLICT DO NOTHING`` insert never duplicates a day.
+    """
+
+    __tablename__ = "billing_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "kind", "period_start",
+            name="uq_billing_events_tenant_kind_period",
+        ),
+        Index("ix_billing_events_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    period_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    exported_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class BillingCursor(Base):
+    """Watermark for the F5 billing sweep — one row per ``kind`` ("usage_daily").
+
+    ``watermark`` is the exclusive end (a UTC day boundary) of the last day the
+    sweep has already aggregated, so the next run starts exactly there.
+    """
+
+    __tablename__ = "billing_cursors"
+
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    watermark: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

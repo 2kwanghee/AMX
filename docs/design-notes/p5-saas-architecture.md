@@ -32,7 +32,7 @@ E3만이 F1을 막음. 나머지 독립. F2는 O9(A1)와 `encrypt_secret` 쓰기
 3. **F2 KMS**: AWS KMS(AWS 배포 시 권장) / Vault Transit(멀티클라우드·온프렘 권장) / 자체(지양 — §7 키분리 약화)
 4. **F2 DEK 로테이션**: lazy 재암호(다음 deliver/O9-push 시, 권장) / 전체 rewrap 배치
 5. **F3 presence 백엔드**: 도입 안 함(권장 MVP, 현 구조 이미 안전) / Redis pub/sub(직접-push 최적화 시)
-6. **F5 과금 대상·스키마**: Stripe metering / 내부 청구 — 데이터 원천은 `usage_snapshots` 원장(권장, C1 유실 회피)
+6. **F5 과금 대상·스키마**: **확정 — 내부 청구.** 데이터 원천 = `usage_snapshots` 원장(reconcile 반영, C1 유실 회피). `billing_events` outbox를 테넌트×닫힌 UTC 일로 집계(멱등 앵커 `UNIQUE(tenant_id,kind,period_start)`), REST list/export만 노출. 외부 결제(Stripe 등) 미연동·proto 무변경.
 
 ## proto/SSOT 영향
 - **proto = F4만**: SetPolicy에 `cooldown_seconds`·`hysteresis_pct` 추가. (F1·F2·F3·F5 proto 무변경 — RBAC은 REST 평면, 봉투암호화는 at-rest, wire는 세션 KEK sealed box로 독립.)
@@ -54,4 +54,4 @@ E3만이 F1을 막음. 나머지 독립. F2는 O9(A1)와 `encrypt_secret` 쓰기
 
 ## 미해결
 - F4 tsamx cooldown/hysteresis config 키 실재 여부 미확인(F4 착수 전 tsamx 소스 확인).
-- F5 과금 대상 사용자 미정.
+- F5 과금 대상 사용자·요금 정책 미정(스키마·집계는 구현 완료; 외부 결제 연동은 도입 시점 재검토).

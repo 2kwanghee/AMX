@@ -35,7 +35,7 @@ from app.db import get_sessionmaker
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
-from app.services import alerts, commands, reconcile
+from app.services import alerts, billing, commands, reconcile
 
 _logger = logging.getLogger("ams.grpc")
 
@@ -1082,6 +1082,18 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("sent-ack sweep iteration failed", exc_info=False)
+        # F5 billing outbox: a third sibling sweep on the same timer aggregates
+        # newly-closed UTC days from the usage_snapshots ledger into
+        # billing_events. Its own advisory lock (…03) and isolated try/except
+        # keep it independent of the two sweeps above.
+        try:
+            created = await asyncio.to_thread(_sweep_billing_once, session_factory)
+            if created:
+                _logger.info("billing sweeper created %d billing event(s)", created)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("billing sweep iteration failed", exc_info=False)
 
 
 # F3 multi-instance: the sweeps below are idempotent, but running them from every
@@ -1118,6 +1130,12 @@ def _sweep_sent_once(
         if not _try_advisory_xact_lock(db, _SENT_SWEEP_LOCK_KEY):
             return [], []
         return commands.sweep_sent_timeouts(db)
+
+
+def _sweep_billing_once(session_factory: sessionmaker[Session]) -> int:
+    # billing.sweep_billing takes its own advisory lock (…03) and commits.
+    with session_factory() as db:
+        return billing.sweep_billing(db)
 
 
 async def serve(port: int = DEFAULT_PORT) -> None:
