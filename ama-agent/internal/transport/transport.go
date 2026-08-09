@@ -26,6 +26,20 @@ const (
 	backoffMax = 30 * time.Second
 )
 
+// errSessionEnded resolves a confirmed send whose event was still queued (or
+// mid-flight) when the session tore down, so the awaiting drain never deadlocks
+// (C1 teardown resolve). The event stays on disk and is retried on reconnect.
+var errSessionEnded = errors.New("transport: session ended before send confirmed")
+
+// sendItem is one queued upstream message. done, when non-nil, is a buffered
+// channel that receives the stream.Send result (or errSessionEnded on teardown):
+// this is the C1 confirmation the outbox waits on before deleting an event.
+// Fire-and-forget messages (usage, acks, register) leave done nil.
+type sendItem struct {
+	msg  *amxv1.AmaMessage
+	done chan error
+}
+
 // Transport-security environment (SSOT §5.4 / §7 in-transit).
 const (
 	// EnvTLSCA points at a PEM bundle of CA certs trusted for the AMS server.
@@ -104,7 +118,7 @@ type Client struct {
 	addr string
 	opts []grpc.DialOption
 
-	sendCh chan *amxv1.AmaMessage
+	sendCh chan sendItem
 	recvCh chan *amxv1.AmsCommand
 
 	// OnConnect, if set, is called after each (re)connect with a fresh stream so
@@ -124,19 +138,19 @@ func Dial(addr string, extra ...grpc.DialOption) *Client {
 	return &Client{
 		addr:   addr,
 		opts:   opts,
-		sendCh: make(chan *amxv1.AmaMessage, 64),
+		sendCh: make(chan sendItem, 64),
 		recvCh: make(chan *amxv1.AmsCommand, 64),
 		closed: make(chan struct{}),
 	}
 }
 
 // Send queues a message for the current stream. It blocks only if the buffer is
-// full; it returns an error after Close.
+// full; it returns an error after Close. Fire-and-forget: no delivery confirmation.
 func (c *Client) Send(msg *amxv1.AmaMessage) error {
 	select {
 	case <-c.closed:
 		return errors.New("transport: closed")
-	case c.sendCh <- msg:
+	case c.sendCh <- sendItem{msg: msg}:
 		return nil
 	}
 }
@@ -149,10 +163,57 @@ func (c *Client) TrySend(msg *amxv1.AmaMessage) bool {
 	select {
 	case <-c.closed:
 		return false
-	case c.sendCh <- msg:
+	case c.sendCh <- sendItem{msg: msg}:
 		return true
 	default:
 		return false
+	}
+}
+
+// SendConfirmed queues msg and returns a channel that yields the eventual
+// stream.Send result: nil once the message is on the wire, or an error (including
+// errSessionEnded on a teardown) if it was not. The single upstream goroutine is
+// the only caller of stream.Send, so ordering and the gRPC "one sender" rule hold.
+// ok is false only after Close. This is the C1 confirmation path for AccountEvents:
+// the outbox deletes an event from disk only when the returned channel yields nil.
+func (c *Client) SendConfirmed(msg *amxv1.AmaMessage) (<-chan error, bool) {
+	// Check closed first: with buffer space free, a bare select would pick the
+	// enqueue and the closed cases at random, letting a send slip in after Close.
+	select {
+	case <-c.closed:
+		return nil, false
+	default:
+	}
+	done := make(chan error, 1)
+	select {
+	case <-c.closed:
+		return nil, false
+	case c.sendCh <- sendItem{msg: msg, done: done}:
+		return done, true
+	}
+}
+
+// resolve delivers err to a confirmed send's waiter. done is buffered (cap 1) and
+// each item is consumed exactly once (by the pump or by the teardown drain), so
+// this never blocks and never double-sends.
+func resolve(it sendItem, err error) {
+	if it.done != nil {
+		it.done <- err
+	}
+}
+
+// drainSendQueue empties any buffered sendItems, failing each confirmed send with
+// cause so no outbox drain deadlocks waiting on a session that has ended. It must
+// run only when no upstream goroutine is pulling sendCh (after the pump exits, or
+// after Run's loop stops), so an item is resolved exactly once.
+func (c *Client) drainSendQueue(cause error) {
+	for {
+		select {
+		case it := <-c.sendCh:
+			resolve(it, cause)
+		default:
+			return
+		}
 	}
 }
 
@@ -170,6 +231,9 @@ func (c *Client) Close() {
 // Run drives connect -> Register (via OnConnect) -> pump, reconnecting with
 // backoff until ctx is done or Close is called. It blocks; run it in a goroutine.
 func (c *Client) Run(ctx context.Context) error {
+	// Once the run loop exits, no session will ever pull sendCh again; resolve any
+	// stragglers so a confirmed send queued during the final gap cannot deadlock.
+	defer c.drainSendQueue(errSessionEnded)
 	backoff := backoffMin
 	for {
 		select {
@@ -224,8 +288,11 @@ func (c *Client) session(ctx context.Context) error {
 	defer cancel()
 
 	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
 	// Downstream: commands -> recvCh.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			cmd, err := stream.Recv()
 			if err != nil {
@@ -241,12 +308,17 @@ func (c *Client) session(ctx context.Context) error {
 			}
 		}
 	}()
-	// Upstream: sendCh -> stream.
+	// Upstream: the sole caller of stream.Send. Each item's confirmation channel is
+	// resolved with the stream.Send result so a confirmed send learns its fate.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			select {
-			case msg := <-c.sendCh:
-				if err := stream.Send(msg); err != nil {
+			case it := <-c.sendCh:
+				err := stream.Send(it.msg)
+				resolve(it, err)
+				if err != nil {
 					errCh <- err
 					return
 				}
@@ -260,12 +332,21 @@ func (c *Client) session(ctx context.Context) error {
 		}
 	}()
 
+	var sessErr error
 	select {
-	case err := <-errCh:
-		return err
+	case sessErr = <-errCh:
 	case <-c.closed:
-		return nil
+		sessErr = nil
 	}
+	// Tear down: stop both goroutines, wait until the upstream pump has stopped
+	// pulling sendCh, then fail any items it left buffered. Ordering matters — the
+	// drain must run only after the pump is gone so each item is resolved once.
+	// This is the C1 teardown-resolve guarantee that keeps the outbox drain from
+	// deadlocking on a session that has died.
+	cancel()
+	wg.Wait()
+	c.drainSendQueue(errSessionEnded)
+	return sessErr
 }
 
 func jitter(d time.Duration) time.Duration {

@@ -210,20 +210,24 @@ func (s *Scheduler) Tick(ctx context.Context) float64 {
 		if beforeEmail != "" {
 			ev.From = &amxv1.AccountRef{Email: beforeEmail}
 		}
-		s.outbox.Enqueue(ev)
+		if err := s.outbox.Enqueue(ev); err != nil {
+			s.logf("scheduler: outbox persist switch event: %v", err)
+		}
 	}
 
 	// All accounts exhausted: exit code 3 (blocked) or the pool summary says so.
 	// Critical — AMS alerts and considers an extra assignment (§6.4).
 	if code == 3 || (pool != nil && pool.GetAllExhausted()) {
-		s.outbox.Enqueue(&amxv1.AccountEvent{
+		if err := s.outbox.Enqueue(&amxv1.AccountEvent{
 			SchemaVersion: 1,
 			AgentId:       s.agentID,
 			EventId:       reporter.NewEventID(),
 			OccurredAt:    timestamppb.New(s.now().UTC()),
 			Kind:          amxv1.AccountEvent_KIND_ALL_EXHAUSTED,
 			PoolSummary:   pool,
-		})
+		}); err != nil {
+			s.logf("scheduler: outbox persist all-exhausted event: %v", err)
+		}
 	}
 
 	if pool != nil {
@@ -280,7 +284,7 @@ func (s *Scheduler) watchQuarantine(ctx context.Context, path string) {
 }
 
 func (s *Scheduler) enqueueQuarantine(email string) {
-	s.outbox.Enqueue(&amxv1.AccountEvent{
+	if err := s.outbox.Enqueue(&amxv1.AccountEvent{
 		SchemaVersion: 1,
 		AgentId:       s.agentID,
 		EventId:       reporter.NewEventID(),
@@ -288,5 +292,7 @@ func (s *Scheduler) enqueueQuarantine(email string) {
 		Kind:          amxv1.AccountEvent_KIND_QUARANTINE,
 		Trigger:       amxv1.AccountEvent_TRIGGER_FAILOVER,
 		From:          &amxv1.AccountRef{Email: email},
-	})
+	}); err != nil {
+		s.logf("scheduler: outbox persist quarantine event: %v", err)
+	}
 }

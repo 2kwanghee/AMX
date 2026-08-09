@@ -82,7 +82,12 @@ func run() error {
 		}
 		return rec.AMSAccountID, rec.AccountUUID, true
 	})
-	outbox := reporter.NewOutbox()
+	// Disk-backed outbox: AccountEvents queued while AMS is unreachable survive an
+	// agent restart (C1 W1) and are deleted only after a confirmed send (C1 W2).
+	outbox, err := reporter.OpenOutbox(stateDir)
+	if err != nil {
+		return err
+	}
 
 	// Engine lock (R3): the single mutex serializing every tsamx mutation
 	// sequence across the scheduler tick and the command handlers (decision 4).
@@ -241,11 +246,12 @@ func run() error {
 	}()
 
 	// Live AccountEvent drain. The scheduler tick and the manual-switch handler
-	// enqueue events to the offline Outbox; OnConnect flushes on reconnect, but a
+	// enqueue events to the Outbox; OnConnect flushes on reconnect, but a
 	// long-lived session also needs a live drain so an at-limit switch reaches AMS
-	// promptly rather than waiting for a reconnect that may not come. TrySend
-	// re-queues (via the error) whenever the buffer is full or disconnected, so
-	// nothing is lost — the next tick or OnConnect retries the remainder.
+	// promptly rather than waiting for a reconnect that may not come. The send is
+	// confirmed: SendConfirmed yields the stream.Send result, and the outbox
+	// deletes an event from disk only on nil (C1 W2). A teardown resolves the wait
+	// with an error, so the event stays on disk and is retried on reconnect.
 	go func() {
 		t := time.NewTicker(eventFlushInterval)
 		defer t.Stop()
@@ -258,10 +264,11 @@ func run() error {
 					continue
 				}
 				_ = outbox.Flush(func(ev *amxv1.AccountEvent) error {
-					if client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Event{Event: ev}}) {
-						return nil
+					done, ok := client.SendConfirmed(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Event{Event: ev}})
+					if !ok {
+						return errOutboxSendUnavailable
 					}
-					return errOutboxSendUnavailable
+					return <-done
 				})
 			}
 		}

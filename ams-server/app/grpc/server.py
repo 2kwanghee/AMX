@@ -1033,6 +1033,24 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("offline sweep iteration failed", exc_info=False)
+        # D2 sent-未ack recovery (recovery-architecture §2): a sibling sweep on the
+        # same timer — a command pushed but never acked is re-queued (idempotent)
+        # or, past the attempt cap, failed with its assignment reverted. Isolated
+        # from the offline sweep above so one failing never suppresses the other.
+        try:
+            requeued, failed = await asyncio.to_thread(
+                _sweep_sent_once, session_factory
+            )
+            if requeued or failed:
+                _logger.info(
+                    "sent-ack sweeper re-queued %d, failed %d command(s)",
+                    len(requeued),
+                    len(failed),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("sent-ack sweep iteration failed", exc_info=False)
 
 
 def _sweep_once(
@@ -1040,6 +1058,13 @@ def _sweep_once(
 ) -> list[uuid.UUID]:
     with session_factory() as db:
         return alerts.sweep_offline(db, stale_after_seconds=stale_after)
+
+
+def _sweep_sent_once(
+    session_factory: sessionmaker[Session],
+) -> tuple[list[str], list[str]]:
+    with session_factory() as db:
+        return commands.sweep_sent_timeouts(db)
 
 
 async def serve(port: int = DEFAULT_PORT) -> None:

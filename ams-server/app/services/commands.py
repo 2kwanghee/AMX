@@ -10,8 +10,9 @@ agent's ack.
 
 from __future__ import annotations
 
+import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +21,15 @@ from app.core import crypto
 from app.core.errors import conflict
 from app.models import Account, AgentCommand, Assignment, Server
 from app.services import inventory
+
+# D2 sent-未ack recovery (recovery-architecture §2). A command the poll loop
+# pushed but the agent never acked stays ``sent`` forever, stranding its
+# assignment in delivering/recalling. The sent-timeout sweeper re-queues it (same
+# command_id, idempotent) up to MAX_SEND_ATTEMPTS, then fails it and reverts the
+# assignment to a re-issuable resting state. Timeout is 2–3× the AMA heartbeat
+# (default 90s = 3×30s) so an ordinary in-flight ack is never mistaken for a loss.
+SENT_ACK_TIMEOUT_SECONDS = float(os.environ.get("AMX_SENT_ACK_TIMEOUT", "90"))
+MAX_SEND_ATTEMPTS = int(os.environ.get("AMX_MAX_SEND_ATTEMPTS", "5"))
 
 
 def _now() -> datetime:
@@ -111,7 +121,17 @@ def request_recall(
     db: Session, tenant_id: uuid.UUID, assignment_id: uuid.UUID
 ) -> Assignment:
     assignment = inventory.get_assignment(db, tenant_id, assignment_id)
-    if assignment.state not in ("delivering", "active", "inactive", "quarantined"):
+    # D1 manual escape hatch (recovery-architecture §1): a settled recalling
+    # (ack lost, pending_command_id NULL) is a stranded recall an operator must be
+    # able to re-arm. An in-flight recalling (pending_command_id set) stays
+    # rejected — its command is still live.
+    settled_recalling = (
+        assignment.state == "recalling" and assignment.pending_command_id is None
+    )
+    if (
+        assignment.state not in ("delivering", "active", "inactive", "quarantined")
+        and not settled_recalling
+    ):
         raise conflict(
             "assignment.not_recallable",
             f"recall requires an installed assignment; state is '{assignment.state}'.",
@@ -319,3 +339,95 @@ def mark_sent(db: Session, command_id: str) -> None:
         command.sent_at = _now()
         command.updated_at = _now()
         db.commit()
+
+
+# -- D2 sent-未ack recovery ----------------------------------------------------
+def sweep_sent_timeouts(
+    db: Session,
+    *,
+    timeout_seconds: float = SENT_ACK_TIMEOUT_SECONDS,
+    max_attempts: int = MAX_SEND_ATTEMPTS,
+) -> tuple[list[str], list[str]]:
+    """Re-queue or fail commands stuck in ``sent`` past the ack timeout.
+
+    A command the poll loop pushed (``mark_sent``) but the agent never acked ages
+    silently: ``fetch_queued`` only re-sends ``queued`` rows, so a ``sent`` row is
+    never retried and its assignment stays delivering/recalling forever
+    (recovery-architecture §2). This sweep, a sibling of the offline sweeper (no
+    new timer), closes that gap:
+
+    * ``send_attempts < max_attempts`` -> ``sent`` back to ``queued`` (``sent_at``
+      cleared, ``send_attempts`` incremented). The command_id is unchanged, so the
+      re-send is idempotent: the agent dedupes on it and re-acks CONVERGED.
+    * otherwise -> ``failed``, and the assignment is reverted to a resting state so
+      it can be re-issued (deliver -> pending; recall -> settled recalling for the
+      D1 path; activate/deactivate -> clear the pending marker; server-scoped and
+      switch_now -> marked only, healed by the next session's re-assertion).
+
+    No contention with reconcile-on-report: reconcile acts only on resting-state
+    assignments (active/inactive/quarantined/detached) while every command swept
+    here belongs to an in-flight assignment (delivering/recalling) or is
+    server-scoped, so the two never move the same row. The caller need not commit —
+    this commits its own transaction. Returns ``(requeued_ids, failed_ids)``.
+    """
+    cutoff = _now() - timedelta(seconds=timeout_seconds)
+    stuck = db.scalars(
+        select(AgentCommand).where(
+            AgentCommand.status == "sent",
+            AgentCommand.sent_at.is_not(None),
+            AgentCommand.sent_at < cutoff,
+        )
+    ).all()
+    requeued: list[str] = []
+    failed: list[str] = []
+    for command in stuck:
+        if command.send_attempts < max_attempts:
+            command.status = "queued"
+            command.sent_at = None
+            command.send_attempts += 1
+            command.updated_at = _now()
+            requeued.append(command.command_id)
+        else:
+            command.status = "failed"
+            command.detail = "sent_ack_timeout"
+            command.updated_at = _now()
+            _revert_assignment_on_send_failure(db, command)
+            failed.append(command.command_id)
+    db.commit()
+    return requeued, failed
+
+
+def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> None:
+    """Revert the assignment of a permanently-failed ``sent`` command.
+
+    Mirrors the DIVERGED/REJECTED ack handling in ``reconcile.apply_ack``: only
+    the assignment still pointing at this command (``pending_command_id`` match) is
+    touched, so a newer command is never clobbered. deliver reverts to ``pending``;
+    recall is left ``recalling`` with the pending marker cleared — the settled,
+    non-in-flight state the D1 reconcile/REST recall path recovers; activate/
+    deactivate keep their resting state and only drop the marker. Server-scoped
+    commands (assignment_id NULL) and switch_now (never sets a pending marker)
+    revert nothing — marking the command ``failed`` is enough, and a session
+    re-assertion re-applies server-scoped policy on the next connect.
+    """
+    if command.assignment_id is None:
+        return
+    assignment = db.scalar(
+        select(Assignment).where(
+            Assignment.id == command.assignment_id,
+            Assignment.tenant_id == command.tenant_id,
+        )
+    )
+    if assignment is None:
+        return
+    if assignment.pending_command_id != command.command_id:
+        return
+    assignment.last_error = "sent_ack_timeout"
+    assignment.pending_command_id = None
+    if command.command_type == "deliver":
+        assignment.state = "pending"
+    # recall: leave state 'recalling' (pending marker now NULL) -> settled recalling
+    #   the D1 path re-recalls or settles to detached.
+    # activate/deactivate/recover: leave the resting state (inactive/active/
+    #   quarantined); dropping the marker re-opens it to a fresh command.
+    assignment.updated_at = _now()
