@@ -114,3 +114,56 @@ lock 파일은 credential 파일과 **분리**되어 있어 claude가 절대 건
   보조**라는 역할 분담이 설계 결론이다.
 - **튜닝**: 래퍼 대기 상한은 `AMX_DELIVER_WAIT`(초, 기본 5), AMA 측 상한은
   `ExecBridge.LockMaxWait`(기본 5s)로 조정한다. 0이면 기본값.
+
+## 7. 진입점 강제 (B1) — 래퍼 미경유 직접 실행 차단
+
+alias(§4)는 대화형 셸에서만 확장된다. 비대화형 셸·`sh -c`·cron·systemd
+`ExecStart`은 alias를 보지 못하므로 ClickEye webhook 같은 배치 진입점이 래퍼를
+조용히 우회한다. 그래서 배포에서는 **PATH 셰도잉**으로 강제한다: 실제 `claude`보다
+PATH에서 앞서는 bin 디렉터리(기본 `/usr/local/bin`)에 `claude`라는 이름의 **shim**을
+설치해, 셸 상호작용성과 무관하게 `execvp`/`command -v`가 shim을 먼저 고르게 한다.
+shim은 `AMX_CLAUDE_BIN=<실제 claude>`를 export하고 `amx-claude`를 exec한다(래퍼가
+같은 이름의 shim으로 재귀하지 않게). 실제 바이너리는 건드리지 않아(rename 안 함)
+Claude Code 자체 업데이트에 투명하다.
+
+### 설치
+```sh
+bash deploy/install-runner-guard.sh          # 기본 /usr/local/bin
+GUARD_BIN_DIR=/opt/bin bash deploy/install-runner-guard.sh   # 설치 위치 변경
+```
+멱등(재실행 안전)·fail-loud. 실제 `claude` 미발견, guard 디렉터리가 PATH에서 실제
+claude보다 앞서지 않음(강제가 무효가 됨), 쓰기 불가 시 비0으로 중단한다. PATH 순서
+경고를 무시해야 할 특수 상황은 `GUARD_ALLOW_UNORDERED=1`로 우회한다.
+
+### 검증 (설치 후 1회 + 주기 점검 겸용)
+```sh
+AMA_USER=ama bash deploy/verify-runner-guard.sh
+# 또는 명시 경로:
+AMA_CLAUDE_CONFIG_DIR=/home/ama/.claude bash deploy/verify-runner-guard.sh
+```
+(a) `claude`가 래퍼(shim/amx-claude)로 해석되는지, (b) 러너 계정과 AMA 서비스
+계정이 **같은 `~/.claude`**(`CLAUDE_CONFIG_DIR`)를 보는지를 판정한다. 둘 다 성립해야
+종료코드 0, 아니면 비0과 `[FAIL]` 진단. (b)는 AMA 계정 정보가 필요하므로
+`AMA_USER` 또는 `AMA_CLAUDE_CONFIG_DIR` 중 하나를 반드시 준다. cron/systemd 타이머로
+주기 실행해 드리프트(다른 HOME·컨테이너 마운트·stray `CLAUDE_CONFIG_DIR`, PATH 앞
+다른 claude 재등장)를 감시한다.
+
+### 셀프테스트
+```sh
+bash deploy/test-runner-guard.sh   # docker·root 불필요
+```
+임시 HOME·가짜 claude로 강제 성립/우회 검출을 각각 확인한다.
+
+### cron/systemd 주의
+guard 디렉터리가 해당 실행 환경의 PATH에 있어야 shim이 선택된다. systemd 기본
+PATH에는 `/usr/local/bin`이 포함되지만, cron 기본 PATH(`/usr/bin:/bin`)에는 없으므로
+crontab에 `PATH=/usr/local/bin:/usr/bin:/bin` 줄을 추가하거나 guard를 cron PATH에
+있는 디렉터리(`/usr/bin` 등, `GUARD_BIN_DIR`)에 설치한다. 설치 후 그 환경에서
+`verify-runner-guard.sh`로 실제 강제를 확인한다.
+
+### 잔여 우회 경로 (설계상 한계)
+shim은 `claude`라는 **이름 해석**만 강제한다. 실제 바이너리를 절대경로로 직접
+호출하거나(`/path/to/real/claude`), guard보다 앞에 다른 `claude`를 심거나, PATH에서
+guard 디렉터리를 제거하면 우회된다. 이는 이름 기반 강제의 본질적 한계이며,
+주기 `verify`가 (a)(b) 드리프트를 감시하는 이유다. 이 창의 잔여 노출은 층 1(B1a
+sub-second·torn-free)이 방어한다.
