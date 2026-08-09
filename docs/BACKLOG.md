@@ -82,6 +82,9 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G16 | `mask_secret` 4hex(16bit) 교차 테넌트 상관 핸들 — 자격증명 노출 아님, 수용 명시 | F1 ADVERSARY (SaaS) |
 | G17 | 자기 비활성 미방지 — global-admin이 자신을 disable/delete 가능(마지막 1인 rail만 방어). `Principal`에 admin_id 없어 요청자 식별 불가 → S2a 세션 로직 확장 필요. 루트 토큰이 최종 탈출구라 lockout 불가 | F1 S2b/c 리뷰 B |
 | G18 | `ams-web` `verifyNav` dead code(집행은 ams-server 전담) + `create_admin` TOCTOU 오류코드 오표기(동시 tenant 삭제 시 FK위반이 duplicate_email로, 정상경로는 has_admins 가드가 차단, 협소) | F1 S2b/c 리뷰 |
+| G19 | F2 KMS 어댑터(aws-kms/vault) 미구현 — 벤더 미정 스텁, provider_id/key_id 배관 완비. **local→KMS 혼재 시 기존 DEK 재래핑 스크립트 선행 필요**(신규 DEK만 provider swap) | F2 (사용자 KMS 결정 대기) |
+| G20 | F2 로컬 KEK MVP는 단일 env 시크릿 — 격리·구조·KMS-ready는 즉시 이득이나 기밀 강화는 실 KMS 도입 시(§7 정직성) | F2 |
+| G21 | F2 저심각: create_tenant 2-commit 비원자(DEK 실패 시 fail-loud) · O9 encrypt_secret try/except 밖(DEK 부재 시 스트림 드롭, 가용성 엣지) · `crypto._aad`·`kek._tenant_aad` 중복정의(DRY) | F2 리뷰 B |
 
 ---
 
