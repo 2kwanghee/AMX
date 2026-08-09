@@ -95,6 +95,110 @@ tenant로 바인딩한다. 따라서:
    고정 권장). mTLS 클라이언트 인증서는 공인 CA로 발급하지 않으므로, mTLS가
    필요하면 클라이언트 측만 내부 CA를 별도로 쓴다.
 
+## 3.5 스크립트 기반 발급 런북 (`deploy/tls/`)
+
+내재화(self-signed) 배포용 발급·검증 스크립트가 `deploy/tls/`에 있다. openssl만
+필요하고 root·외부 네트워크는 불필요하다. 발급물은 §3-2(자체서명 CA)를 그대로
+자동화한 것이며 EC P-256 키를 쓴다.
+
+| 스크립트 | 역할 |
+|---|---|
+| `make-ca.sh` | 사설 CA(`ca.key`+`ca.crt`) 생성 |
+| `issue-cert.sh` | CA로 서버 cert 발급(SAN 필수), `--client`로 mTLS 클라이언트 cert 발급 |
+| `verify-tls.sh` | 발급물 스모크 테스트 — (a) TLS 핸드셰이크 성립 (b) AMS fail-closed 확인 |
+| `test-tls-scripts.sh` | 스크립트 셀프테스트(임시 디렉터리, 체인·SAN·EKU·fail-loud 검증) |
+
+**멱등 아님(의도적):** `ca.key`/서버 cert가 이미 있으면 스크립트는 덮어쓰지 않고
+**fail-loud**로 중단한다(CA를 조용히 교체하면 그 CA가 서명한 모든 cert와 이를
+신뢰하는 모든 AMA가 고아가 되므로).
+
+### (1) 발급
+
+```
+# CA 1회 생성 (기본 유효기간 3650일)
+deploy/tls/make-ca.sh --cn amx-internal-ca --out /etc/amx/tls
+
+# AMS 서버 cert — SAN에 AMA가 다이얼하는 호스트/IP를 반드시 포함 (기본 365일)
+deploy/tls/issue-cert.sh --cn ams.internal \
+  --dns ams.internal --ip 10.0.0.10 \
+  --ca-cert /etc/amx/tls/ca.crt --ca-key /etc/amx/tls/ca.key \
+  --out /etc/amx/tls
+# -> /etc/amx/tls/server.crt, server.key
+
+# (mTLS 시) 클라이언트 cert — extendedKeyUsage=clientAuth 로 발급
+deploy/tls/issue-cert.sh --client --cn amx-agent-01 \
+  --ca-cert /etc/amx/tls/ca.crt --ca-key /etc/amx/tls/ca.key \
+  --out /etc/amx/tls
+# -> /etc/amx/tls/client.crt, client.key
+```
+
+`--days`로 유효기간, `--name`으로 출력 파일 접두어(다중 서버/에이전트)를 지정한다.
+
+### (2) 배포 — 환경변수 배선(§2와 일치)
+
+**AMS(서버):** `server.crt`/`server.key`를 서버 호스트에 배치하고
+
+```
+AMX_GRPC_TLS_CERT=/etc/amx/tls/server.crt
+AMX_GRPC_TLS_KEY=/etc/amx/tls/server.key
+# (mTLS) 클라이언트 cert를 이 CA로 검증·요구:
+AMX_GRPC_TLS_CA=/etc/amx/tls/ca.crt
+```
+
+**AMA(에이전트):** `ca.crt`만 배포하면 one-way TLS가 성립한다(개인키·서버 cert는
+에이전트로 보내지 않는다).
+
+```
+AMX_AMS_TLS_CA=/etc/amx/tls/ca.crt
+# SAN이 다이얼 호스트와 다르면 검증 이름 override:
+AMX_AMS_TLS_SERVER_NAME=ams.internal
+# (mTLS) 클라이언트 cert 제시 — 둘 다 설정하거나 둘 다 비운다(한쪽만이면 기동 거부):
+AMX_AMS_TLS_CLIENT_CERT=/etc/amx/tls/client.crt
+AMX_AMS_TLS_CLIENT_KEY=/etc/amx/tls/client.key
+```
+
+### (3) 검증
+
+```
+# 발급물이 TLS로 성립하는지 + AMS가 평문 기동을 거부하는지
+deploy/tls/verify-tls.sh --ca /etc/amx/tls/ca.crt \
+  --cert /etc/amx/tls/server.crt --key /etc/amx/tls/server.key \
+  --server-name ams.internal
+
+# 이미 기동 중인 AMS에 붙어 확인 (loopback s_server 대신 실엔드포인트)
+deploy/tls/verify-tls.sh --ca /etc/amx/tls/ca.crt --endpoint ams.internal:50051
+```
+
+`verify-tls.sh`의 (a)는 발급 cert로 TLS 핸드셰이크가 성립하고 CA로 검증되는지,
+(b)는 `AMX_GRPC_ALLOW_INSECURE` 미설정 + cert 미제공 시 AMS가 **기동을 거부**함을
+확인한다. (b)는 AMS 실기동이 무거우므로 `ams-server`의 `configure_port` 단위
+검증으로 수행한다(ams-server Python 환경에서 실행해야 하며, 환경이 없으면 명확한
+안내와 함께 건너뛴다). 스크립트 자체의 회귀는 `deploy/tls/test-tls-scripts.sh`로
+검증한다(root·네트워크 불필요).
+
+### (4) mTLS 구성 예시와 근거
+
+mTLS는 전송 계층에서 **클라이언트(AMA)도** 인증한다(§1). 근거는 §7 위협 경계다:
+세션 KEK를 봉인하는 sealed box는 **익명 봉투**라 능동 MITM이 `Register`의
+`agent_public_key`를 자기 것으로 치환하면 KEK를 자기 앞으로 받아갈 수 있고, 이
+치환을 막는 것은 전송 계층 신원 검증(특히 **mTLS**)이다. 폐쇄망·규제 배포에서
+TLS 종단을 화이트리스트로 좁히려면 켠다.
+
+```
+# AMS: CA를 추가 설정하면 require_client_auth=True 로 클라이언트 cert 필수
+AMX_GRPC_TLS_CERT=/etc/amx/tls/server.crt
+AMX_GRPC_TLS_KEY=/etc/amx/tls/server.key
+AMX_GRPC_TLS_CA=/etc/amx/tls/ca.crt
+# AMA: CA + 클라이언트 cert/key 를 함께 제시
+AMX_AMS_TLS_CA=/etc/amx/tls/ca.crt
+AMX_AMS_TLS_CLIENT_CERT=/etc/amx/tls/client.crt
+AMX_AMS_TLS_CLIENT_KEY=/etc/amx/tls/client.key
+```
+
+한쪽만 mTLS면 연결이 거부된다(§2 주의). 갱신은 §4를 따른다 — 클라이언트 cert는
+`issue-cert.sh --client`로 재발급(기존 파일과 다른 `--name` 또는 다른 `--out`으로
+발급한 뒤 교체)한다.
+
 ## 4. 로테이션 절차
 
 **서버 인증서(AMS):** 새 cert/key를 배포 경로에 배치 → AMS 프로세스를
