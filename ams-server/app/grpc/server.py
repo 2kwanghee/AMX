@@ -438,7 +438,9 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         )
         if ctype == "deliver":
             cmd.deliver.CopyFrom(
-                self._build_deliver(account, assignment, account_ref, row, agent_id, kek, key_id)
+                self._build_deliver(
+                    db, account, assignment, account_ref, row, agent_id, kek, key_id
+                )
             )
         elif ctype == "recall":
             cmd.recall.CopyFrom(
@@ -510,6 +512,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
 
     def _build_deliver(
         self,
+        db: Session,
         account: Account,
         assignment: Assignment,
         account_ref: pb.AccountRef,
@@ -518,10 +521,14 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         kek: bytes,
         key_id: str,
     ) -> pb.DeliverAccount:
-        # Open the at-rest Fernet envelope, immediately re-seal under the session
-        # KEK bound to (account, agent). Plaintext exists only between these two
-        # calls and is never logged.
-        plaintext = crypto.decrypt_secret(account.encrypted_secret or "")
+        # Open the at-rest envelope (tenant DEK v2 or legacy Fernet, auto-detected
+        # by the stored tag), immediately re-seal under the session KEK bound to
+        # (account, agent). Read-only w.r.t. at-rest storage — no re-encrypt here,
+        # so it never contends with O9 monotonicity. Plaintext exists only between
+        # these two calls and is never logged.
+        plaintext = crypto.decrypt_secret(
+            account.encrypted_secret or "", tenant_id=account.tenant_id, db=db
+        )
         ciphertext, nonce = signing.seal_credential(
             kek, plaintext.encode(), ams_account_id=str(account.id), agent_id=agent_id
         )
@@ -892,7 +899,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 del plaintext
             # Re-encrypt under the at-rest Fernet key and drop the plaintext before
             # any DB round-trip.
-            new_secret = crypto.encrypt_secret(secret)
+            new_secret = crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db)
             new_mask = crypto.mask_secret(account.credential_type, secret)
             del secret
 

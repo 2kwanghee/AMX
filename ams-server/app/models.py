@@ -20,6 +20,8 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -80,6 +82,42 @@ class Tenant(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TenantDek(Base):
+    """Per-tenant data-encryption key, wrapped by a KEK provider (F2, §5.1).
+
+    Each row is one version of a tenant's DEK. The DEK never appears in
+    plaintext at rest: ``wrapped_dek`` is the DEK sealed by the KEK provider
+    named in ``kek_provider`` (local AES-256-GCM MVP, or a KMS once a vendor is
+    chosen), with the tenant_id bound as AAD so a wrapped DEK cannot be
+    unwrapped under another tenant. The active DEK is the highest ``version``
+    whose ``retired_at`` is NULL; older versions are retained so ciphertext
+    written under them (v2 tag carries the version) still opens after rotation.
+    """
+
+    __tablename__ = "tenant_deks"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "version", name="uq_tenant_deks_tenant_version"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    wrapped_dek: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    kek_provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    kek_key_id: Mapped[str] = mapped_column(Text, nullable=False)
+    algorithm: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="AES-256-GCM"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

@@ -13,13 +13,22 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core import crypto
+from app.core import crypto, kek
 from app.core.errors import bad_request, conflict, not_found
-from app.models import Account, Admin, Alert, Assignment, Server, Tenant, UsageSnapshot
+from app.models import (
+    Account,
+    Admin,
+    Alert,
+    Assignment,
+    Server,
+    Tenant,
+    TenantDek,
+    UsageSnapshot,
+)
 
 _ACTIVE_ASSIGNMENT_STATES = (
     "pending",
@@ -45,6 +54,11 @@ def create_tenant(db: Session, name: str) -> Tenant:
         db.rollback()
         raise conflict("tenant.duplicate_name", f"A tenant named {name!r} already exists.") from exc
     db.refresh(tenant)
+    # Provision the tenant's v1 DEK now so the first credential write never races
+    # a missing key (F2, §3). Done regardless of AMX_ENVELOPE_WRITE — the key is
+    # cheap to hold ready and lets the flag flip without a per-tenant backfill.
+    kek.create_tenant_dek(db, tenant.id, version=1)
+    db.commit()
     return tenant
 
 
@@ -118,8 +132,14 @@ def delete_tenant(db: Session, tenant_id: uuid.UUID) -> None:
     ) or 0
     if admins:
         raise conflict("tenant.has_admins", "Remove the tenant's admins first.")
+    # The tenant's DEKs are FK RESTRICT (an isolation anchor, not a cascade — a
+    # tenant with live accounts must never lose its keys out from under their
+    # ciphertext). By here accounts and servers are already gone, so no
+    # ciphertext references these keys and they can be dropped explicitly.
+    db.execute(delete(TenantDek).where(TenantDek.tenant_id == tenant_id))
     db.delete(tenant)
     db.commit()
+    kek.invalidate_dek_cache(tenant_id)
 
 
 # -- Accounts -----------------------------------------------------------------
@@ -136,7 +156,7 @@ def create_account(
         tenant_id=tenant_id,
         email=email,
         credential_type=credential_type,
-        encrypted_secret=crypto.encrypt_secret(secret),
+        encrypted_secret=crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db),
         secret_masked=crypto.mask_secret(credential_type, secret),
         status="available",
     )
@@ -220,7 +240,7 @@ def update_account(
     if status is not None:
         account.status = status
     if secret is not None:
-        account.encrypted_secret = crypto.encrypt_secret(secret)
+        account.encrypted_secret = crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db)
         account.secret_masked = crypto.mask_secret(account.credential_type, secret)
         _apply_credential_metadata(account, secret)
     account.updated_at = _now()
