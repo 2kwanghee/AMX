@@ -210,12 +210,28 @@ func (f *Fake) ConfigSetThreshold(_ context.Context, pct float64) error {
 	return nil
 }
 
-// ConfigSet records the injected value for the given autoswitch key.
+// validAutoswitchKeys mirrors the numeric autoswitch settings tsamx actually
+// accepts (settings.py SETTING_SPECS json_key, camelCase). The real
+// `tsamx config set autoswitch.<key>` rejects any other key with a non-zero
+// exit, so the Fake rejects them too — otherwise a snake_case or typo'd key
+// (the F4 regression: "cooldown_seconds" instead of "cooldownSeconds") passes
+// the unit tests but every SetPolicy diverges in production.
+var validAutoswitchKeys = map[string]bool{
+	"threshold":       true,
+	"cooldownSeconds": true,
+	"hysteresisPct":   true,
+}
+
+// ConfigSet records the injected value for the given autoswitch key, rejecting
+// any key tsamx would not accept (contract check; see validAutoswitchKeys).
 func (f *Fake) ConfigSet(_ context.Context, key string, value float64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.ConfigErr != nil {
 		return f.ConfigErr
+	}
+	if !validAutoswitchKeys[key] {
+		return fmt.Errorf("tsamx: unknown setting autoswitch.%s", key)
 	}
 	f.log("config set autoswitch.%s %g", key, value)
 	f.Configs[key] = value

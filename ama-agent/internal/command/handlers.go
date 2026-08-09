@@ -394,15 +394,17 @@ func (h *Handler) handleSetPolicy(ctx context.Context, cmd *amxv1.AmsCommand, sp
 	// F4 (O4-B) full central policy. cooldown_seconds/hysteresis_pct use a
 	// negative "unset" sentinel — 0 is a real value (proto SetPolicy 3/4), unlike
 	// threshold above where 0 means "keep the local default". So inject on >= 0.
+	// Keys are tsamx's camelCase config names (settings.py json_key), NOT the
+	// proto's snake_case — `tsamx config set autoswitch.cooldown_seconds` errors.
 	if cd := sp.GetCooldownSeconds(); cd >= 0 {
-		if err := h.bridge.ConfigSet(ctx, "cooldown_seconds", cd); err != nil {
+		if err := h.bridge.ConfigSet(ctx, "cooldownSeconds", cd); err != nil {
 			out := diverged(ack, "tsamx_config", err)
 			h.record(out, "set_policy", "", "")
 			return out
 		}
 	}
 	if hy := sp.GetHysteresisPct(); hy >= 0 {
-		if err := h.bridge.ConfigSet(ctx, "hysteresis_pct", hy); err != nil {
+		if err := h.bridge.ConfigSet(ctx, "hysteresisPct", hy); err != nil {
 			out := diverged(ack, "tsamx_config", err)
 			h.record(out, "set_policy", "", "")
 			return out
