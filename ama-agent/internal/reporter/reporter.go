@@ -36,6 +36,12 @@ type Reporter struct {
 	agentID string
 	bridge  tsamx.Bridge
 	now     func() time.Time
+	// resolveID maps a live account email to its AMS identity from the manifest.
+	// tsamx knows an account only by email, but reconcile-on-report (AMS §3) keys
+	// drift on ams_account_id, so a report that omits it reads as "account absent"
+	// and triggers an endless redelivery — which rewrites the live credential file
+	// and defeats the O9 re-sync. nil leaves the report email-only (unit tests).
+	resolveID func(email string) (amsAccountID, accountUUID string, ok bool)
 }
 
 // New returns a Reporter.
@@ -44,6 +50,13 @@ func New(agentID string, bridge tsamx.Bridge, now func() time.Time) *Reporter {
 		now = time.Now
 	}
 	return &Reporter{agentID: agentID, bridge: bridge, now: now}
+}
+
+// SetIDResolver installs the manifest lookup that stamps ams_account_id (and the
+// Claude account UUID) onto each reported account, so AMS can match the report to
+// its assignment. Set once at wiring time before the report ticker starts.
+func (r *Reporter) SetIDResolver(f func(email string) (amsAccountID, accountUUID string, ok bool)) {
+	r.resolveID = f
 }
 
 // BuildUsageReport reads the tsamx cache and projects it onto a UsageReport.
@@ -66,6 +79,17 @@ func (r *Reporter) BuildUsageReport(ctx context.Context, trigger amxv1.UsageRepo
 	for _, row := range list.Accounts {
 		total++
 		au := accountUsage(row)
+		// Stamp the AMS identity so reconcile-on-report can match this account to
+		// its assignment; without it the account reads as absent and AMS redelivers
+		// (clobbering a locally rotated credential the O9 re-sync must observe).
+		if r.resolveID != nil {
+			if amsID, accUUID, ok := r.resolveID(row.Email); ok {
+				au.Account.AmsAccountId = amsID
+				if accUUID != "" {
+					au.Account.AccountUuid = accUUID
+				}
+			}
+		}
 		if row.Active {
 			rep.ActiveAccount = au.GetAccount()
 		}
