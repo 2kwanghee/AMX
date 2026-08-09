@@ -141,6 +141,12 @@ AMX/
 
 ## 5. 사용 방법
 
+> **한 번에 켜기:** `bash deploy/fullstack-run.sh up all --insecure-grpc` — DB·서버(REST+gRPC)·웹을 한 번에 띄웁니다.
+> 처음부터 끝까지(노트북 에이전트 연결·실계정 왕복 포함) 따라 하는 절차는 **`docs/DEV-TEST-GUIDE.md`** 에 있습니다.
+>
+> **주의:** 관리자 화면(ams-web)은 개발 모드(`next dev`)로 뜨지 않습니다 — 보안정책(CSP)이 `next dev`가 요구하는
+> 스크립트 실행을 막아 화면이 죽습니다. 반드시 **운영 빌드**(`npm run build && npm start`)로 띄우세요. 위 스크립트는 자동으로 그렇게 합니다.
+
 ### 개발 환경에서 시험 돌리기
 
 ```sh
@@ -164,7 +170,7 @@ cd ams-server
 # 필요한 환경 변수: 데이터베이스 주소, 암호화 키, 관리자 토큰
 # → 목록과 의미는 app/config.py 에 주석과 함께 정리되어 있음
 uv run alembic upgrade head        # 데이터베이스 표 만들기/갱신
-uv run python -m app.main          # 웹 API 서버
+uv run python -m uvicorn app.main:create_app --factory --port 8080   # 웹 API 서버
 uv run python -m app.grpc.server   # 에이전트 통신 서버
 ```
 
@@ -172,8 +178,10 @@ uv run python -m app.grpc.server   # 에이전트 통신 서버
 
 ```sh
 cd ams-web
-cp .env.example .env.local   # 중앙 서버 주소 등 기입
-npm run dev                  # http://localhost:3000
+cp .env.example .env.local          # 중앙 서버 주소 등 기입
+npm run build && npm start          # http://localhost:3000
+# 주의: `npm run dev`(개발 모드)는 보안 정책(CSP) 때문에 화면이 동작하지 않는다.
+#       반드시 위처럼 운영 빌드로 실행할 것.
 ```
 
 로그인 후 대시보드에서: 계정 등록(OAuth 등록 플로우) → 서버 등록(등록 토큰 발급)

@@ -1,3 +1,7 @@
+# ── AMX 개발 스택 (deploy/fullstack-run.sh · agent-run.sh) ────
+.amx-dev/
+.amx-agent/
+
 # ── Python (tsamx, ams-server) ──────────────────────────────
 __pycache__/
 *.py[cod]
