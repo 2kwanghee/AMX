@@ -58,7 +58,8 @@ unwrap DEK를 (tenant_id, version) 키로 in-process 캐시(TTL+max). 로테이�
 - KMS 벤더 미정: 어댑터 스텁, provider_id/key_id 배관 완비.
 - O9 경합: 단일 초크포인트 + 단조 WHERE 불변으로 해소(DEK가 단조성 미접촉).
 - 로컬 KEK 한계(정직): 봉투구조·테넌트 DEK 격리·KMS-ready 획득하나 MVP 로컬 KEK는 단일 env 시크릿이라 기밀 강화는 실 KMS 도입 시. 격리·구조가 이득.
-- 롤백: 쓰기 플래그 경계. DEK 로테이션 배치: 후속(lazy 기본).
+- **롤백 이중성(리뷰 반영)**: 플래그 on→off는 **신 코드 유지 시에만** 안전(v2 자동판별 읽기). **코드 롤백**(F2 이전)이나 **`0008` downgrade**는 v2 판독 불가 → **v2→Fernet 역-rewrap(`rewrap_secrets.py --reverse`) 선행 필수**; downgrade는 v2 존재 시 refuse 가드. **rewrap↔O9 경합**: 배치 rewrap은 CAS UPDATE(`WHERE encrypted_secret=:old`)로 O9 lost-update(stale 부활) 방지. DEK 로테이션 배치: 후속(lazy 기본).
+- **provider 디스패치**: `_unwrap_cached`가 `tenant_deks.kek_provider` 존중. local→KMS 혼재는 기존 DEK 재래핑(후속 스크립트) 선행 — §2 "provider swap"은 신규 DEK부터.
 - [발견물] mask_secret 미솔트 — 테넌트 DEK에서 salt 파생 가능하나 범위 밖.
 
 ## proto/SSOT

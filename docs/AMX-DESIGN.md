@@ -220,7 +220,7 @@ accounts (
   tenant_id UUID FK → tenants,
   email TEXT,                          -- tsamx 매핑 키 (slot 아님, §2.4-3)
   credential_type TEXT,                -- oauth | api_key  (setup_token 폐기, D3)
-  encrypted_secret TEXT,               -- credential 세트 JSON 봉투 전체를 Fernet(AMX_ENCRYPTION_KEY)로 암호화 (§5.5의 access+refresh+expiresAt+scopes+계정 메타 일체)
+  encrypted_secret TEXT,               -- credential 세트 JSON 봉투(§5.5 access+refresh+expiresAt+scopes+계정 메타). 봉투암호화(F2): `v2:{dek_ver}:{nonce}:{ct}` = 테넌트 DEK로 AES-256-GCM(AAD=tenant_id), 레거시는 접두 없는 Fernet(전환 병행). §7
   status TEXT,                         -- available | assigned | disabled | quarantined
   last_switched_at TIMESTAMPTZ,
   UNIQUE (id, tenant_id)               -- ★ 격리 앵커
@@ -274,6 +274,19 @@ admin_sessions (
   admin_id UUID FK → admins ON DELETE CASCADE,
   token_hash TEXT UNIQUE,              -- sha256(raw); raw는 발급 시 1회만 반환
   expires_at TIMESTAMPTZ
+)
+
+-- 봉투암호화 DEK (P5 F2, §7)
+tenant_deks (
+  id UUID PK,
+  tenant_id UUID FK → tenants ON DELETE RESTRICT,
+  version INT,                         -- lazy 재암호로 구/신 버전 공존; 활성 = retired_at NULL 중 max
+  wrapped_dek BYTEA,                   -- DEK를 KEK provider로 래핑(AAD=tenant_id)
+  kek_provider TEXT,                   -- local | aws-kms | vault
+  kek_key_id TEXT,                     -- provider별 키 식별자(KMS ARN 등)
+  algorithm TEXT DEFAULT 'AES-256-GCM',
+  created_at TIMESTAMPTZ, retired_at TIMESTAMPTZ NULL,
+  UNIQUE (tenant_id, version)
 )
 ```
 
@@ -618,7 +631,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 
 | 계층 | 설계 |
 |---|---|
-| At-rest (AMS) | `accounts.encrypted_secret`을 전용 `AMX_ENCRYPTION_KEY`(Fernet 또는 AES-GCM)로 암호화. 인증용 시크릿과 **분리**(키 로테이션 독립). SaaS 단계: 테넌트별 DEK를 KEK(KMS)로 감싸는 봉투암호화 |
+| At-rest (AMS) | **봉투암호화 (P5 F2)**: `accounts.encrypted_secret`을 **테넌트별 DEK**로 AES-256-GCM(AAD=tenant_id, `v2:` 태그) 암호화, DEK는 **KEK provider**로 래핑해 `tenant_deks`에 저장(`AMX_KEK_PROVIDER=local\|aws-kms\|vault`; local MVP는 `AMX_KEK` env, KMS는 어댑터 자리). 모든 at-rest 접근이 단일 초크포인트(`crypto.encrypt_secret`/`decrypt_secret`) 경유 → O9 역동기화 포함 전 경로 자동 DEK 경유(이중암호 붕괴 구조적 방지). 인증용 시크릿과 **분리**. **전환**: 레거시 Fernet(`AMX_ENCRYPTION_KEY`, 접두 없음) 읽기 병행, v2 쓰기는 `AMX_ENVELOPE_WRITE=1` 게이트(무중단·롤백 경계). **롤백 주의**: 플래그 off는 읽기 유지(안전)이나, **코드 롤백/`0008` downgrade는 v2→Fernet 역-rewrap(`rewrap_secrets.py --reverse`) 선행 필수** — 미실행 시 DEK 소실로 v2 credential 복호 불가. **KMS 정직성**: local MVP는 단일 env 시크릿이라 기밀 강화는 실 KMS 도입 시(격리·구조는 즉시 이득) |
 | In-transit | gRPC TLS 필수(§B4 — one-way 기본, mTLS 옵션·defense-in-depth) + 앱 계층 Ed25519 명령 서명. **세션 KEK는 에이전트별 ephemeral X25519 sealed box로 봉인**(C2, §6.2) — TLS 종단 앞단에서도 KEK 평문 없음. credential 세트는 deliver/재주입 시에만 스트림에 실리고 채널·로그에 저장되지 않음. **토큰/credential/KEK는 절대 로깅 금지**. **위협 경계**: sealed box는 익명 봉투라 발신자 신원을 바인딩하지 않으므로 *선의의 종단 프록시*까지만 방어한다 — 능동 MITM이 `Register.agent_public_key`를 치환하는 공격은 TLS(특히 mTLS, §B4)가 막는다 |
 | 등록 플로우 (§5.5) | PKCE verifier는 서버 세션 보관·**1회용**(교환 성공/실패 시 즉시 폐기). authorize 코드는 짧은 TTL 내 교환, 미사용 시 폐기. `:oauth-start`/`:oauth-complete`는 관리자 인증 + 테넌트 RBAC 필수 |
 | At-rest (AMA) | AES-256-GCM 매니페스트 + AAD 바인딩 + KEK 메모리 보관 (§6.2) |
