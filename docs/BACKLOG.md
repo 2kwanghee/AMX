@@ -92,6 +92,9 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G26 | F5 export 후 정정 수단 부재 — void/재집계 API 없음, `ON CONFLICT DO NOTHING`이라 재스윕으로도 못 덮음(정정은 수동 SQL뿐). 내부 청구 정정 플로우는 과금 대상 확정 시 설계 | F5 리뷰 B |
 | G27 | F5 시계 앞점프(VM resume/NTP step) 시 watermark가 미래로 전진해 그 구간 스냅샷 영구 미청구 가능(되감김은 안전). `reported_at < watermark` 도착 행 카운터·경보 없어 누락이 조용함 | F5 리뷰 B |
 | G28 | F5 저심각: 첫 실행/장기 다운 후 전 구간 usage 행 `.all()` 일괄 로드(일 단위 chunk 권장) · `_try_advisory_xact_lock` grpc/server.py·billing.py 중복 정의(DRY) | F5 리뷰 A·B |
+| G29 | **A1 업스트림 자원 소모(중)** — cred_update 경로에 rate limit·복호 평문 길이 상한 전무. 인증 에이전트 1대로 ~4MB push 반복(테이블 블로트)·observed_at 마이크로초 증가 무제한 수락·거부 경로 로그/DB조회 증폭, to_thread 풀 고갈 파급. 내재화(자사 서버만)에선 위협 낮음 — 외부 노출 전 필수. 권고: 세션당 리밋 + 길이 상한 | A1 ADVERSARY 소급 |
+| G30 | **A1 baseline 무ack 전진(중, 가용성)** — AMA가 전송 수락만으로 baseline 전진, AMS는 "not newer"를 조용히 무시 → 에이전트 시계 앞선 1회 push 후 보정 창(≤5분)의 정상 갱신이 재시도 없이 유실, 다음 회전까지 AMS 사본 stale(재인증 폴백으로 정합성은 유지). 권고: AMS 무시 시 AMA baseline 미전진(앱레벨 ack — C1/G12 ack 인프라와 공유 가능) | A1 ADVERSARY 소급 |
+| G31 | A1 저심각 — `UpdateBaseline`이 재deliver 경합 창에서 구 평문으로 매니페스트 덮어씀(다음 tick 자가치유, fingerprint CAS 권고) · `del plaintext`는 메모리 소거 아님(docstring "wiped" 과장 정정) | A1 ADVERSARY 소급 |
 
 ---
 

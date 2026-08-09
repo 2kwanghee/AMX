@@ -46,8 +46,10 @@ AMA `internal/resync/`(fingerprint 감지, lock 밖 전송, 수락 시 baseline 
 1. **가용성 격리 패치 (R2, 진행 중)**: `_apply_cred_update`의 `crypto.encrypt_secret`가 try/except 밖 —
    DEK 부재/KEK 오류 시 세션 스트림 전체가 드롭. 해당 건만 거부하고 스트림 유지하도록 격리.
    완료조건: DEK 미구성 상태 cred_update 수신 시 스트림 유지 테스트 통과.
-2. **ADVERSARY 소급 반증 (진행 중)**: R3 코드가 ADVERSARY 리뷰 이력 없이 병합돼 있어 소급 수행
-   (위조 주입·롤백 재생·경합·DoS·암호 경계·NULL 선점 6개 각도).
+2. **ADVERSARY 소급 반증 — 완료 (2026-08-09)**: 6개 각도 중 핵심 방어선(위조 주입·롤백 재생·
+   AMS 경합·암호 경계·NULL 선점) 전부 반증 불성립 — 병합본 견고 판정. 성립 발견은 BACKLOG
+   **G29**(자원 소모, 중 — 내재화에선 위협 낮음, 외부 노출 전 필수), **G30**(baseline 무ack 전진, 중 —
+   C1/G12 ack 인프라와 공유 가능), **G31**(저심각 2건)로 이월.
 3. 문서 정정(§5.7·§8 O9·BACKLOG A1) — 완료.
 
 ## C2 확인 기록 (2026-08-09, 이 순위에서 제외)
