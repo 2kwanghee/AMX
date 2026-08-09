@@ -255,6 +255,13 @@ class AgentCommand(Base):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # D2 sent-未ack recovery (recovery-architecture §2): how many times the poll
+    # loop has pushed this command. The sent-timeout sweeper re-queues a stuck
+    # ``sent`` command (same command_id, idempotent) and increments this; once it
+    # reaches MAX_SEND_ATTEMPTS the command is failed and its assignment reverted.
+    send_attempts: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default=text("0")
+    )
     sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

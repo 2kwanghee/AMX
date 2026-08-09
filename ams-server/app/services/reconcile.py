@@ -22,7 +22,7 @@ import os
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Account, AgentCommand, Assignment, UsageSnapshot
@@ -43,13 +43,19 @@ ACTUAL_QUARANTINED = "quarantined"
 ACTUAL_ABSENT = "absent"
 
 # assignment.state -> the allocation status the agent should be reporting for it.
-# delivering/recalling are deliberately absent: those are in-flight and compared
-# by the command-ack path, not by the report path (avoids racing a live command).
+# ``delivering`` is deliberately absent: it is in-flight and compared by the
+# command-ack path, not the report path (avoids racing a live command). ``recalling``
+# is included for its SETTLED variant only (D1, recovery-architecture §1): a recall
+# whose ack was lost sits ``recalling`` with ``pending_command_id`` NULL — no longer
+# in flight — and its desired end-state is ABSENT. The report query below admits
+# only that settled variant; an in-flight recalling (pending_command_id set) is
+# still excluded.
 _EXPECTED_ACTUAL = {
     "active": ACTUAL_ACTIVE,
     "inactive": ACTUAL_INACTIVE,
     "quarantined": ACTUAL_QUARANTINED,
     "detached": ACTUAL_ABSENT,
+    "recalling": ACTUAL_ABSENT,
 }
 
 # R3 loop guard: cap how many times reconcile may re-issue the SAME narrow
@@ -153,6 +159,29 @@ def _apply_converged(db: Session, command: AgentCommand, assignment: Assignment)
     assignment.updated_at = _now()
 
 
+def _settle_recall_detached(db: Session, assignment: Assignment) -> None:
+    """D1: settle a stranded recalling whose account is already absent locally.
+
+    The recall physically succeeded (the account is gone) but its ack never
+    landed, so the row sat ``recalling`` with ``pending_command_id`` NULL. Reaching
+    convergence from the report mirrors the recall-CONVERGED branch of
+    :func:`_apply_converged` exactly — detach and return the account to the pool —
+    without issuing any command (recovery-architecture §1: state-only settle)."""
+    assignment.state = "detached"
+    assignment.pending_command_id = None
+    assignment.last_error = None
+    assignment.acked_at = _now()
+    assignment.updated_at = _now()
+    account = db.scalar(
+        select(Account).where(
+            Account.id == assignment.account_id,
+            Account.tenant_id == assignment.tenant_id,
+        )
+    )
+    if account is not None and account.status == "assigned":
+        account.status = "available"
+
+
 def suppress_applied(
     db: Session,
     *,
@@ -237,7 +266,18 @@ def reconcile_from_report(
             select(Assignment).where(
                 Assignment.tenant_id == tenant_id,
                 Assignment.server_id == server_id,
-                Assignment.state.in_(("active", "inactive", "quarantined", "detached")),
+                or_(
+                    Assignment.state.in_(
+                        ("active", "inactive", "quarantined", "detached")
+                    ),
+                    # D1: settled recalling only (ack lost, no live command). An
+                    # in-flight recall (pending_command_id set) is left to the
+                    # command-ack path, so the two never race the same row.
+                    and_(
+                        Assignment.state == "recalling",
+                        Assignment.pending_command_id.is_(None),
+                    ),
+                ),
             )
         ).all()
     )
@@ -252,6 +292,17 @@ def reconcile_from_report(
     for assignment in assignments:
         expected = _EXPECTED_ACTUAL[assignment.state]
         actual = reported.get(str(assignment.account_id), ACTUAL_ABSENT)
+
+        # D1 settled recalling (recovery-architecture §1): a recall whose ack was
+        # lost. If the account is already gone locally the recall in fact succeeded
+        # and only the ack dropped -> settle to detached now (mirror of the recall
+        # CONVERGED branch), silently, no command and no drift. If it is still
+        # present, fall through to the CORRECTION_RECALL path below (re-recall,
+        # in-flight-skipped and capped).
+        if assignment.state == "recalling" and actual == ACTUAL_ABSENT:
+            _settle_recall_detached(db, assignment)
+            continue
+
         if actual == expected:
             continue
         if assignment.state == "detached" and str(assignment.account_id) in live_account_ids:
@@ -260,7 +311,7 @@ def reconcile_from_report(
         correction = None
         if assignment.state in ("active", "inactive") and actual == ACTUAL_ABSENT:
             correction = CORRECTION_REDELIVER
-        elif assignment.state == "detached" and actual != ACTUAL_ABSENT:
+        elif assignment.state in ("detached", "recalling") and actual != ACTUAL_ABSENT:
             correction = CORRECTION_RECALL
 
         corrected = False
