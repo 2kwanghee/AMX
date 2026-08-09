@@ -37,6 +37,14 @@ MAX_SEND_ATTEMPTS = int(os.environ.get("AMX_MAX_SEND_ATTEMPTS", "5"))
 # forever; past the cap the action 409s and only opens a ``recall_failed`` alert.
 MAX_RECALL_RETRIES = int(os.environ.get("AMX_MAX_RECALL_RETRIES", "3"))
 
+# Command types that never set assignment.pending_command_id (§6.3: non-state
+# commands). For these a None/mismatched marker is not a settle/supersede signal —
+# they have no successor — so their cap-exhausted final failure alerts regardless
+# of the marker. Marker-setting types (deliver/recall/activate/deactivate) instead
+# treat None (settled, e.g. _settle_recall_detached) or a mismatch (superseded) as
+# "already handled elsewhere" and suppress the alert.
+_MARKERLESS_COMMAND_TYPES = frozenset({"switch_now"})
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -536,14 +544,14 @@ def _revert_assignment_on_send_failure(
     if assignment is None:
         return None
     if (
-        assignment.pending_command_id is not None
+        command.command_type not in _MARKERLESS_COMMAND_TYPES
         and assignment.pending_command_id != command.command_id
     ):
-        # A newer command already owns the assignment; do not clobber it, and do
-        # not alert — the successor reports its own result (return None so the
-        # caller opens no alert for this superseded command). Guarded on non-None
-        # so a marker-less command (switch_now never sets one) is not mistaken for
-        # superseded — it has no successor and must still alert on final failure.
+        # A marker-setting command whose marker is now None (settled elsewhere,
+        # e.g. _settle_recall_detached detached the account) or points at another
+        # command (superseded) is already handled — do not clobber the assignment
+        # and do not alert (return None so the caller opens none). A marker-less
+        # type (switch_now) skips this and still alerts on final failure.
         return None
     assignment.last_error = "sent_ack_timeout"
     assignment.pending_command_id = None
