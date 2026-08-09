@@ -23,8 +23,8 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | # | 항목 | 출처 | 내용 | 시점 |
 |---|---|---|---|---|
 | B1 | **O5 러너 무중단 / deliver 오과금** | §8 O5 · P2·P3 | deliver 크리티컬 섹션(§6.3) 동안 `~/.claude/.credentials.json`이 순간 신규 계정으로 바뀜 → 그 창에 러너(Claude Code)가 요청 시 오과금. 러너 일시정지/파일락 + 같은 `~/.claude` 공유 보장 | 배포 설계 |
-| B2 | **O10 tsamx 설치 인증 (D11 파급)** | §8 O10 · P2 | 프라이빗 레포 git 설치 서버측 인증. 1차 읽기전용 deploy key → 서버 증가 시 서버별 키/machine user → AMS wheel 아티팩트 서빙으로 GitHub 의존 제거 | 배포 설계 |
-| B3 | **O6 tsamx 업스트림 동기화 절차** | §8 O6 · P1 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 체크리스트 + 소유자 지정 | 운영 |
+| B2 | **O10 tsamx 설치 인증 (D11 파급)** | §8 O10 · P2 | 프라이빗 레포 git 설치 서버측 인증. 1차 읽기전용 deploy key → 서버 증가 시 서버별 키/machine user → AMS wheel 아티팩트 서빙으로 GitHub 의존 제거. 절차: `DEPLOYMENT-TSAMX.md` | 배포 설계 |
+| B3 | **O6 tsamx 업스트림 동기화 절차** | §8 O6 · P1 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 체크리스트 + 소유자 지정. 절차: `UPSTREAM-SYNC.md` | 운영 |
 | B4 | **TLS 종단 (D9)** | P2 | gRPC 서버는 현재 cert/key 제공 시 `add_secure_port`, 미제공 시 `AMX_GRPC_ALLOW_INSECURE=1` opt-in fail-closed. 실배포 cert/CA 발급·mTLS 구성 | 배포 설계 |
 
 ## C. 보안·복원력 하드닝
