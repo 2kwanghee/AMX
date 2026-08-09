@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 import grpc
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.timestamp_pb2 import Timestamp
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core import crypto
@@ -282,13 +282,17 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
     ) -> None:
         while True:
             try:
+                # F3: fetch + claim (mark 'sent') happen in one transaction inside
+                # _build_queued_commands, under FOR UPDATE SKIP LOCKED, so a second
+                # AMS instance never re-sends the same row. The wire write follows
+                # the claim; a write that fails is recovered by the D2 sent-ack
+                # sweeper (idempotent command_id), never re-sent by another instance.
                 built = await asyncio.to_thread(
                     self._build_queued_commands, server_id, agent_id, kek, key_id
                 )
-                for command_id, cmd in built:
+                for cmd in built:
                     async with write_lock:
                         await context.write(cmd)
-                    await asyncio.to_thread(self._mark_sent, command_id)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - a poll failure must not kill the session
@@ -372,13 +376,20 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
 
     def _build_queued_commands(
         self, server_id: uuid.UUID, agent_id: str, kek: bytes, key_id: str
-    ) -> list[tuple[str, pb.AmsCommand]]:
-        out: list[tuple[str, pb.AmsCommand]] = []
+    ) -> list[pb.AmsCommand]:
+        out: list[pb.AmsCommand] = []
         with self._sm() as db:
+            # fetch_queued row-locks each row (FOR UPDATE SKIP LOCKED); claim_sent
+            # marks it 'sent' in this same transaction, and the single commit below
+            # releases the locks with the rows already claimed — an atomic hand-off
+            # no concurrent instance can duplicate. Rows we do not claim (build
+            # returned None) stay 'queued' and are retried next tick.
             for row in commands.fetch_queued(db, server_id):
                 cmd = self._build_command(db, row, agent_id, kek, key_id)
                 if cmd is not None:
-                    out.append((row.command_id, cmd))
+                    commands.claim_sent(row)
+                    out.append(cmd)
+            db.commit()
         return out
 
     def _build_command(
@@ -584,10 +595,6 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         cmd.session_setup.CopyFrom(setup)
         sign_command(self._signer, cmd)
         return cmd
-
-    def _mark_sent(self, command_id: str) -> None:
-        with self._sm() as db:
-            commands.mark_sent(db, command_id)
 
     def _handle_upstream(
         self,
@@ -1060,10 +1067,30 @@ async def _offline_sweeper(
             _logger.warning("sent-ack sweep iteration failed", exc_info=False)
 
 
+# F3 multi-instance: the sweeps below are idempotent, but running them from every
+# AMS instance every tick is wasted work and needless row contention. A fixed
+# transaction-scoped PostgreSQL advisory lock lets exactly one instance own each
+# sweep per tick; instances that fail to acquire it skip this tick. The lock is
+# transaction-scoped (pg_try_advisory_xact_lock) so it auto-releases on commit or
+# rollback — no explicit unlock, and no risk of a leaked lock on a pooled
+# connection. Distinct keys keep the offline and sent-ack sweeps independent, so
+# they can run on different instances concurrently, matching their isolated
+# error handling in the sweeper loop.
+_OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
+_SENT_SWEEP_LOCK_KEY = 0x414D580F02
+
+
+def _try_advisory_xact_lock(db: Session, key: int) -> bool:
+    """Try to take a transaction-scoped advisory lock; True iff acquired."""
+    return bool(db.scalar(select(func.pg_try_advisory_xact_lock(key))))
+
+
 def _sweep_once(
     session_factory: sessionmaker[Session], stale_after: float
 ) -> list[uuid.UUID]:
     with session_factory() as db:
+        if not _try_advisory_xact_lock(db, _OFFLINE_SWEEP_LOCK_KEY):
+            return []
         return alerts.sweep_offline(db, stale_after_seconds=stale_after)
 
 
@@ -1071,6 +1098,8 @@ def _sweep_sent_once(
     session_factory: sessionmaker[Session],
 ) -> tuple[list[str], list[str]]:
     with session_factory() as db:
+        if not _try_advisory_xact_lock(db, _SENT_SWEEP_LOCK_KEY):
+            return [], []
         return commands.sweep_sent_timeouts(db)
 
 
