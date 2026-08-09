@@ -299,6 +299,14 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
   계정을 같은 서버에 다시 배정할 때 AMA에 보존 레코드가 있으면 deliver는 재주입 대신
   `tsamx enable`로 단축된다(credential 재전송 불필요). 레코드가 없거나
   `purge_local_copy=true`로 삭제됐던 경우에만 full deliver.
+- **recall 실패 회복 (D1)**: recall이 DIVERGED/REJECTED로 실패하면 배정은 `recalling`에
+  머물되 `pending_command_id=NULL`(정착·비인플라이트 표식)이 된다. 이 정착 recalling은
+  ① reconcile-on-report가 로컬 잔존 시 자동 재recall(CAP 상한)·이미 제거됐으면 `detached`로
+  정착, ② REST `POST …:recall`로 수동 재요청 — 둘로 회복되어 영구 stranded되지 않는다.
+  인플라이트 recall(`pending_command_id` 존재)은 회복 대상에서 제외한다.
+- **미ack 명령 회복 (D2)**: 에이전트가 명령 수신 후 ack 전 끊겨 `agent_commands`가 `sent`로
+  남으면, 타임아웃(기본 3×heartbeat) 스윕이 `queued`로 재큐해 멱등 재전송(같은 command_id)하고,
+  `send_attempts` 상한 초과 시 `failed`로 두며 배정을 재발행 가능 상태로 되돌린다.
 
 ### 5.3 REST API 표면 (관리 CRUD — 요구 AMS-1~4, 6)
 

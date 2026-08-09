@@ -74,6 +74,9 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G8 | AMA `store.FindByEmail` 중복 email 시 맵 순회 순서 의존(비결정) — 동일 email 2배정 시 잘못된 ams_account_id 스탬프 가능(단일 AMA 희소) | B1 리뷰 B |
 | G9 | deliver 재전송 no-op이 멱등 단축보다 DeliverLock 획득이 앞서 최대 5s(fail-open) 대기 — 정확성 무영향, 효율만 | B1 리뷰 B |
 | G10 | 래퍼(`amx-claude`) 미경유 직접 `claude` 실행 시 deliver sub-second 창 잔존 — 배포에서 alias/webhook 진입점 강제 필요(O5 배포 경계) | B1 ADVERSARY |
+| G11 | reconcile 재recall 인플라이트(CORRECTION_RECALL 큐잉, `pending_command_id` 미설정) 중 REST `:recall`이 중복 recall 명령 발행 가능 — recall 멱등이라 상태 무손상, 저심각 | 회복 리뷰 B |
+| G12 | C1 완전무손실(b2): AMS 앱-ack + AccountEvent event_id dedup(proto 변경) — 현재 stream.Send 성공 후 AMS 커밋 전 crash의 잔존창(audit 중복/유실)은 결정8 수용 | 회복 설계 이월 |
+| G13 | quarantine 경보가 event-only — `alerts.sync_from_report`에 리포트의 quarantined 상태 추가하면 C1 잔존손실에도 가시성 유지(소규모 인접 하드닝) | 회복 설계 이월 |
 
 ---
 
