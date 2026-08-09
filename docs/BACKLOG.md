@@ -31,7 +31,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 
 | # | 항목 | 출처 | 심각도 | 내용 |
 |---|---|---|---|---|
-| C1 | **AccountEvent 전달 무손실화** | P3 결정8 · 리뷰 A·B | 중 | Outbox 메모리 전용 + transport fire-and-forget이라 프로세스 재시작/적재 직후 단절 시 인플라이트 이벤트 1건 유실 가능. 현재 상태 정합은 usage report reconcile로 자가치유(감사 알림만 손실). 무손실은 transport ack 기반 재설계 필요 |
+| C1 | ~~AccountEvent 전달 무손실화~~ **대부분 기구현** | P3 결정8 · 리뷰 A·B | 중→하 | "메모리 전용"은 stale — 디스크 outbox 기구현: W1(재시작 시 `outbox.log` 리로드)·W2(전송 확인 후에만 del 톰스톤), `reporter/outboxlog.go`+`outbox_disk_test.go`. 2026-08-09 소급 확인(stale 4번째 사례). 잔존 창 = stream.Send 성공 후 AMS 커밋 전 crash(중복/유실)뿐 — 결정8 수용, 완전 무손실은 앱레벨 ack 재설계(G12·G30과 통합, 별도) |
 | C2 | ~~UnwrapKEK per-agent 래핑~~ **구현 완료** | P2 | 중 | 세션 KEK를 에이전트별 ephemeral X25519 **NaCl sealed box**로 봉인(c2-kek-wrap 병합, `crypto.go:199-214` UnwrapKEK가 raw KEK·타 키 봉인·변조 거부, §7 In-transit 반영). 2026-08-09 소급 확인 — 이 행이 stale였음 |
 | C3 | **BFF allowlist %2f 우회** | P4 ADVERSARY | 낮(하드닝) | P4에서 %2f/%5c 명시 거부 + 디코드 후 검사로 **처리 완료**. 향후 allowlisted prefix 아래 라우트 추가 시 재검토 |
 

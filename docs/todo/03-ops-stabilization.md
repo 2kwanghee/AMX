@@ -24,19 +24,18 @@ reconcile-on-report의 억제 해제 + F3 sent 스위퍼(`sweep_sent_timeouts`)�
 
 **완료조건**: 갭 측정 결과 문서 + (갭 존재 시) 재전송 후 중복 실행이 없음을 보이는 테스트(명령 멱등 전제 검증 포함).
 
-## C1 — AccountEvent 전달 무손실화 — R2
+## C1 — AccountEvent 전달 무손실화 — **소급 확인 결과 대부분 기구현** (2026-08-09)
 
-**배경**: AMA outbox가 메모리 전용 + transport fire-and-forget이라 프로세스 재시작/단절 직후
-인플라이트 이벤트 1건이 유실될 수 있다. 상태 정합은 usage report reconcile로 자가치유되므로
-**손실되는 것은 감사 이벤트뿐** — F5 과금도 usage 원장 기반이라 과금 영향 없음(설계노트 위험 항목으로 이미 회피).
+착수 전 코드 검증에서 **디스크 outbox가 이미 구현·병합 완료**임을 확인했다(BACKLOG stale 4번째 사례 —
+"메모리 전용" 서술이 낡음). as-built: `reporter/outboxlog.go` — W1(큐잉된 이벤트를 `outbox.log`에
+영속, 재시작 시 리로드) + W2(전송 확인 후에만 del 톰스톤, crash 시 최악 중복 재전송이며 dedupe로
+흡수) + 컴팩션. `outbox_disk_test.go`로 커버. **완료조건("강제 재시작 시 유실 0")은 이미 충족.**
 
-**할 일**: transport ack 기반 재설계(G12와 동일 작업 — AMS 앱레벨 ack + event_id dedup, proto 변경) 또는
-AMA 디스크 outbox 영속화(proto 무변경, `reporter/outboxlog.go` 확장) 중 택1. **proto 무변경인 후자 우선
-검토(T3)** — 전자는 A1의 proto 작업과 묶을 수 있으면 그때 병행.
+**잔존 창(수용)**: stream.Send 성공 후 AMS 커밋 전 crash — 설계 결정8로 수용된 좁은 창.
+완전 무손실은 앱레벨 ack + event_id dedup 재설계(proto 변경)가 필요하며, 같은 ack 인프라를 원하는
+**G30**(A1 baseline 무ack 전진)·**G12**와 통합해 별도 항목으로 다룬다(착수는 사용자 결정).
 
-**완료조건**: AMA 강제 재시작 시나리오에서 이벤트 유실 0 테스트 통과.
+## ③ 완료 판정
 
-## 순서 제안
-
-C1을 A1(①) 직후로 앞당길지는 ① 완료 시점에 재평가 — A1이 proto·transport를 여는 김에 ack 방식을
-같이 넣는 것이 두 번 여는 것보다 쌀 수 있다. 기본은 D1 → D2 → C1.
+D1 완료(PR #27 머지) · D2 = 측정 결과 "고착 무한대기 없음", 잔여 갭은 경보 2건(T2)으로 수정 진행 ·
+C1 = 기구현 확인·잔존창 결정8 수용. **D2 경보 패치 머지로 ③ 종료.**
