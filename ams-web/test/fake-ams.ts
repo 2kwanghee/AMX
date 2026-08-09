@@ -117,6 +117,42 @@ async function resolver({ request }: { request: Request }) {
       { status: 201 },
     );
   }
+  if (path === 'tenants/ten-1/servers/srv-1' && m === 'PATCH') {
+    // Echo the policy fields back so the caller sees the applied values (the BFF
+    // test asserts the PATCH body reached upstream).
+    let patch: Record<string, unknown> = {};
+    try {
+      patch = JSON.parse(body || '{}');
+    } catch {
+      /* leave empty */
+    }
+    return HttpResponse.json({
+      id: 'srv-1', tenantId: 'ten-1', name: 'ama-1', switchMode: 'manual', status: 'online',
+      thresholdPct: patch.thresholdPct ?? null,
+      defaultStrategy: patch.defaultStrategy ?? null,
+      cooldownSeconds: patch.cooldownSeconds ?? null,
+      hysteresisPct: patch.hysteresisPct ?? null,
+    });
+  }
+  if (path === 'tenants/ten-1/servers/srv-1/events' && m === 'GET') {
+    return HttpResponse.json({
+      items: [
+        {
+          id: 'evt-1', serverId: 'srv-1', reportType: 'switch_event', reportedAt: iso(),
+          payload: {
+            kind: 'KIND_SWITCH', trigger: 'TRIGGER_AT_LIMIT',
+            from: { email: 'a@acme.io' }, to: { email: 'b@acme.io' },
+            detail: 'utilization crossed threshold',
+          },
+        },
+        {
+          id: 'evt-2', serverId: 'srv-1', reportType: 'switch_event', reportedAt: iso(),
+          payload: { kind: 'KIND_QUARANTINE', from: { email: 'a@acme.io' }, detail: 'isolated' },
+        },
+      ],
+      pageInfo: { totalSize: 2 },
+    });
+  }
   if (path === 'tenants/ten-1/assignments' && m === 'POST') {
     return HttpResponse.json(
       { id: 'asg-1', tenantId: 'ten-1', accountId: 'acc-1', serverId: 'srv-1', state: 'pending' },

@@ -8,6 +8,7 @@ export type AccountStatus = 'available' | 'assigned' | 'disabled' | 'quarantined
 export type CredentialType = 'oauth' | 'api_key';
 export type ServerStatus = 'online' | 'offline' | 'degraded';
 export type SwitchMode = 'auto' | 'manual';
+export type SwitchStrategy = 'best' | 'next_available';
 export type AssignmentState =
   | 'pending'
   | 'delivering'
@@ -82,6 +83,12 @@ export interface Server {
   name: string;
   hostname?: string;
   switchMode: SwitchMode;
+  // O4-B/O4-C central policy (design §O4). null = no central override; the
+  // agent falls back to its tsamx-local default.
+  thresholdPct?: number | null;
+  defaultStrategy?: SwitchStrategy | null;
+  cooldownSeconds?: number | null;
+  hysteresisPct?: number | null;
   status: ServerStatus;
   agentId?: string;
   agentVersion?: string;
@@ -100,6 +107,12 @@ export interface ServerUpdate {
   name?: string;
   hostname?: string;
   status?: ServerStatus;
+  // O4 central policy. A field present with null clears the central override
+  // back to the tsamx-local default; an omitted field is left untouched.
+  thresholdPct?: number | null;
+  defaultStrategy?: SwitchStrategy | null;
+  cooldownSeconds?: number | null;
+  hysteresisPct?: number | null;
 }
 export interface SwitchModeRequest {
   mode: SwitchMode;
@@ -175,6 +188,35 @@ export interface UsagePayload {
   drift?: Array<{ email?: string; amsAccountId?: string; detail?: string }>;
 }
 
+// -- Switch/quarantine/all_exhausted events (E2 timeline). ------------------
+// GET …/servers/{sid}/events returns UsageSnapshot rows with
+// reportType "switch_event". Unlike the usage payload, this payload is the raw
+// AccountEvent proto rendered with proto field names, so its keys are
+// snake_case (contracts/proto/amx.proto AccountEvent). kind/trigger arrive as
+// their proto enum names, e.g. "KIND_SWITCH" / "TRIGGER_AT_LIMIT".
+export interface EventAccountRef {
+  ams_account_id?: string;
+  email?: string;
+  account_uuid?: string;
+}
+export interface EventPayload {
+  kind?: string;
+  trigger?: string;
+  from?: EventAccountRef;
+  to?: EventAccountRef;
+  detail?: string;
+  occurred_at?: string;
+  pool_summary?: { total?: number; all_exhausted?: boolean; max_utilization_pct?: number };
+}
+export interface ServerEvent {
+  id?: string;
+  serverId: string;
+  accountId?: string;
+  reportType: 'switch_event';
+  reportedAt: string;
+  payload: EventPayload;
+}
+
 // -- Alerts (design §5.6 / p4-architecture §4). Not yet in openapi; Track A. ---
 export type AlertKind = 'all_exhausted' | 'drift' | 'server_offline' | 'quarantine';
 export type AlertSeverity = 'critical' | 'warning';
@@ -204,6 +246,7 @@ export type AccountPage = Page<Account>;
 export type ServerPage = Page<Server>;
 export type AssignmentPage = Page<Assignment>;
 export type AlertPage = Page<Alert>;
+export type EventPage = Page<ServerEvent>;
 
 export interface ApiError {
   type?: string;
