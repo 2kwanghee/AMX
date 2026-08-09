@@ -19,8 +19,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
 
-from app.core import crypto
+from app.core import crypto, kek
 from app.db import get_sessionmaker
+from app.grpc import server as grpc_server
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.services import commands, inventory
@@ -535,3 +536,77 @@ def test_cred_update_pending_assignment_rejected(app_env):
     assert _decrypt_rt(tenant_id, account_id) == original_rt
     assert _stored(tenant_id, account_id).credential_observed_at is None
     assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
+
+
+def test_cred_update_encrypt_failure_session_survives(app_env, monkeypatch):
+    """A1: a KEK/DEK failure at re-encrypt rejects the push, not the session.
+
+    ``crypto.encrypt_secret`` runs after the credential has authenticated and
+    decoded; a missing tenant DEK or a KEK-provider error raises ``KekError``
+    there. Left uncaught it unwinds the session read loop and drops the whole
+    agent stream. It must instead be an opaque per-update reject: the account
+    stays untouched (the write never runs), a rejected line is logged, and a
+    sentinel pushed afterwards still lands (the session survived).
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("dekfail@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    sentinel_id = _add_account(tenant_id, "dekfail-sentinel@ex.com", "rt-sentinel-orig")
+    _assign(tenant_id, sentinel_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    # Inject a KEK-provider failure scoped to the target credential only, so the
+    # sentinel still re-encrypts normally and proves the stream is alive.
+    real_encrypt = crypto.encrypt_secret
+
+    def flaky_encrypt(plaintext, *, tenant_id, db):
+        if "rt-dek-missing" in plaintext:
+            raise kek.KekError("tenant DEK unavailable (injected)")
+        return real_encrypt(plaintext, tenant_id=tenant_id, db=db)
+
+    monkeypatch.setattr(crypto, "encrypt_secret", flaky_encrypt)
+
+    # Spy the reject log at the call site. The upstream loop runs in a worker
+    # thread (``asyncio.to_thread``), so pytest's ``caplog`` does not reliably
+    # capture it; wrapping the servicer's own logger.warning is deterministic.
+    rejects: list[str] = []
+    real_warning = grpc_server._logger.warning
+
+    def spy_warning(msg, *args, **kwargs):
+        rejects.append(msg % args if args else msg)
+        return real_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(grpc_server._logger, "warning", spy_warning)
+
+    t = datetime.now(UTC)
+    ts = t + timedelta(seconds=5)
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek_bytes, key_id = await _open_session(channel, token)
+            enc = _seal(
+                kek_bytes, key_id, account_id, AGENT_ID,
+                _oauth_secret("dekfail@ex.com", "rt-dek-missing"),
+            )
+            await call.write(_cred_update(account_id, enc, "", t))
+            enc_s = _seal(
+                kek_bytes, key_id, sentinel_id, AGENT_ID,
+                _oauth_secret("dekfail-sentinel@ex.com", "rt-sentinel-new"),
+            )
+            await call.write(_cred_update(sentinel_id, enc_s, "", ts))
+            await asyncio.to_thread(_wait_observed, tenant_id, sentinel_id, ts)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+
+    # (b) account row unchanged: original secret stands, no observed_at ratchet.
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    assert _stored(tenant_id, account_id).credential_observed_at is None
+    # (a) session survived: the sentinel pushed after the failure was applied.
+    assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
+    # (c) a rejected line was logged for the failed account.
+    assert any(
+        "at-rest encryption unavailable" in m and str(account_id) in m
+        for m in rejects
+    )

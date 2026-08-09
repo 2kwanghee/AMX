@@ -31,6 +31,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core import crypto
+from app.core.kek import KekError
 from app.db import get_sessionmaker
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
@@ -921,9 +922,22 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 return
             finally:
                 del plaintext
-            # Re-encrypt under the at-rest Fernet key and drop the plaintext before
-            # any DB round-trip.
-            new_secret = crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db)
+            # Re-encrypt under the at-rest key and drop the plaintext before any
+            # DB round-trip. A missing tenant DEK or a KEK-provider failure raises
+            # KekError here; left uncaught it would unwind the session read loop and
+            # drop the whole agent stream (availability). Isolate it as an opaque
+            # reject — same convention as the crypto failures above — keep the
+            # session alive, leave the account untouched (no write happened yet),
+            # and wipe the plaintext on the failure path too (§7).
+            try:
+                new_secret = crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db)
+            except KekError:
+                del secret
+                _logger.warning(
+                    "cred_update rejected: at-rest encryption unavailable (account %s)",
+                    account.id,
+                )
+                return
             new_mask = crypto.mask_secret(account.credential_type, secret)
             del secret
 
