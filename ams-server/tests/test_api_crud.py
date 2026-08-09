@@ -380,17 +380,33 @@ def test_server_policy_patch_persists_and_is_masked_none_by_default(client):
     # Fresh server: no central policy.
     assert server["thresholdPct"] is None
     assert server["defaultStrategy"] is None
-    # PATCH sets the O4-C policy columns.
+    assert server["cooldownSeconds"] is None
+    assert server["hysteresisPct"] is None
+    # PATCH sets the O4-C + F4 (O4-B) policy columns; cooldown 0 is a real value.
     patched = client.patch(
-        server_base, json={"thresholdPct": 90, "defaultStrategy": "best"}
+        server_base,
+        json={
+            "thresholdPct": 90,
+            "defaultStrategy": "best",
+            "cooldownSeconds": 0,
+            "hysteresisPct": 12.5,
+        },
     )
     assert patched.status_code == 200, patched.text
     assert patched.json()["thresholdPct"] == 90
     assert patched.json()["defaultStrategy"] == "best"
-    # A name-only PATCH leaves the policy untouched.
+    assert patched.json()["cooldownSeconds"] == 0
+    assert patched.json()["hysteresisPct"] == 12.5
+    # A name-only PATCH leaves the whole policy untouched.
     renamed = client.patch(server_base, json={"name": "runner-renamed"})
     assert renamed.json()["thresholdPct"] == 90
     assert renamed.json()["defaultStrategy"] == "best"
+    assert renamed.json()["cooldownSeconds"] == 0
+    assert renamed.json()["hysteresisPct"] == 12.5
+    # An explicit None clears just that field back to the local default.
+    cleared = client.patch(server_base, json={"cooldownSeconds": None})
+    assert cleared.json()["cooldownSeconds"] is None
+    assert cleared.json()["hysteresisPct"] == 12.5
 
 
 def test_stub_endpoints_do_not_leak_other_tenants_ids(client):

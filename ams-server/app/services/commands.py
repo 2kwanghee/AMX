@@ -315,6 +315,8 @@ def request_set_policy(
         payload={
             "threshold_pct": server.threshold_pct,
             "default_strategy": server.default_strategy,
+            "cooldown_seconds": server.cooldown_seconds,
+            "hysteresis_pct": server.hysteresis_pct,
         },
     )
     db.commit()

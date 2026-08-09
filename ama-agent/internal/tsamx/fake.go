@@ -32,6 +32,11 @@ type Fake struct {
 
 	// Threshold records the last ConfigSetThreshold value (test assertion).
 	Threshold float64
+	// Configs records the last value passed to ConfigSet per key (F4 policy,
+	// e.g. "cooldown_seconds"/"hysteresis_pct"; test assertion).
+	Configs map[string]float64
+	// ConfigErr, if set, is returned by ConfigSet.
+	ConfigErr error
 	// StatePath is returned by AutoStatePath (test seeding for the watcher).
 	StatePath string
 	// quarantine is number->email, returned by ReadQuarantine.
@@ -51,6 +56,7 @@ func NewFake() *Fake {
 	return &Fake{
 		accounts:   make(map[string]*fakeAccount),
 		quarantine: make(map[string]string),
+		Configs:    make(map[string]float64),
 		AutoCode:   2, // no action by default
 	}
 }
@@ -204,6 +210,34 @@ func (f *Fake) ConfigSetThreshold(_ context.Context, pct float64) error {
 	return nil
 }
 
+// validAutoswitchKeys mirrors the numeric autoswitch settings tsamx actually
+// accepts (settings.py SETTING_SPECS json_key, camelCase). The real
+// `tsamx config set autoswitch.<key>` rejects any other key with a non-zero
+// exit, so the Fake rejects them too — otherwise a snake_case or typo'd key
+// (the F4 regression: "cooldown_seconds" instead of "cooldownSeconds") passes
+// the unit tests but every SetPolicy diverges in production.
+var validAutoswitchKeys = map[string]bool{
+	"threshold":       true,
+	"cooldownSeconds": true,
+	"hysteresisPct":   true,
+}
+
+// ConfigSet records the injected value for the given autoswitch key, rejecting
+// any key tsamx would not accept (contract check; see validAutoswitchKeys).
+func (f *Fake) ConfigSet(_ context.Context, key string, value float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ConfigErr != nil {
+		return f.ConfigErr
+	}
+	if !validAutoswitchKeys[key] {
+		return fmt.Errorf("tsamx: unknown setting autoswitch.%s", key)
+	}
+	f.log("config set autoswitch.%s %g", key, value)
+	f.Configs[key] = value
+	return nil
+}
+
 // AutoOnce runs the programmed tick (AutoFn) under the lock and returns its exit
 // code, or AutoCode when AutoFn is nil.
 func (f *Fake) AutoOnce(_ context.Context) (int, error) {
@@ -296,6 +330,15 @@ func (f *Fake) CallLog() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.Calls...)
+}
+
+// ConfigValue returns the last value recorded by ConfigSet for key and whether
+// it was ever set (test assertion).
+func (f *Fake) ConfigValue(key string) (float64, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.Configs[key]
+	return v, ok
 }
 
 // Has reports whether an account exists.

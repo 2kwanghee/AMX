@@ -47,6 +47,11 @@ type Bridge interface {
 	// ConfigSetThreshold runs `tsamx config set autoswitch.threshold <pct>`
 	// (O4-C SetPolicy delivery, design note §O4-C).
 	ConfigSetThreshold(ctx context.Context, pct float64) error
+	// ConfigSet runs `tsamx config set autoswitch.<key> <value>` for the rest of
+	// the central policy (F4, O4-B): cooldown_seconds and hysteresis_pct. The
+	// caller passes only non-negative values (a negative SetPolicy field means
+	// "unset" and is skipped upstream).
+	ConfigSet(ctx context.Context, key string, value float64) error
 	// AutoStatePath returns the path to tsamx's autoswitch_state.json, watched
 	// for quarantine changes (design note §2 dual detection). Empty when the
 	// path cannot be resolved, in which case the watcher is not started.

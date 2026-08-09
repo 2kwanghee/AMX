@@ -112,6 +112,88 @@ func TestSetPolicyZeroThresholdSkipsInjection(t *testing.T) {
 	}
 }
 
+// TestSetPolicyInjectsCooldownAndHysteresis (F4, O4-B): non-negative
+// cooldown_seconds/hysteresis_pct are injected via `config set autoswitch.*`,
+// and 0 is a real value (cooldown disabled), NOT skipped like threshold 0.
+func TestSetPolicyInjectsCooldownAndHysteresis(t *testing.T) {
+	fake := tsamx.NewFake()
+	hn := newHarnessBridge(t, fake, &sync.Mutex{}, nil)
+
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-f4-1",
+		Cmd: &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{
+			ThresholdPct:    0,   // keep local default (threshold-specific 0=unset)
+			CooldownSeconds: 0,   // real value: disable cooldown
+			HysteresisPct:   7.5, // real value
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("set_policy convergence = %v detail=%q", ack.Convergence, ack.Detail)
+	}
+	// Keys are tsamx's camelCase config names (autoswitch.cooldownSeconds), not
+	// the proto snake_case — the Fake rejects a wrong key, so this also proves
+	// the handler used the accepted name.
+	if v, ok := fake.ConfigValue("cooldownSeconds"); !ok || v != 0 {
+		t.Fatalf("cooldownSeconds config = %v ok=%v, want 0 injected", v, ok)
+	}
+	if v, ok := fake.ConfigValue("hysteresisPct"); !ok || v != 7.5 {
+		t.Fatalf("hysteresisPct config = %v ok=%v, want 7.5", v, ok)
+	}
+	if !containsPrefix(fake.CallLog(), "config set autoswitch.cooldownSeconds") {
+		t.Fatalf("cooldownSeconds not set via camelCase key: %v", fake.CallLog())
+	}
+	// Threshold 0 stays unset (O4-C semantics), independent of the F4 fields.
+	if containsPrefix(fake.CallLog(), "config set autoswitch.threshold") {
+		t.Fatalf("threshold injected despite pct=0: %v", fake.CallLog())
+	}
+}
+
+// TestSetPolicyNegativeCooldownHysteresisSkips (F4): the negative "unset"
+// sentinel (AMS delivers it for NULL columns) must skip injection so the
+// tsamx-local default stays in force. Independent of threshold.
+func TestSetPolicyNegativeCooldownHysteresisSkips(t *testing.T) {
+	fake := tsamx.NewFake()
+	hn := newHarnessBridge(t, fake, &sync.Mutex{}, nil)
+
+	hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-f4-2",
+		Cmd: &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{
+			ThresholdPct:    88,
+			CooldownSeconds: -1, // unset -> skip
+			HysteresisPct:   -1, // unset -> skip
+		}},
+	}))
+	if _, ok := fake.ConfigValue("cooldownSeconds"); ok {
+		t.Fatalf("cooldownSeconds injected despite negative sentinel: %v", fake.CallLog())
+	}
+	if _, ok := fake.ConfigValue("hysteresisPct"); ok {
+		t.Fatalf("hysteresisPct injected despite negative sentinel: %v", fake.CallLog())
+	}
+	// Threshold still applies independently.
+	if fake.Threshold != 88 {
+		t.Fatalf("threshold = %v, want 88", fake.Threshold)
+	}
+}
+
+// TestSetPolicyRejectsSnakeCaseKey is the regression guard for the F4 defect:
+// the handler must use tsamx's camelCase config keys. The Fake now rejects any
+// key tsamx would reject, so a snake_case ConfigSet surfaces as a real error —
+// proving the guard fails loudly instead of silently recording a bad key.
+func TestSetPolicyRejectsSnakeCaseKey(t *testing.T) {
+	fake := tsamx.NewFake()
+	// The buggy key tsamx rejects with a non-zero exit ("unknown setting").
+	if err := fake.ConfigSet(context.Background(), "cooldown_seconds", 30); err == nil {
+		t.Fatal("Fake accepted snake_case autoswitch.cooldown_seconds; it must reject keys tsamx rejects")
+	}
+	// The correct camelCase key is accepted.
+	if err := fake.ConfigSet(context.Background(), "cooldownSeconds", 30); err != nil {
+		t.Fatalf("Fake rejected valid autoswitch.cooldownSeconds: %v", err)
+	}
+	if v, ok := fake.ConfigValue("cooldownSeconds"); !ok || v != 30 {
+		t.Fatalf("cooldownSeconds = %v ok=%v, want 30", v, ok)
+	}
+}
+
 func TestSwitchNowUsesDefaultStrategy(t *testing.T) {
 	fake := tsamx.NewFake()
 	ctx := context.Background()

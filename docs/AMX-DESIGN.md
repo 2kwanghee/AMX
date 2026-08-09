@@ -562,8 +562,7 @@ scheduler 틱 (적응 주기, 기본 60s)
   + autoswitch_state.json fsnotify 감시 (이중 감지: lastSwitchAt/lastSwitchTo, quarantine)
 ```
 
-- 임계치는 AMS가 `SetPolicy`(cmd 17)로 하달 → AMA가 `tsamx config set autoswitch.threshold <pct>` 주입 (O4-C, 기본 95).
-- 히스테리시스·쿨다운·quarantine·후보 랭킹은 tsamx 엔진 그대로 활용 (재구현 없음, O4-C에서 로컬 소유).
+- **전체 스위칭 정책은 AMS가 `SetPolicy`(cmd 17)로 중앙 하달 (O4-B, F4)**: threshold·default_strategy·cooldown·hysteresis 4축 모두 → AMA가 `tsamx config set autoswitch.{threshold,cooldownSeconds,hysteresisPct}` 주입(키는 tsamx json_key=camelCase). 세션마다 재천명, 음수=unset·0=실제값(threshold는 0=unset). quarantine·후보 랭킹 엔진 로직은 tsamx 그대로(재구현 없음).
 - **전 계정 소진**(all-exhausted, 전부 임계↑) 감지 시 → 크리티컬 이벤트 전송
   → AMS가 경보 + 추가 계정 배정 판단.
 
@@ -658,7 +657,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | O1 | AMA KEK 보관 | **결정: 메모리 전용** (2026-08-08). 재부팅 시 KEK 소실 → AMS 재연결로 `SessionSetup` 재수신해야 로컬 스토어 복호. TPM/봉인 없음. 콜드스타트 3규칙은 §6.3 | ✅ 확정 |
 | O2 | recall 시맨틱 | **결정: disable만** (2026-08-08). 기본 `purge_local_copy=false` — `tsamx disable`+레코드 보존(빠른 재배정), `true`만 완전 삭제. §5.2·§6.3 반영 | ✅ 확정 |
 | O3 | API-key 계정 | 구독 쿼터 없어 95% 임계 무의미 — 관리 대상 포함 여부. 포함 시 등록 경로는 `tsamx add-token`이 여전히 유효 (api_key는 대화형 로그인 불필요, §2.4-5의 폐기는 oauth 한정) | P1 중 |
-| O4 | 스위칭 정책 소유권 | **결정: 하이브리드(O4-C)** (2026-08-08). `threshold_pct`+`default_strategy`는 AMS가 `SetPolicy`(proto cmd 17)로 하달, cooldown/hysteresis는 tsamx 로컬. 전체 중앙화(O4-B)는 P5 이월(SetPolicy 필드 추가로 확장). §6.4·설계노트 P3 | ✅ 확정 |
+| O4 | 스위칭 정책 소유권 | **O4-B 완성 (P5 F4)**. `threshold_pct`·`default_strategy`(O4-C, cmd 17 필드 1·2)에 더해 **`cooldown_seconds`·`hysteresis_pct`(F4, 필드 3·4)도 AMS가 `SetPolicy`로 중앙 하달** → 전체 스위칭 정책 중앙화. AMA가 `tsamx config set autoswitch.{cooldownSeconds,hysteresisPct}` 주입(음수=unset·0=실제값). §6.4·설계노트 P3/F4 | ✅ 확정 (O4-B) |
 | O5 | 러너 config 공유 | **부분 해소(B1)**: deliver 오과금은 이전활성 복귀+원자적 쓰기(주 방어)+flock 조율(보조, §6.3)로 방어, `docs/DEPLOYMENT-RUNNER.md` 배포 가이드. 남은 것: 래퍼 미경유 직접 실행의 sub-second 창(배포 강제), 러너와 AMA의 `~/.claude` 공유 보장 | 부분 해소, 배포 강제 잔여 |
 | O6 | tsamx 업스트림 동기화 절차 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 검증 체크리스트 + 소유자 | P1 이후 운영 |
 | O7 | 다중 AMS 인스턴스 | 세션 레지스트리 + 내부 라우팅 (P1은 단일 인스턴스로 미룸) | SaaS 단계 |

@@ -217,12 +217,22 @@ def test_reconcile_scoped_to_tenant_and_server(app_env):
 
 
 # -- SetPolicy / SetSwitchMode session re-assertion ---------------------------
-def _set_policy_columns(server_id, *, switch_mode, threshold_pct, default_strategy):
+def _set_policy_columns(
+    server_id,
+    *,
+    switch_mode,
+    threshold_pct,
+    default_strategy,
+    cooldown_seconds=None,
+    hysteresis_pct=None,
+):
     with get_sessionmaker()() as db:
         server = db.get(Server, server_id)
         server.switch_mode = switch_mode
         server.threshold_pct = threshold_pct
         server.default_strategy = default_strategy
+        server.cooldown_seconds = cooldown_seconds
+        server.hysteresis_pct = hysteresis_pct
         db.commit()
 
 
@@ -230,7 +240,12 @@ def test_session_reasserts_set_mode_and_set_policy_bound_to_agent(app_env):
     signer = signing.Signer.from_env_or_generate()
     tenant_id, _account_id, server_id = _seed_tenant_account_server("reassert@ex.com")
     _set_policy_columns(
-        server_id, switch_mode="manual", threshold_pct=90.0, default_strategy="best"
+        server_id,
+        switch_mode="manual",
+        threshold_pct=90.0,
+        default_strategy="best",
+        cooldown_seconds=0.0,  # real value (cooldown disabled), not "unset"
+        hysteresis_pct=15.0,
     )
     token = _issue_enroll(tenant_id, server_id)
 
@@ -261,6 +276,9 @@ def test_session_reasserts_set_mode_and_set_policy_bound_to_agent(app_env):
     assert command_signature_valid(signer.public_key(), set_policy)
     assert set_policy.set_policy.threshold_pct == 90.0
     assert set_policy.set_policy.default_strategy == pb.SwitchNow.SWITCH_STRATEGY_BEST
+    # F4 (O4-B): stored 0 is a real value delivered as 0 (not the unset sentinel).
+    assert set_policy.set_policy.cooldown_seconds == 0.0
+    assert set_policy.set_policy.hysteresis_pct == 15.0
 
 
 def test_session_reasserts_policy_even_when_columns_null(app_env):
@@ -293,6 +311,10 @@ def test_session_reasserts_policy_even_when_columns_null(app_env):
         set_policy.set_policy.default_strategy
         == pb.SwitchNow.SWITCH_STRATEGY_UNSPECIFIED
     )
+    # F4 (O4-B): NULL cooldown/hysteresis are delivered as the negative "unset"
+    # sentinel (< 0), which AMA skips — distinct from a real 0.
+    assert set_policy.set_policy.cooldown_seconds < 0
+    assert set_policy.set_policy.hysteresis_pct < 0
 
 
 # -- REST switching-control wiring queues the right commands ------------------
@@ -363,7 +385,12 @@ def test_rest_set_policy_snapshot_builds_signed_command(app_env):
     signer = signing.Signer.from_env_or_generate()
     tenant_id, _a, server_id = _seed_tenant_account_server("setpol@ex.com")
     _set_policy_columns(
-        server_id, switch_mode="auto", threshold_pct=80.0, default_strategy="next_available"
+        server_id,
+        switch_mode="auto",
+        threshold_pct=80.0,
+        default_strategy="next_available",
+        cooldown_seconds=120.0,
+        hysteresis_pct=None,  # unset -> negative sentinel on the wire
     )
     with get_sessionmaker()() as db:
         commands.request_set_policy(db, tenant_id, server_id)
@@ -381,3 +408,6 @@ def test_rest_set_policy_snapshot_builds_signed_command(app_env):
     assert (
         cmd.set_policy.default_strategy == pb.SwitchNow.SWITCH_STRATEGY_NEXT_AVAILABLE
     )
+    # F4 (O4-B): cooldown snapshotted as a real value; NULL hysteresis -> sentinel.
+    assert cmd.set_policy.cooldown_seconds == 120.0
+    assert cmd.set_policy.hysteresis_pct < 0

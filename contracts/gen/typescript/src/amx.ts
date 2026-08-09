@@ -556,6 +556,14 @@ export interface SetPolicy {
    * UNSPECIFIED keeps the local default.
    */
   defaultStrategy: SwitchNow_SwitchStrategy;
+  /**
+   * Full central policy (F4, O4-B). Injected as
+   * `tsamx config set autoswitch.cooldown_seconds/hysteresis_pct <v>`.
+   * A negative value means "unset" (keep the local default); 0 is a real value
+   * (e.g. cooldown_seconds=0 disables the cooldown). AMA distinguishes the two.
+   */
+  cooldownSeconds: number;
+  hysteresisPct: number;
 }
 
 /**
@@ -2862,7 +2870,7 @@ export const SwitchNow: MessageFns<SwitchNow> = {
 };
 
 function createBaseSetPolicy(): SetPolicy {
-  return { thresholdPct: 0, defaultStrategy: 0 };
+  return { thresholdPct: 0, defaultStrategy: 0, cooldownSeconds: 0, hysteresisPct: 0 };
 }
 
 export const SetPolicy: MessageFns<SetPolicy> = {
@@ -2872,6 +2880,12 @@ export const SetPolicy: MessageFns<SetPolicy> = {
     }
     if (message.defaultStrategy !== 0) {
       writer.uint32(16).int32(message.defaultStrategy);
+    }
+    if (message.cooldownSeconds !== 0) {
+      writer.uint32(25).double(message.cooldownSeconds);
+    }
+    if (message.hysteresisPct !== 0) {
+      writer.uint32(33).double(message.hysteresisPct);
     }
     return writer;
   },
@@ -2899,6 +2913,22 @@ export const SetPolicy: MessageFns<SetPolicy> = {
           message.defaultStrategy = reader.int32() as any;
           continue;
         }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.cooldownSeconds = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 33) {
+            break;
+          }
+
+          message.hysteresisPct = reader.double();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2920,6 +2950,16 @@ export const SetPolicy: MessageFns<SetPolicy> = {
         : isSet(object.default_strategy)
         ? switchNow_SwitchStrategyFromJSON(object.default_strategy)
         : 0,
+      cooldownSeconds: isSet(object.cooldownSeconds)
+        ? globalThis.Number(object.cooldownSeconds)
+        : isSet(object.cooldown_seconds)
+        ? globalThis.Number(object.cooldown_seconds)
+        : 0,
+      hysteresisPct: isSet(object.hysteresisPct)
+        ? globalThis.Number(object.hysteresisPct)
+        : isSet(object.hysteresis_pct)
+        ? globalThis.Number(object.hysteresis_pct)
+        : 0,
     };
   },
 
@@ -2931,6 +2971,12 @@ export const SetPolicy: MessageFns<SetPolicy> = {
     if (message.defaultStrategy !== 0) {
       obj.defaultStrategy = switchNow_SwitchStrategyToJSON(message.defaultStrategy);
     }
+    if (message.cooldownSeconds !== 0) {
+      obj.cooldownSeconds = message.cooldownSeconds;
+    }
+    if (message.hysteresisPct !== 0) {
+      obj.hysteresisPct = message.hysteresisPct;
+    }
     return obj;
   },
 
@@ -2941,6 +2987,8 @@ export const SetPolicy: MessageFns<SetPolicy> = {
     const message = createBaseSetPolicy();
     message.thresholdPct = object.thresholdPct ?? 0;
     message.defaultStrategy = object.defaultStrategy ?? 0;
+    message.cooldownSeconds = object.cooldownSeconds ?? 0;
+    message.hysteresisPct = object.hysteresisPct ?? 0;
     return message;
   },
 };

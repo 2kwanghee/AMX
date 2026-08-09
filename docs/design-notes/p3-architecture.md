@@ -35,7 +35,7 @@
 
 ### proto 변경 — `SetPolicy` 신설 (cmd 17)
 mode(로테이션 on/off)와 policy(threshold/strategy)는 독립 축이라 SetSwitchMode 확장보다 신규 메시지 채택.
-`reserved 17-29` 주석이 이미 예고. cooldown/hysteresis는 **넣지 않음**(로컬, O4-C).
+`reserved 17-29` 주석이 이미 예고. (P3 시점 O4-C: cooldown/hysteresis 미포함. **P5 F4에서 필드 3·4로 추가돼 O4-B로 완성** — 아래 SetPolicy는 P3 당시 형태.)
 
 ```proto
 // AmsCommand.oneof 에 추가, reserved 를 18-29 로 축소
