@@ -484,7 +484,10 @@ func (h *Handler) emitManualSwitch(fromEmail, toEmail string) {
 	if toEmail != "" {
 		ev.To = &amxv1.AccountRef{Email: toEmail}
 	}
-	h.outbox.Enqueue(ev)
+	// The event is queued in memory regardless; a disk-append error only forfeits
+	// restart durability for this one event (rare, e.g. disk full), so it is
+	// non-fatal to the switch that already happened.
+	_ = h.outbox.Enqueue(ev)
 }
 
 // strategyName maps the proto strategy enum to the tsamx CLI flag value.

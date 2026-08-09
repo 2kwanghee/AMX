@@ -180,34 +180,78 @@ const outboxDedupeWindow = 1024
 // Outbox queues AccountEvents while AMS is unreachable and flushes them on
 // reconnect, deduplicated by event_id over a bounded recent window (SSOT §6.3
 // offline outbox).
+//
+// When opened with OpenOutbox it is backed by an append-only disk log so a queued
+// event survives an agent restart (C1 W1): Enqueue appends durably, and an event
+// is deleted from disk only after its send is confirmed (C1 W2, see Flush). A
+// memory-only Outbox (NewOutbox) keeps the same semantics minus persistence, for
+// callers/tests that do not need restart durability.
 type Outbox struct {
 	mu    sync.Mutex
-	queue []*amxv1.AccountEvent
+	queue []outboxItem
 	// seen holds the event_ids currently inside the dedupe window; ring is a
 	// fixed-size FIFO of the same ids so seen stays bounded at outboxDedupeWindow.
 	seen map[string]struct{}
 	ring [outboxDedupeWindow]string
 	rlen int // occupied slots (grows to the window size, then stays)
 	rpos int // next write index (and, once full, the oldest slot)
+
+	// log is the disk backing; nil for a memory-only Outbox. seq is the monotonic
+	// per-event key stamped onto disk add/del records.
+	log *outboxLog
+	seq uint64
+
+	// flushMu serializes concurrent Flush calls (see Flush).
+	flushMu sync.Mutex
 }
 
-// NewOutbox returns an empty outbox.
+// NewOutbox returns an empty memory-only outbox (no restart durability).
 func NewOutbox() *Outbox {
 	return &Outbox{seen: make(map[string]struct{})}
 }
 
+// OpenOutbox returns an outbox backed by dir/outbox.log, reloading any events that
+// were queued but not yet confirmed-delivered before a restart (C1 W1). The
+// dedupe window is reseeded from the reloaded events so a re-enqueue of a still
+// pending event is suppressed.
+func OpenOutbox(dir string) (*Outbox, error) {
+	log, items, maxSeq, err := openOutboxLog(dir)
+	if err != nil {
+		return nil, err
+	}
+	o := &Outbox{seen: make(map[string]struct{}), log: log, seq: maxSeq}
+	o.queue = items
+	for _, it := range items {
+		if id := it.ev.GetEventId(); id != "" {
+			o.markSeen(id)
+		}
+	}
+	return o, nil
+}
+
 // Enqueue adds an event unless its event_id is still inside the dedupe window.
-func (o *Outbox) Enqueue(ev *amxv1.AccountEvent) {
+// With a disk backing the event is appended durably before it becomes visible, so
+// a crash immediately after enqueue cannot lose it (W1). A disk error is returned
+// but the event is still queued in memory so live delivery this session is not
+// forfeited.
+func (o *Outbox) Enqueue(ev *amxv1.AccountEvent) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	id := ev.GetEventId()
 	if id != "" {
 		if _, ok := o.seen[id]; ok {
-			return
+			return nil
 		}
 		o.markSeen(id)
 	}
-	o.queue = append(o.queue, ev)
+	o.seq++
+	seq := o.seq
+	var derr error
+	if o.log != nil {
+		derr = o.log.appendAdd(seq, ev)
+	}
+	o.queue = append(o.queue, outboxItem{seq: seq, ev: ev})
+	return derr
 }
 
 // markSeen records id in the dedupe window, evicting the oldest id once the
@@ -230,20 +274,55 @@ func (o *Outbox) Depth() int {
 	return len(o.queue)
 }
 
-// Flush sends each queued event via send, stopping at the first error and
-// keeping the unsent remainder for the next attempt.
+// flushMu serializes Flush calls so two flushers (OnConnect reconnect-flush and
+// the live drain) cannot both send the same queued event from one snapshot before
+// either deletes it.
+//
+// Flush sends each queued event via send, deleting an event from the queue (and,
+// when persisted, durably from disk) only after send reports success. On the
+// first error it stops and keeps the unsent remainder for the next attempt. This
+// is the C1 W2 confirmation gate: send must not return nil until the event is
+// truly on the wire (transport.SendConfirmed awaits stream.Send), so a drop
+// between dequeue and stream.Send cannot silently discard an event.
 func (o *Outbox) Flush(send func(*amxv1.AccountEvent) error) error {
+	o.flushMu.Lock()
+	defer o.flushMu.Unlock()
+
 	o.mu.Lock()
-	pending := o.queue
-	o.queue = nil
+	snapshot := append([]outboxItem(nil), o.queue...)
 	o.mu.Unlock()
-	for i, ev := range pending {
-		if err := send(ev); err != nil {
-			o.mu.Lock()
-			o.queue = append(pending[i:], o.queue...)
-			o.mu.Unlock()
+
+	for _, it := range snapshot {
+		if err := send(it.ev); err != nil {
 			return err
 		}
+		o.deleteDelivered(it.seq)
 	}
 	return nil
+}
+
+// deleteDelivered removes a confirmed-delivered event from the queue and retires
+// its disk record. A lost del tombstone (crash between success and fsync) at worst
+// re-sends the event after restart; AMS tolerates the rare duplicate (design
+// note §3), so it is never a correctness hazard.
+func (o *Outbox) deleteDelivered(seq uint64) {
+	o.mu.Lock()
+	for i := range o.queue {
+		if o.queue[i].seq == seq {
+			o.queue = append(o.queue[:i], o.queue[i+1:]...)
+			break
+		}
+	}
+	o.mu.Unlock()
+
+	if o.log == nil {
+		return
+	}
+	_ = o.log.appendDel(seq)
+	if o.log.shouldCompact() {
+		o.mu.Lock()
+		live := append([]outboxItem(nil), o.queue...)
+		o.mu.Unlock()
+		_ = o.log.compact(live)
+	}
 }
