@@ -27,12 +27,12 @@ from datetime import UTC, datetime, timedelta
 import grpc
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.timestamp_pb2 import Timestamp
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core import crypto
 from app.core.kek import KekError
-from app.db import get_sessionmaker
+from app.db import get_sessionmaker, try_advisory_xact_lock as _try_advisory_xact_lock
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
@@ -1132,11 +1132,6 @@ async def _offline_sweeper(
 # error handling in the sweeper loop.
 _OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
 _SENT_SWEEP_LOCK_KEY = 0x414D580F02
-
-
-def _try_advisory_xact_lock(db: Session, key: int) -> bool:
-    """Try to take a transaction-scoped advisory lock; True iff acquired."""
-    return bool(db.scalar(select(func.pg_try_advisory_xact_lock(key))))
 
 
 def _sweep_once(
