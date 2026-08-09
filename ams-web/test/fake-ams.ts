@@ -7,6 +7,36 @@ import { setupServer } from 'msw/node';
 
 export const API_BASE = 'http://ams.test/api/v1';
 
+// --- Admin fixtures ------------------------------------------------------
+// The session_token is the SECRET the BFF forwards upstream; sentinels must
+// never surface in any browser-visible output.
+export interface AdminFixture {
+  email: string;
+  password: string;
+  sessionToken: string;
+  role: 'global-admin' | 'tenant-admin';
+  tenantIds: string[];
+}
+
+export const GLOBAL_ADMIN: AdminFixture = {
+  email: 'root@amx.test',
+  password: 'global-pw-abcdef',
+  sessionToken: 'SESSION_TOKEN_GLOBAL_SENTINEL_do-not-leak-1a2b3c4d',
+  role: 'global-admin',
+  tenantIds: [],
+};
+
+export const TENANT_ADMIN: AdminFixture = {
+  email: 't1@amx.test',
+  password: 'tenant-pw-abcdef',
+  sessionToken: 'SESSION_TOKEN_TENANT_SENTINEL_do-not-leak-5e6f7a8b',
+  role: 'tenant-admin',
+  tenantIds: ['ten-1'],
+};
+
+const ADMINS = [GLOBAL_ADMIN, TENANT_ADMIN];
+export const ALL_SESSION_TOKENS = ADMINS.map((a) => a.sessionToken);
+
 export interface CapturedRequest {
   method: string;
   path: string; // portion after /api/v1/
@@ -36,6 +66,29 @@ async function resolver({ request }: { request: Request }) {
   });
 
   const m = request.method;
+
+  // --- Auth endpoints ---
+  if (path === 'auth/login' && m === 'POST') {
+    let creds: { email?: string; password?: string } = {};
+    try {
+      creds = JSON.parse(body || '{}');
+    } catch {
+      /* fallthrough to 422 */
+    }
+    const admin = ADMINS.find((a) => a.email === creds.email && a.password === creds.password);
+    if (!admin) {
+      return HttpResponse.json({ title: 'invalid_credentials', status: 401 }, { status: 401 });
+    }
+    return HttpResponse.json({
+      session_token: admin.sessionToken,
+      role: admin.role,
+      tenant_ids: admin.tenantIds,
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    });
+  }
+  if (path === 'auth/logout' && m === 'POST') {
+    return new HttpResponse(null, { status: 204 });
+  }
 
   if (path === 'tenants' && m === 'POST') {
     return HttpResponse.json({ id: 'ten-1', name: 'Acme', status: 'active', createdAt: iso() }, { status: 201 });

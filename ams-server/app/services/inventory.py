@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.errors import bad_request, conflict, not_found
-from app.models import Account, Alert, Assignment, Server, Tenant, UsageSnapshot
+from app.models import Account, Admin, Alert, Assignment, Server, Tenant, UsageSnapshot
 
 _ACTIVE_ASSIGNMENT_STATES = (
     "pending",
@@ -110,6 +110,14 @@ def delete_tenant(db: Session, tenant_id: uuid.UUID) -> None:
     ) or 0
     if owned:
         raise conflict("tenant.not_empty", "Delete the tenant's accounts and servers first.")
+    # admins.tenant_id is FK ... ON DELETE RESTRICT (the isolation anchor for a
+    # tenant-admin). A pinned admin would otherwise turn this delete into an
+    # IntegrityError → 500; check first and return a clean 409 (F1 RBAC, S2b).
+    admins = db.scalar(
+        select(func.count()).select_from(Admin).where(Admin.tenant_id == tenant_id)
+    ) or 0
+    if admins:
+        raise conflict("tenant.has_admins", "Remove the tenant's admins first.")
     db.delete(tenant)
     db.commit()
 

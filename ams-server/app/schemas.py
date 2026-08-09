@@ -256,3 +256,40 @@ class LoginResponse(Wire):
     role: Literal["global-admin", "tenant-admin"]
     tenant_ids: list[str]
     expires_at: datetime
+
+
+# -- Admin management (F1 RBAC, S2b) ------------------------------------------
+AdminRole = Literal["global-admin", "tenant-admin"]
+
+
+class AdminCreate(Wire):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=1024)
+    role: AdminRole
+    tenant_id: uuid.UUID | None = None
+
+
+class AdminUpdate(Wire):
+    # Deliberately narrow (F1 RBAC §7): only account state (disabled) and a
+    # password reset are mutable here. Changing role/tenant_id would move an
+    # admin across the isolation boundary, so it is not offered — delete and
+    # recreate instead.
+    disabled: bool | None = None
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+class Admin(Wire):
+    # Response model. There is no `password_hash` field, so the bcrypt hash can
+    # never be serialised out, whatever the ORM row carries.
+    id: uuid.UUID
+    email: str
+    role: AdminRole
+    tenant_id: uuid.UUID | None = None
+    disabled: bool
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class AdminPage(Wire):
+    items: list[Admin]
+    page_info: PageInfo | None = None

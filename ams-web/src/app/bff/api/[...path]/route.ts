@@ -3,7 +3,7 @@
 // allowlist -> forward with the server-side admin Bearer -> return upstream
 // status/body. No admin token, no session secret, no upstream auth header is
 // ever reflected to the browser.
-import { isAuthenticated } from '@/lib/server/auth';
+import { getSession } from '@/lib/server/auth';
 import { proxyToUpstream } from '@/lib/server/upstream';
 
 export const runtime = 'nodejs';
@@ -12,7 +12,8 @@ export const dynamic = 'force-dynamic';
 const PREFIX = '/bff/api/';
 
 async function handle(req: Request): Promise<Response> {
-  if (!(await isAuthenticated(req))) {
+  const session = await getSession(req);
+  if (!session) {
     return new Response(
       JSON.stringify({ type: 'about:blank', title: 'Unauthorized', status: 401, code: 'bff.unauthenticated' }),
       { status: 401, headers: { 'content-type': 'application/problem+json' } },
@@ -40,6 +41,7 @@ async function handle(req: Request): Promise<Response> {
     url.search,
     body,
     req.headers.get('content-type'),
+    session.st,
   );
 
   return new Response(result.status === 204 ? null : result.body, {

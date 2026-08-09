@@ -80,6 +80,8 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G14 | 로그인 타이밍 오라클 — 미존재 email은 bcrypt 스킵으로 존재 여부가 타이밍에 노출(자격증명 물질 노출은 없음). dummy bcrypt로 균일화 가능 | F1 리뷰 A·ADVERSARY (SaaS) |
 | G15 | `require_admin`이 세션 인증 요청당 DB 세션 2개 오픈 + `resolve_session` JOIN 후 admin 재조회(중복 1쿼리) — 효율, 기능 정상 | F1 리뷰 A·B |
 | G16 | `mask_secret` 4hex(16bit) 교차 테넌트 상관 핸들 — 자격증명 노출 아님, 수용 명시 | F1 ADVERSARY (SaaS) |
+| G17 | 자기 비활성 미방지 — global-admin이 자신을 disable/delete 가능(마지막 1인 rail만 방어). `Principal`에 admin_id 없어 요청자 식별 불가 → S2a 세션 로직 확장 필요. 루트 토큰이 최종 탈출구라 lockout 불가 | F1 S2b/c 리뷰 B |
+| G18 | `ams-web` `verifyNav` dead code(집행은 ams-server 전담) + `create_admin` TOCTOU 오류코드 오표기(동시 tenant 삭제 시 FK위반이 duplicate_email로, 정상경로는 has_admins 가드가 차단, 협소) | F1 S2b/c 리뷰 |
 
 ---
 

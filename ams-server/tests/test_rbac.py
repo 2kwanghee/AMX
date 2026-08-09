@@ -227,10 +227,14 @@ def test_global_admin_session_can_create_tenant(client, db):
     assert r.status_code == 201
 
 
-# -- /admins is S2b, absent here ---------------------------------------------
-def test_admins_management_api_is_absent(client):
-    r = client.get(f"{API}/admins")
-    assert r.status_code == 404
+# -- /admins is S2b: present, global-admin gated (full CRUD in test_admins.py)-
+def test_admins_management_api_requires_global_admin(client, db):
+    # A tenant-admin session is refused (403); the root token (client) is allowed.
+    own = _make_tenant(client, "admins-gate")
+    _make_admin(db, email="ta-gate@x.example.com", role="tenant-admin", tenant_id=own)
+    token = _login(client, "ta-gate@x.example.com").json()["sessionToken"]
+    assert client.get(f"{API}/admins", headers=_auth(token)).status_code == 403
+    assert client.get(f"{API}/admins").status_code == 200
 
 
 # -- bootstrap CLI ------------------------------------------------------------
