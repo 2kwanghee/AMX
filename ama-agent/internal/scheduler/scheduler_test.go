@@ -19,13 +19,15 @@ func seed(t *testing.T, interval time.Duration, emails ...string) (*tsamx.Fake, 
 	t.Helper()
 	f := tsamx.NewFake()
 	ctx := context.Background()
-	for i, e := range emails {
+	for _, e := range emails {
 		if err := f.Add(ctx, tsamx.AddRequest{Email: e, Enable: true}); err != nil {
 			t.Fatal(err)
 		}
-		if i == 0 {
-			f.SetActiveEmail(e)
-		}
+	}
+	// Fake.Add now activates each added slot (models real tsamx add); seed the
+	// intended active account (the first) after all adds.
+	if len(emails) > 0 {
+		f.SetActiveEmail(emails[0])
 	}
 	ob := reporter.NewOutbox()
 	s := New(Config{

@@ -1,0 +1,63 @@
+#!/bin/sh
+# amx-claude — launch Claude Code (the runner) under the AMX deliver lock (B1b).
+#
+# Why: when AMA delivers a new account it briefly stages that account's
+# credential into the shared Claude config home and, for a sub-second window,
+# makes it the live account before restoring the previously-active one (see
+# AMA handleDeliver / SSOT §6.3). A `claude` process that STARTS UP inside that
+# window would read the new account's `.credentials.json` and bill it by
+# mistake. B1a narrows the window to milliseconds; this wrapper closes it for
+# runners launched through it.
+#
+# How: AMA holds an EXCLUSIVE flock on `<CLAUDE_CONFIG_DIR>/.amx-deliver.lock`
+# for the whole swap. This wrapper takes a SHARED flock on the same file, waits
+# (bounded) for any in-progress deliver to finish, then RELEASES it and starts
+# claude. We do NOT hold the lock for claude's lifetime: that would make AMA's
+# exclusive deliver wait for the runner to exit (a long interactive session could
+# stall deliver, and thus the whole switching engine, for hours). The lock is
+# separate from the credential files, so claude never touches it.
+#
+# Best-effort, not a hard guarantee: after releasing the lock there is a tiny gap
+# before claude reads the credential. B1a (previous-active restore + atomic write)
+# is the PRIMARY defense that bounds that gap to a sub-second, torn-free window;
+# this wrapper is the secondary "do not start on top of an in-progress deliver"
+# guard. Perfect hand-off would require claude to expose its credential-read
+# instant, which it does not. See docs/DEPLOYMENT-RUNNER.md.
+#
+# Usage: drop-in replacement for `claude`. All arguments — including `-p
+# <command>` used by the ClickEye webhook path — are passed through unchanged.
+#   amx-claude                 # interactive, same as `claude`
+#   amx-claude -p "do a thing"  # batch, same as `claude -p ...`
+# Recommended install: alias claude=amx-claude for interactive shells, and call
+# amx-claude at the ClickEye webhook entrypoint. See docs/DEPLOYMENT-RUNNER.md.
+
+set -eu
+
+# The runner and AMA MUST agree on the config home. Default to Claude's own
+# default (~/.claude) when CLAUDE_CONFIG_DIR is unset, so the lock path matches
+# the credential path claude will actually read.
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+LOCK_FILE="$CONFIG_DIR/.amx-deliver.lock"
+
+# Locate the real claude (never recurse into this wrapper if it shadows claude
+# on PATH under the same name).
+CLAUDE_BIN="${AMX_CLAUDE_BIN:-claude}"
+
+# If flock(1) or the config dir is unavailable, fall back to launching claude
+# directly rather than blocking the runner. B1a still bounds the exposure to the
+# sub-second swap window; the flock is defense-in-depth on top of that.
+if ! command -v flock >/dev/null 2>&1; then
+	exec "$CLAUDE_BIN" "$@"
+fi
+if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+	exec "$CLAUDE_BIN" "$@"
+fi
+
+# Wait (bounded) for any in-progress deliver to release the exclusive lock, then
+# drop our shared lock immediately and start claude. `-w` bounds the wait; if it
+# times out (deliver still running) we start anyway — best-effort, B1a bounds the
+# residual exposure. `-c true` acquires+releases without holding across claude.
+# AMX_DELIVER_WAIT overrides the wait bound (seconds; default 5).
+flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
+
+exec "$CLAUDE_BIN" "$@"

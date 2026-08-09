@@ -55,6 +55,23 @@ type Bridge interface {
 	// from autoswitch_state.json. A missing/unreadable state file yields an empty
 	// map and a nil error (nothing quarantined).
 	ReadQuarantine(ctx context.Context) (map[string]string, error)
+
+	// DeliverLock takes an exclusive, cross-process advisory lock over the
+	// runner's config home for the deliver credential-swap critical section (SSOT
+	// §6.3 / B1b) and returns a release func — ALWAYS non-nil, so the caller can
+	// unconditionally defer it. A runner launched through the deploy/amx-claude
+	// wrapper takes a *shared* lock on the same file before it starts claude, so it
+	// cannot begin inside the window where the freshly delivered account is
+	// momentarily active — closing the over-charge window that B1a only narrows.
+	//
+	// Acquisition is NON-BLOCKING with a bounded retry and is invoked OUTSIDE the
+	// engine lock: if it cannot be taken within the bound (e.g. a long-lived runner
+	// holds the shared lock) it returns a no-op release and the deliver proceeds
+	// WITHOUT the lock (fail-open), so it can never stall the engine lock or the
+	// scheduler. Distinct from the engine lock (which serializes AMA-internal
+	// mutations); the flock coordinates AMA with the separate runner processes and
+	// is process-associated, so an AMA crash releases it automatically.
+	DeliverLock(ctx context.Context) func() error
 }
 
 // ListResult mirrors `tsamx list --json` (tsamx json_output schema v1).

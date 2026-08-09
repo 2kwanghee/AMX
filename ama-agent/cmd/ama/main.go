@@ -71,6 +71,17 @@ func run() error {
 
 	bridge := tsamx.NewExecBridge()
 	rep := reporter.New(agentID, bridge, time.Now)
+	// Resolve each reported account's AMS identity from the manifest (tsamx knows
+	// only the email). Without ams_account_id in the report, AMS reconcile treats
+	// every assigned account as absent and redelivers it in a loop, rewriting the
+	// live credential file and racing the O9 re-sync.
+	rep.SetIDResolver(func(email string) (string, string, bool) {
+		rec, ok := st.FindByEmail(email)
+		if !ok {
+			return "", "", false
+		}
+		return rec.AMSAccountID, rec.AccountUUID, true
+	})
 	outbox := reporter.NewOutbox()
 
 	// Engine lock (R3): the single mutex serializing every tsamx mutation

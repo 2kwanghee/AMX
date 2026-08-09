@@ -480,10 +480,16 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
 | set_mode | auto: scheduler 틱 시작 / manual: 틱 중지 | 값 동일 no-op |
 | req_report | 즉시 §6.5 리포트 생성·전송 | 항상 수행 (조회는 멱등) |
 
-- ⚠ **deliver 크리티컬 섹션**: "credential 파일 기록 → add → switch 복귀" 동안 활성
-  credential이 잠시 신규 계정으로 바뀐다. 이 창(수 초)에서 러너가 요청을 보내면 의도치 않은
-  계정으로 과금된다. AMA는 이 구간을 단일 크리티컬 섹션으로 묶어 최소화하고, 러너 무중단
-  요건은 O5(배포 설계)에서 함께 다룬다.
+- ⚠ **deliver 크리티컬 섹션 (B1 구현)**: `add`가 신규 슬롯을 활성으로 만들지만 deliver는 풀 추가·
+  enable/disable일 뿐이므로(활성 전환은 §6.4 auto/switch_now 소유), AMA는 **add 전 활성 계정을 기록해
+  add 후 복귀**한다 — deliver가 러너의 라이브 계정을 바꾸지 않는다. credential 파일은 **원자적 쓰기**
+  (temp+rename)로 러너의 부분 읽기를 막는다. 이 둘(복귀+원자적)이 과금 창을 sub-second로 좁히는 **주 방어**다.
+- ⚠ **flock 조율 (B1b, 보조 방어)**: 남는 sub-second 창은 `.claude`의 lock 파일 flock으로 러너 기동과
+  조율한다 — AMA는 크리티컬 섹션 동안 `LOCK_EX`를, 러너 래퍼(`deploy/amx-claude`)는 `LOCK_SH`를 잡아
+  겹치지 않게 한다. **불변식**: flock 획득은 **엔진 락 밖에서 논블로킹(`LOCK_NB`)+상한(기본 5s)**으로
+  하고, 초과 시 flock 없이 진행(위 주 방어로 폴백) — 러너 대기가 **엔진 락을 점유하지 않아** 스케줄러
+  틱·다른 명령이 정지하지 않는다(§6.4 무인 운영 유지). 래퍼 미경유 직접 실행 경로는 협조적 advisory
+  락이라 미커버(주 방어의 sub-second 창만 남음) — 배포 경계는 O5·`docs/DEPLOYMENT-RUNNER.md`.
 - ack는 단순 성공/실패가 아니라 **수렴 상태**(현재 로컬 실상)를 회신 → AMS reconcile 입력.
 - **AMS 연결 두절 시**: 현행 로스터로 스위칭 엔진 **계속 가동**(무인 운영 유지),
   로컬발 계정 변경은 거부, 이벤트는 암호화 아웃박스에 큐잉 → 재연결 시 dedupe 플러시.
@@ -524,6 +530,8 @@ scheduler 틱 (적응 주기, 기본 60s)
   안전·멱등 케이스로 좁게 게이트하고 루프 방지 카운터를 둔다.
 - **엔진 락**: scheduler 틱(`auto --once`)과 command 핸들러(deliver 크리티컬 섹션)는 같은 tsamx 풀을
   만지므로, 모든 bridge 변경 시퀀스를 단일 mutex로 직렬화한다(P3 최대 동시성 난제).
+  **불변식(B1b)**: deliver의 러너 flock 대기(외부 프로세스 대기)는 **엔진 락을 점유하지 않는다** —
+  flock은 엔진 락 밖에서 논블로킹+상한으로 획득하므로, 장수명 러너가 있어도 틱·명령이 정지하지 않는다.
 
 ### 6.5 보고 스키마 (요구 AMA-2) — 5분 폴링 + 수동 조회 공용
 
@@ -605,7 +613,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | O2 | recall 시맨틱 | **결정: disable만** (2026-08-08). 기본 `purge_local_copy=false` — `tsamx disable`+레코드 보존(빠른 재배정), `true`만 완전 삭제. §5.2·§6.3 반영 | ✅ 확정 |
 | O3 | API-key 계정 | 구독 쿼터 없어 95% 임계 무의미 — 관리 대상 포함 여부. 포함 시 등록 경로는 `tsamx add-token`이 여전히 유효 (api_key는 대화형 로그인 불필요, §2.4-5의 폐기는 oauth 한정) | P1 중 |
 | O4 | 스위칭 정책 소유권 | **결정: 하이브리드(O4-C)** (2026-08-08). `threshold_pct`+`default_strategy`는 AMS가 `SetPolicy`(proto cmd 17)로 하달, cooldown/hysteresis는 tsamx 로컬. 전체 중앙화(O4-B)는 P5 이월(SetPolicy 필드 추가로 확장). §6.4·설계노트 P3 | ✅ 확정 |
-| O5 | 러너 config 공유 | AMA 서버의 실행 러너(Claude Code)가 같은 `~/.claude`를 읽는지 배포 시 보장 필요. deliver 크리티컬 섹션(§6.3) 동안 러너 무중단(또는 일시 정지) 방안 포함 | P2 배포 설계 |
+| O5 | 러너 config 공유 | **부분 해소(B1)**: deliver 오과금은 이전활성 복귀+원자적 쓰기(주 방어)+flock 조율(보조, §6.3)로 방어, `docs/DEPLOYMENT-RUNNER.md` 배포 가이드. 남은 것: 래퍼 미경유 직접 실행의 sub-second 창(배포 강제), 러너와 AMA의 `~/.claude` 공유 보장 | 부분 해소, 배포 강제 잔여 |
 | O6 | tsamx 업스트림 동기화 절차 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 검증 체크리스트 + 소유자 | P1 이후 운영 |
 | O7 | 다중 AMS 인스턴스 | 세션 레지스트리 + 내부 라우팅 (P1은 단일 인스턴스로 미룸) | SaaS 단계 |
 | O8 | ClickEye 연동 형태 | **P4에서 건너뜀** (2026-08-08, 사용자) — 계정 스위칭 관제에 집중. ClickEye가 AMS 조회 API를 읽는 방식·범위는 추후 결정. 권장 후보: 신규 read-only 엔드포인트 + ClickEye 전용 API 키 | 미해결 (P4 이후) |

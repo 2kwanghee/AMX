@@ -78,6 +78,15 @@ func (h *Handler) handleSessionSetup(_ context.Context, cmd *amxv1.AmsCommand, s
 // handleDeliver decrypts the credential set, upserts the manifest, and installs
 // the account via the tsamx bridge (SSOT §6.3 deliver, single critical section).
 func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *amxv1.DeliverAccount, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	// B1b: acquire the cross-process deliver lock BEFORE the engine lock. Its
+	// acquisition is bounded and non-blocking (fail-open), so a runner holding the
+	// shared lock delays only THIS deliver's lock — never the engine lock — and the
+	// scheduler tick plus every other command keep running (the engine can never
+	// freeze). The lock wraps the engine-locked swap below and, because it is
+	// deferred first, is released AFTER h.engine.Unlock on return.
+	releaseLock := h.bridge.DeliverLock(ctx)
+	defer func() { _ = releaseLock() }()
+
 	// Engine lock (R3): the whole deliver critical section is serialized against
 	// the scheduler tick and other mutating commands (design decision 4).
 	h.engine.Lock()
@@ -158,6 +167,26 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 		return diverged(ack, "manifest_upsert", err)
 	}
 
+	// Record the account the runner (Claude Code) is currently reading BEFORE Add.
+	// `tsamx add` makes the freshly-staged slot active (exec.go Add), so if we do
+	// not restore, the runner would be left on the NEW account and overcharged on
+	// every deliver (§6.3 critical section warning). deliver only adds to the pool
+	// and sets enable/disable — it never changes which account is live; activation
+	// is auto/switch_now's job, regardless of desired ACTIVE/INACTIVE. The
+	// credential-swap span (Add -> restore) is wrapped by the B1b deliver lock
+	// acquired above and runs under the engine lock, so no scheduler tick can move
+	// `active` mid-flight.
+	//
+	// A Status read FAILURE (statusErr) means we cannot know which account the
+	// runner was on, so after Add the new account may be left active and we cannot
+	// safely restore. Rather than report a false CONVERGED (silent over-charge), we
+	// surface it as diverged below so AMS is alerted (B1b review item 4).
+	before, statusErr := h.bridge.Status(ctx)
+	prevActive := ""
+	if statusErr == nil && before != nil {
+		prevActive = before.ActiveEmail
+	}
+
 	// Install via the bridge (critical section, §6.3). CredentialJSON is the
 	// plaintext set; the bridge writes it to the account's config home.
 	addErr := h.bridge.Add(ctx, tsamxAddRequest(ref, d.GetOrganizationName(), plaintext, wantEnabled))
@@ -167,6 +196,30 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 		out := diverged(ack, "tsamx_add", addErr)
 		h.record(out, "deliver", amsID, desired.String())
 		return out
+	}
+
+	// Status was unreadable before Add: the new account may now be the live one and
+	// we have no safe restore target. Report diverged so the possible over-charge is
+	// not hidden behind a CONVERGED ack (B1b review item 4).
+	if statusErr != nil {
+		h.setAccountState(ctx, ack, ref, desired)
+		out := diverged(ack, "active_unknown", statusErr)
+		h.record(out, "deliver", amsID, desired.String())
+		return out
+	}
+
+	// Restore the runner's previously-active account (§6.3 "tsamx switch <이전 활성>
+	// 복귀"). Only when a *different* account was active before — the first-account
+	// case (prevActive == "") has none to return to, so the new slot may stay
+	// active. A failed restore leaves the runner on the new account, an overcharge
+	// risk, so it is surfaced as diverged (not converged).
+	if prevActive != "" && prevActive != ref.GetEmail() {
+		if serr := h.bridge.Switch(ctx, prevActive); serr != nil {
+			h.setAccountState(ctx, ack, ref, desired)
+			out := diverged(ack, "tsamx_restore_active", serr)
+			h.record(out, "deliver", amsID, desired.String())
+			return out
+		}
 	}
 
 	h.setAccountState(ctx, ack, ref, desired)

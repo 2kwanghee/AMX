@@ -10,8 +10,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
+
+// deliverLockName is the file flock'd for the deliver critical section (B1b). It
+// is kept separate from the credential files so the runner never touches it.
+const deliverLockName = ".amx-deliver.lock"
+
+// deliverLockMaxWait bounds how long DeliverLock retries a non-blocking flock
+// before proceeding WITHOUT the lock (fail-open). A runner (amx-claude) may hold
+// a shared lock; waiting is bounded so a deliver can never block indefinitely.
+// B1a (previous-active restore + atomic write) still bounds exposure on fail-open.
+const deliverLockMaxWait = 5 * time.Second
+
+// deliverLockRetryInterval is the poll gap between non-blocking flock attempts.
+const deliverLockRetryInterval = 50 * time.Millisecond
 
 // EnvBinary names the tsamx executable when it is not on PATH (a venv shim, a
 // uv-managed install). Read once by NewExecBridge.
@@ -36,6 +50,17 @@ type ExecBridge struct {
 	DataHome string
 	// Timeout bounds a single CLI invocation (default 30s).
 	Timeout time.Duration
+	// LockMaxWait overrides the deliver lock's bounded retry window (0 = default
+	// deliverLockMaxWait). Tests set a short value to exercise the fail-open path
+	// quickly; production leaves it at the default.
+	LockMaxWait time.Duration
+}
+
+func (b *ExecBridge) lockMaxWait() time.Duration {
+	if b.LockMaxWait > 0 {
+		return b.LockMaxWait
+	}
+	return deliverLockMaxWait
 }
 
 // NewExecBridge returns an ExecBridge configured from the daemon's environment.
@@ -138,7 +163,11 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(configDir, ".credentials.json"), req.CredentialJSON, 0o600); err != nil {
+	// Write both files atomically (temp in the same dir + rename). The runner
+	// (Claude Code) reads these concurrently; a non-atomic os.WriteFile could be
+	// observed half-written, so an in-flight runner request would read a torn
+	// credential. os.Rename is atomic on the same filesystem.
+	if err := writeFileAtomic(filepath.Join(configDir, ".credentials.json"), req.CredentialJSON, 0o600); err != nil {
 		return err
 	}
 	var identity claudeIdentity
@@ -149,7 +178,7 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(configDir, ".claude.json"), blob, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(configDir, ".claude.json"), blob, 0o600); err != nil {
 		return err
 	}
 
@@ -163,6 +192,115 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 		return nil
 	}
 	return b.Disable(ctx, req.Email)
+}
+
+// writeFileAtomic writes data to a temp file in the same directory as path and
+// renames it into place, so a concurrent reader (the runner) never observes a
+// partial write. The temp file is created 0o600 and the final file carries perm;
+// on any failure before the rename the temp file is removed. Never logs data.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".amx-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup unless the rename below claims the temp file.
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = "" // renamed into place; skip cleanup
+	return nil
+}
+
+// lockConfigHome resolves the config home the deliver lock lives in. It mirrors
+// the amx-claude wrapper's default (CLAUDE_CONFIG_DIR, else ~/.claude) so both
+// sides flock the SAME file even when the daemon has no explicit ConfigDir —
+// otherwise the flock would be silently ineffective (B1b review item 3).
+func (b *ExecBridge) lockConfigHome() string {
+	if b.ConfigDir != "" {
+		return b.ConfigDir
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".claude")
+	}
+	return ""
+}
+
+// DeliverLock implements Bridge.DeliverLock: it takes an exclusive flock
+// (LOCK_EX) over <configHome>/.amx-deliver.lock for the deliver critical section
+// (B1b) and returns a release func. The amx-claude wrapper takes a shared lock on
+// the same path before it starts claude, so a runner cannot begin inside the swap
+// window and read a half-swapped or momentarily-new credential.
+//
+// Crucially the acquisition is NON-BLOCKING with a bounded retry (LOCK_EX|LOCK_NB,
+// polled up to deliverLockMaxWait) and is called by handleDeliver OUTSIDE the
+// engine lock. If the lock cannot be taken within the bound — e.g. a long-lived
+// interactive runner is holding the shared lock — DeliverLock gives up and returns
+// a no-op release so the deliver proceeds WITHOUT it (fail-open, availability
+// first). It therefore never blocks the engine, and every path returns a usable
+// release (never nil), so the caller can always defer it.
+func (b *ExecBridge) DeliverLock(ctx context.Context) func() error {
+	noop := func() error { return nil }
+	configDir := b.lockConfigHome()
+	if configDir == "" {
+		return noop
+	}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return noop // fail-open: cannot create the home, proceed unlocked
+	}
+	f, err := os.OpenFile(filepath.Join(configDir, deliverLockName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return noop
+	}
+	deadline := time.Now().Add(b.lockMaxWait())
+	for {
+		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if lockErr == nil {
+			return func() error {
+				unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				closeErr := f.Close()
+				if unlockErr != nil {
+					return unlockErr
+				}
+				return closeErr
+			}
+		}
+		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+			_ = f.Close() // unexpected flock failure: fail-open
+			return noop
+		}
+		if time.Now().After(deadline) {
+			_ = f.Close() // could not acquire within the bound: fail-open
+			return noop
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return noop
+		case <-time.After(deliverLockRetryInterval):
+		}
+	}
 }
 
 // Remove runs `tsamx remove <account>`.

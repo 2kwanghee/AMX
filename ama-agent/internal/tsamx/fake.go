@@ -75,6 +75,10 @@ func (f *Fake) Add(_ context.Context, req AddRequest) error {
 	}
 	acc.cred = append([]byte(nil), req.CredentialJSON...)
 	acc.disabled = !req.Enable
+	// Model real `tsamx add`: capturing a slot makes it the active account
+	// (exec.go Add / SSOT §6.3). deliver relies on this to know it must restore
+	// the previously-active account afterward.
+	f.active = req.Email
 	return nil
 }
 
@@ -235,6 +239,21 @@ func (f *Fake) ReadQuarantine(_ context.Context) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// DeliverLock records the call and returns a no-op release. The Fake models no
+// real config home, so there is no cross-process lock to take; tests assert the
+// call ordering (lock is taken around the swap) via the call log.
+func (f *Fake) DeliverLock(_ context.Context) func() error {
+	f.mu.Lock()
+	f.log("deliver_lock")
+	f.mu.Unlock()
+	return func() error {
+		f.mu.Lock()
+		f.log("deliver_unlock")
+		f.mu.Unlock()
+		return nil
+	}
 }
 
 // --- test helpers -----------------------------------------------------------
