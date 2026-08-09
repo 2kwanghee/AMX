@@ -444,7 +444,7 @@ message AmaMessage {
 복구된다 — 멱등이라 유실은 없고 지연만.) 재큐잉은 `MAX_SEND_ATTEMPTS`(기본 5)까지, 소진 시 명령을
 `failed`로 확정하고 배정을 재발행 가능한 resting 상태로 되돌린다. 경보는 **account-scoped 명령의
 최종 실패에만** 개방한다 — recall 계열은 D1 `recall_failed` 재사용, 그 외(deliver/activate/deactivate/
-recover)는 신규 `command_send_failed`, 모두 `server:kind:account` 키. 같은 대상의 후속 명령이
+switch_now)는 신규 `command_send_failed`, 모두 `server:kind:account` 키. 같은 대상의 후속 명령이
 CONVERGED로 acked되면 auto-resolve. **서버-scoped 명령**(set_mode/set_policy/req_report)의 최종
 실패는 경보를 열지 않는다 — 다음 세션의 정책 재-assertion이 의도를 재적용하는 자가치유 부류라 침묵이
 설계 의도다(수동 경보 영구 누적·3종 dedupe 키 공유 방지). 승계 명령이 배정의 pending 마커를 이미

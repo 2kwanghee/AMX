@@ -535,10 +535,15 @@ def _revert_assignment_on_send_failure(
     )
     if assignment is None:
         return None
-    if assignment.pending_command_id != command.command_id:
+    if (
+        assignment.pending_command_id is not None
+        and assignment.pending_command_id != command.command_id
+    ):
         # A newer command already owns the assignment; do not clobber it, and do
         # not alert — the successor reports its own result (return None so the
-        # caller opens no alert for this superseded command).
+        # caller opens no alert for this superseded command). Guarded on non-None
+        # so a marker-less command (switch_now never sets one) is not mistaken for
+        # superseded — it has no successor and must still alert on final failure.
         return None
     assignment.last_error = "sent_ack_timeout"
     assignment.pending_command_id = None

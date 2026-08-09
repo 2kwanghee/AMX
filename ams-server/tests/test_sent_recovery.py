@@ -262,6 +262,31 @@ def test_sent_timeout_server_scoped_over_cap_opens_no_alert(app_env):
     assert _open_alerts(server_id, "command_send_failed") == []
 
 
+def test_sent_timeout_switch_now_over_cap_opens_command_send_failed(app_env):
+    # switch_now sets no pending marker and has no successor, so it is not
+    # "superseded" — its cap-exhausted final failure must still alert.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d2switch@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "active")
+    with get_sessionmaker()() as db:
+        commands.request_switch_now(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.command_type == "switch_now"
+            )
+        )
+    _age_sent(command_id, seconds=1000, send_attempts=5)
+
+    with get_sessionmaker()() as db:
+        _, failed = commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    assert failed == [command_id]
+    opened = _open_alerts(server_id, "command_send_failed")
+    assert len(opened) == 1
+    assert opened[0].account_id == account_id
+    assert opened[0].detail["command_type"] == "switch_now"
+
+
 def test_superseded_command_final_failure_opens_no_alert(app_env):
     # A stuck sent command whose assignment a newer command already owns must not
     # alert — the successor reports its own result (review B guard 4).
