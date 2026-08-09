@@ -244,12 +244,16 @@ class SwitchNow(_message.Message):
     def __init__(self, account: _Optional[_Union[AccountRef, _Mapping]] = ..., strategy: _Optional[_Union[SwitchNow.SwitchStrategy, str]] = ..., assignment_id: _Optional[str] = ...) -> None: ...
 
 class SetPolicy(_message.Message):
-    __slots__ = ("threshold_pct", "default_strategy")
+    __slots__ = ("threshold_pct", "default_strategy", "cooldown_seconds", "hysteresis_pct")
     THRESHOLD_PCT_FIELD_NUMBER: _ClassVar[int]
     DEFAULT_STRATEGY_FIELD_NUMBER: _ClassVar[int]
+    COOLDOWN_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    HYSTERESIS_PCT_FIELD_NUMBER: _ClassVar[int]
     threshold_pct: float
     default_strategy: SwitchNow.SwitchStrategy
-    def __init__(self, threshold_pct: _Optional[float] = ..., default_strategy: _Optional[_Union[SwitchNow.SwitchStrategy, str]] = ...) -> None: ...
+    cooldown_seconds: float
+    hysteresis_pct: float
+    def __init__(self, threshold_pct: _Optional[float] = ..., default_strategy: _Optional[_Union[SwitchNow.SwitchStrategy, str]] = ..., cooldown_seconds: _Optional[float] = ..., hysteresis_pct: _Optional[float] = ...) -> None: ...
 
 class RequestReport(_message.Message):
     __slots__ = ("report_type", "reason")

@@ -1723,7 +1723,13 @@ type SetPolicy struct {
 	ThresholdPct float64 `protobuf:"fixed64,1,opt,name=threshold_pct,json=thresholdPct,proto3" json:"threshold_pct,omitempty"`
 	// Default for auto/switch_now when no strategy is named.
 	// UNSPECIFIED keeps the local default.
-	DefaultStrategy SwitchNow_SwitchStrategy `protobuf:"varint,2,opt,name=default_strategy,json=defaultStrategy,proto3,enum=amx.v1.SwitchNow_SwitchStrategy" json:"default_strategy,omitempty"` // cooldown/hysteresis intentionally absent — tsamx-local (O4-C).
+	DefaultStrategy SwitchNow_SwitchStrategy `protobuf:"varint,2,opt,name=default_strategy,json=defaultStrategy,proto3,enum=amx.v1.SwitchNow_SwitchStrategy" json:"default_strategy,omitempty"`
+	// Full central policy (F4, O4-B). Injected as
+	// `tsamx config set autoswitch.cooldown_seconds/hysteresis_pct <v>`.
+	// A negative value means "unset" (keep the local default); 0 is a real value
+	// (e.g. cooldown_seconds=0 disables the cooldown). AMA distinguishes the two.
+	CooldownSeconds float64 `protobuf:"fixed64,3,opt,name=cooldown_seconds,json=cooldownSeconds,proto3" json:"cooldown_seconds,omitempty"`
+	HysteresisPct   float64 `protobuf:"fixed64,4,opt,name=hysteresis_pct,json=hysteresisPct,proto3" json:"hysteresis_pct,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1770,6 +1776,20 @@ func (x *SetPolicy) GetDefaultStrategy() SwitchNow_SwitchStrategy {
 		return x.DefaultStrategy
 	}
 	return SwitchNow_SWITCH_STRATEGY_UNSPECIFIED
+}
+
+func (x *SetPolicy) GetCooldownSeconds() float64 {
+	if x != nil {
+		return x.CooldownSeconds
+	}
+	return 0
+}
+
+func (x *SetPolicy) GetHysteresisPct() float64 {
+	if x != nil {
+		return x.HysteresisPct
+	}
+	return 0
 }
 
 // Ask for an immediate report (§6.3 req_report, REST `:refresh-usage`).
@@ -2886,10 +2906,12 @@ const file_amx_proto_rawDesc = "" +
 	"\x1bSWITCH_STRATEGY_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14SWITCH_STRATEGY_BEST\x10\x01\x12\"\n" +
 	"\x1eSWITCH_STRATEGY_NEXT_AVAILABLE\x10\x02B\b\n" +
-	"\x06target\"}\n" +
+	"\x06target\"\xcf\x01\n" +
 	"\tSetPolicy\x12#\n" +
 	"\rthreshold_pct\x18\x01 \x01(\x01R\fthresholdPct\x12K\n" +
-	"\x10default_strategy\x18\x02 \x01(\x0e2 .amx.v1.SwitchNow.SwitchStrategyR\x0fdefaultStrategy\"\xac\x01\n" +
+	"\x10default_strategy\x18\x02 \x01(\x0e2 .amx.v1.SwitchNow.SwitchStrategyR\x0fdefaultStrategy\x12)\n" +
+	"\x10cooldown_seconds\x18\x03 \x01(\x01R\x0fcooldownSeconds\x12%\n" +
+	"\x0ehysteresis_pct\x18\x04 \x01(\x01R\rhysteresisPct\"\xac\x01\n" +
 	"\rRequestReport\x12A\n" +
 	"\vreport_type\x18\x01 \x01(\x0e2 .amx.v1.RequestReport.ReportTypeR\n" +
 	"reportType\x12\x16\n" +

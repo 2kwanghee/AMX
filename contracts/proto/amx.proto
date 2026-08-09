@@ -336,7 +336,13 @@ message SetPolicy {
   // Default for auto/switch_now when no strategy is named.
   // UNSPECIFIED keeps the local default.
   SwitchNow.SwitchStrategy default_strategy = 2;
-  // cooldown/hysteresis intentionally absent — tsamx-local (O4-C).
+
+  // Full central policy (F4, O4-B). Injected as
+  // `tsamx config set autoswitch.cooldown_seconds/hysteresis_pct <v>`.
+  // A negative value means "unset" (keep the local default); 0 is a real value
+  // (e.g. cooldown_seconds=0 disables the cooldown). AMA distinguishes the two.
+  double cooldown_seconds = 3;
+  double hysteresis_pct = 4;
 }
 
 // Ask for an immediate report (§6.3 req_report, REST `:refresh-usage`).
