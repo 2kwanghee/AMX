@@ -11,14 +11,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import crypto
 from app.core.auth import Principal
-from app.core.errors import ApiError, conflict
-from app.models import Admin, AdminSession
+from app.core.errors import ApiError, conflict, not_found
+from app.models import Admin, AdminSession, Tenant
 
 # §3: opaque session TTL. Short enough that a leaked token expires on its own;
 # revocation (logout / admin delete) is immediate regardless.
@@ -141,6 +141,11 @@ def create_admin(
             400, "Bad Request", "admin.role_tenant_mismatch",
             "A tenant-admin requires a tenant_id.",
         )
+    if tenant_id is not None and db.get(Tenant, tenant_id) is None:
+        # Without this, a non-existent tenant_id trips the FK on commit and would
+        # surface below as the misleading duplicate_email conflict. Hidden as 404
+        # exactly like every other unknown-tenant reference (errors.not_found).
+        raise not_found("tenant")
     admin = Admin(
         email=normalize_email(email),
         password_hash=crypto.hash_password(password),
@@ -158,3 +163,89 @@ def create_admin(
         ) from exc
     db.refresh(admin)
     return admin
+
+
+# -- Admin management CRUD (F1 RBAC, S2b) -------------------------------------
+def _enabled_global_admin_count(db: Session, *, exclude_id: uuid.UUID | None = None) -> int:
+    """How many non-disabled global-admins exist in the admins table.
+
+    Used to keep at least one usable human global-admin. The root
+    AMX_ADMIN_TOKEN is not counted — it lives outside this table and is the
+    break-glass path, so a structural lockout is impossible regardless; this is
+    a safety rail against accidentally emptying the human admin plane.
+    """
+    q = select(func.count()).select_from(Admin).where(
+        Admin.role == "global-admin", Admin.disabled.is_(False)
+    )
+    if exclude_id is not None:
+        q = q.where(Admin.id != exclude_id)
+    return db.scalar(q) or 0
+
+
+def list_admins(db: Session, limit: int, offset: int) -> tuple[list[Admin], int]:
+    total = db.scalar(select(func.count()).select_from(Admin)) or 0
+    rows = db.scalars(
+        select(Admin).order_by(Admin.created_at, Admin.id).limit(limit).offset(offset)
+    ).all()
+    return list(rows), total
+
+
+def get_admin(db: Session, admin_id: uuid.UUID) -> Admin:
+    admin = db.get(Admin, admin_id)
+    if admin is None:
+        raise not_found("admin")
+    return admin
+
+
+def update_admin(
+    db: Session,
+    admin_id: uuid.UUID,
+    *,
+    disabled: bool | None = None,
+    password: str | None = None,
+) -> Admin:
+    """Toggle `disabled` and/or reset the password. Role/tenant are immutable.
+
+    Disabling takes effect immediately: `resolve_session` filters on
+    `Admin.disabled`, so every live session of a just-disabled admin stops
+    authenticating on its next use without touching the session rows.
+    """
+    admin = get_admin(db, admin_id)
+    if (
+        disabled is True
+        and not admin.disabled
+        and admin.role == "global-admin"
+        and _enabled_global_admin_count(db, exclude_id=admin.id) == 0
+    ):
+        raise conflict(
+            "admin.last_global_admin",
+            "Cannot disable the last enabled global-admin.",
+        )
+    if disabled is not None:
+        admin.disabled = disabled
+    if password is not None:
+        admin.password_hash = crypto.hash_password(password)
+    admin.updated_at = _now()
+    db.commit()
+    db.refresh(admin)
+    return admin
+
+
+def delete_admin(db: Session, admin_id: uuid.UUID) -> None:
+    """Delete an admin; its sessions cascade away (admin_sessions FK CASCADE).
+
+    Refuses to remove the last enabled global-admin for the same reason
+    `update_admin` refuses to disable it.
+    """
+    admin = get_admin(db, admin_id)
+    if (
+        admin.role == "global-admin"
+        and not admin.disabled
+        and _enabled_global_admin_count(db, exclude_id=admin.id) == 0
+    ):
+        raise conflict(
+            "admin.last_global_admin",
+            "Cannot delete the last enabled global-admin.",
+        )
+    db.delete(admin)
+    db.commit()
