@@ -1,0 +1,59 @@
+# ① 배포 필수 (내재화 실배포 직전 필수)
+
+> 상태: 진행 중. 트랙 구성: B1 ∥ B4 (독립, 병렬 가능) → A1 (최대 작업, R3).
+> C2는 조사 결과 **이미 구현 완료**라 이 순위에서 제외했다(아래 "C2 확인 기록" 참조).
+
+## B1 — 러너 진입점 강제 (O5 잔여) — R1
+
+**배경**: deliver 크리티컬 섹션(§6.3) 동안 `~/.claude/.credentials.json`이 순간 교체된다.
+주 방어(이전활성 복귀 + 원자적 쓰기)와 보조 방어(`deploy/amx-claude` flock 래퍼)는 구현·병합 완료.
+**잔여 = 래퍼를 안 거친 직접 `claude` 실행의 sub-second 오과금 창**: 코드로는 못 막고 배포에서 강제해야 한다.
+
+**할 일**
+- 배포 시 러너 진입점을 래퍼로 강제하는 설치 메커니즘(PATH 셰도잉/alias/심링크 중 택1, 근거 명시)
+- 러너와 AMA가 같은 `~/.claude`를 보도록 배포 검증(다른 HOME/컨테이너 분리 감지)
+- 강제 상태를 점검하는 검증 스크립트(설치 후 + 주기 점검 겸용)
+- `docs/DEPLOYMENT-RUNNER.md` 갱신
+
+**완료조건**: 검증 스크립트가 (a) 진입점이 래퍼임 (b) 러너·AMA의 `~/.claude` 동일함을 판정하고,
+비강제 상태를 심은 테스트에서 실패를 정확히 검출한다.
+
+## B4 — TLS 실배포 구성 (D9) — R1
+
+**배경**: 코드 경로는 완성 — cert/key 제공 시 `add_secure_port`, 미제공 시 `AMX_GRPC_ALLOW_INSECURE=1`
+opt-in fail-closed, AMA 쪽 TLS/tls 테스트(`transport_tls_test.go`) 존재. **잔여 = 실배포 cert 발급·배포 절차.**
+
+**할 일**
+- 내재화용 사설 CA + 서버 cert 발급 스크립트(`deploy/` 하위, openssl 기반, 갱신 절차 포함)
+- AMA 측 CA 신뢰 배포 절차, (옵션) mTLS 구성 예시 — §7 위협 경계(능동 MITM의 agent_public_key 치환은 TLS/mTLS가 방어)가 근거
+- `docs/DEPLOYMENT-TLS.md` 갱신(발급→배포→검증→갱신 런북)
+
+**완료조건**: 스크립트로 발급한 cert로 AMS 기동 + AMA 접속이 TLS로 성립하고(E2E 또는 스모크 스크립트),
+`AMX_GRPC_ALLOW_INSECURE` 미설정 상태에서 평문 접속이 거부된다.
+
+## A1 — O9 credential 역동기화 — R3 (2인 정족수 + ADVERSARY)
+
+**배경**: refresh token은 회전형으로 판별 완료(2026-08-08, `tools/o9_refresh_probe.py`).
+AMA가 로컬 refresh로 갱신한 credential 세트를 AMS로 역전송해 `accounts.encrypted_secret`을 최신화해야
+크로스서버 재배정이 사람 개입 없이 자동화된다. 같은 서버 재배정은 O2(로컬 보존)로 이미 커버.
+
+**할 일** (착수 전 설계 선행 — proto 변경이라 P0 계약 관례대로 계약부터)
+- proto: 신규 `CredentialUpdate` 메시지(AMA→AMS 방향), 3-lang codegen 재생성
+- AMA: refresh 갱신 감지(tsamx 캐시/credential 파일 변화) → 세션 KEK 봉인 후 역전송, 재시도·outbox 정합
+- AMS: 수신 → `encrypted_secret` 갱신, **credential_version 단조성**(구버전 역전 거부), 봉투암호화 초크포인트(`crypto.encrypt_secret`) 경유
+- 경합 처리: deliver/recall 인플라이트 중 역전송 도착, 동시 다중 세션(F3) 중복 수신
+- E2E: refresh 갱신 → 역동기화 → 크로스서버 재배정 성공
+
+**완료조건**: E2E — 서버 X에서 refresh 회전이 일어난 계정을 recall 후 서버 Y에 deliver 했을 때
+**갱신된** credential이 하달되어 인증이 성립한다(구 credential이면 invalid_grant로 실패했을 시나리오).
+credential_version 역전 시도는 거부 로그와 함께 무시된다.
+
+**주의**: 인증·암호·외부 입력 파싱 전부 해당 → R3. 리뷰는 2인 정족수 + ADVERSARY 필수.
+관련: §5.7, §8 O9, BACKLOG A1, G12(이벤트 무손실과 별개 — 혼동 금지).
+
+## C2 확인 기록 (2026-08-09, 이 순위에서 제외)
+
+BACKLOG C2 행("WrappedKey 원시 KEK passthrough")은 **stale**. 실코드는 세션 KEK를 에이전트별
+ephemeral X25519 **NaCl sealed box**로 봉인한다 — `ama-agent/internal/crypto/crypto.go:199-214`(UnwrapKEK가
+raw KEK·타 키 봉인·변조를 전부 거부), AMS 측 봉인 경로, AMX-DESIGN §7 In-transit 행 반영 완료(c2-kek-wrap 병합).
+남은 것 없음. BACKLOG 행 정정은 ④(04-low-cost-misc.md)에서 일괄 처리.
