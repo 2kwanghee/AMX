@@ -14,6 +14,7 @@ NOTHING`` so a re-run over the same day never duplicates a row.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -24,8 +25,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.core.errors import conflict, not_found
+from app.db import try_advisory_xact_lock as _try_advisory_xact_lock
 from app.models import BillingCursor, BillingEvent, UsageSnapshot
 from app.services.inventory import get_tenant
+
+_logger = logging.getLogger("ams.billing")
 
 KIND = "usage_daily"
 # G26 post-export correction. The original row is immutable; a void is a separate
@@ -40,6 +44,10 @@ _BILLING_SWEEP_LOCK_KEY = 0x414D580F03
 # MessageToDict(preserving_proto_field_name=True) renders the enum by NAME, so a
 # detached/never-delivered account appears verbatim as this string in payload.
 _ABSENT_STATUS = "ALLOCATION_STATUS_ABSENT"
+# G27 visibility: a healthy sweep advances the watermark one closed day per run.
+# A larger jump means either a long outage recovery or a wall-clock forward step;
+# either way it is worth surfacing in the log (no alert row, log-only).
+_MAX_NORMAL_ADVANCE = timedelta(days=2)
 
 
 def _now() -> datetime:
@@ -49,10 +57,6 @@ def _now() -> datetime:
 def _floor_day(dt: datetime) -> datetime:
     dt = dt.astimezone(UTC)
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def _try_advisory_xact_lock(db: Session, key: int) -> bool:
-    return bool(db.scalar(select(func.pg_try_advisory_xact_lock(key))))
 
 
 def _aggregate_day(rows: list[tuple[dict, uuid.UUID]]) -> dict:
@@ -122,45 +126,92 @@ def sweep_billing(db: Session) -> int:
             return 0  # no usage ledger yet — nothing to bill
         start = _floor_day(first)
 
+    # G27 visibility (log-only, no alert row). A forward wall-clock step
+    # (VM resume / NTP jump) pushes the watermark ahead of real time; usage that
+    # then lands with ``reported_at`` below the watermark is skipped forever by
+    # the range query below. Count what sits in [last_closed_end, start) — a
+    # window that is empty in the healthy case (watermark tracks last_closed_end)
+    # and only fills when the watermark has run ahead — so the warning stays
+    # quiet in normal operation. Never logs payload content.
+    if start > last_closed_end:
+        skipped = db.scalar(
+            select(func.count()).select_from(UsageSnapshot).where(
+                UsageSnapshot.report_type == "usage",
+                UsageSnapshot.reported_at >= last_closed_end,
+                UsageSnapshot.reported_at < start,
+            )
+        )
+        if skipped:
+            min_reported = db.scalar(
+                select(func.min(UsageSnapshot.reported_at)).where(
+                    UsageSnapshot.report_type == "usage",
+                    UsageSnapshot.reported_at >= last_closed_end,
+                    UsageSnapshot.reported_at < start,
+                )
+            )
+            _logger.warning(
+                "billing sweep: %d usage snapshot(s) below the watermark will "
+                "not be billed (watermark ahead of real time; min reported_at=%s)",
+                skipped,
+                min_reported.isoformat() if min_reported else None,
+            )
+
     if start >= last_closed_end:
         return 0  # no fully-closed day beyond the watermark
 
-    rows = db.execute(
-        select(
-            UsageSnapshot.reported_at,
-            UsageSnapshot.tenant_id,
-            UsageSnapshot.server_id,
-            UsageSnapshot.payload,
-        ).where(
-            UsageSnapshot.report_type == "usage",
-            UsageSnapshot.reported_at >= start,
-            UsageSnapshot.reported_at < last_closed_end,
+    # G27 visibility: a healthy run advances one closed day. An abnormally large
+    # advance (outage recovery or a forward clock step) is surfaced, but only
+    # once a watermark exists — a first run legitimately backfills from the
+    # earliest ledger row. Log-only.
+    if cursor is not None and last_closed_end - start > _MAX_NORMAL_ADVANCE:
+        _logger.warning(
+            "billing sweep: watermark advancing %s in one run (>%s) "
+            "from %s to %s",
+            last_closed_end - start,
+            _MAX_NORMAL_ADVANCE,
+            start.isoformat(),
+            last_closed_end.isoformat(),
         )
-    ).all()
 
-    # Group by (tenant_id, UTC day).
-    grouped: dict[tuple[uuid.UUID, datetime], list[tuple[dict, uuid.UUID]]] = (
-        defaultdict(list)
-    )
-    for reported_at, tenant_id, server_id, payload in rows:
-        day = _floor_day(reported_at)
-        grouped[(tenant_id, day)].append((payload, server_id))
-
+    # G28: load the ledger one closed UTC day at a time instead of one bulk
+    # ``.all()`` over the whole [start, last_closed_end) span, so a first run or
+    # a long-downtime recovery never materialises the entire backlog at once.
+    # Results and idempotency are unchanged: aggregation is already per
+    # (tenant, day), and each day boundary is an aligned UTC midnight.
     values = []
-    for (tenant_id, day), day_rows in grouped.items():
-        agg = _aggregate_day(day_rows)
-        if agg["snapshot_count"] == 0:
-            continue  # every row for this tenant/day was malformed
-        values.append(
-            {
-                "id": uuid.uuid4(),
-                "tenant_id": tenant_id,
-                "kind": KIND,
-                "period_start": day,
-                "period_end": day + timedelta(days=1),
-                "payload": agg,
-            }
-        )
+    day = start
+    while day < last_closed_end:
+        next_day = day + timedelta(days=1)
+        day_rows_all = db.execute(
+            select(
+                UsageSnapshot.tenant_id,
+                UsageSnapshot.server_id,
+                UsageSnapshot.payload,
+            ).where(
+                UsageSnapshot.report_type == "usage",
+                UsageSnapshot.reported_at >= day,
+                UsageSnapshot.reported_at < next_day,
+            )
+        ).all()
+        # Group this day's rows by tenant.
+        by_tenant: dict[uuid.UUID, list[tuple[dict, uuid.UUID]]] = defaultdict(list)
+        for tenant_id, server_id, payload in day_rows_all:
+            by_tenant[tenant_id].append((payload, server_id))
+        for tenant_id, day_rows in by_tenant.items():
+            agg = _aggregate_day(day_rows)
+            if agg["snapshot_count"] == 0:
+                continue  # every row for this tenant/day was malformed
+            values.append(
+                {
+                    "id": uuid.uuid4(),
+                    "tenant_id": tenant_id,
+                    "kind": KIND,
+                    "period_start": day,
+                    "period_end": next_day,
+                    "payload": agg,
+                }
+            )
+        day = next_day
 
     created = 0
     if values:

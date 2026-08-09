@@ -7,6 +7,7 @@ suite uses, then exercises the REST list/export surface through the client.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -60,6 +61,37 @@ def _plant(tenant_id, server_id, reported_at, payload, report_type="usage"):
 def _sweep() -> int:
     with get_sessionmaker()() as db:
         return billing.sweep_billing(db)
+
+
+class _RecordCollector(logging.Handler):
+    """Captures ams.billing log messages directly, independent of caplog quirks."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.messages: list[tuple[int, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append((record.levelno, record.getMessage()))
+
+
+def _capture_billing_logs():
+    # app_env runs alembic in-process, and alembic's fileConfig sets
+    # disable_existing_loggers, which flips ams.billing's ``disabled`` flag.
+    # Clear it (and restore) so the warning logic is observable (matches the
+    # ams.grpc capture in test_kek_wrap.py).
+    logger = logging.getLogger("ams.billing")
+    handler = _RecordCollector()
+    logger.addHandler(handler)
+    prev_level, prev_disabled = logger.level, logger.disabled
+    logger.setLevel(logging.DEBUG)
+    logger.disabled = False
+
+    def restore():
+        logger.removeHandler(handler)
+        logger.setLevel(prev_level)
+        logger.disabled = prev_disabled
+
+    return handler, restore
 
 
 def _events(tenant_id):
@@ -368,3 +400,99 @@ def test_void_cross_tenant_404(app_env, client):
     assert denied.status_code == 404
     # The event under its real tenant is untouched by the cross-tenant attempt.
     assert len(_events(tenant_a)) == 1
+
+
+# -- G27: clock-forward-jump silent non-billing is surfaced -------------------
+def _set_watermark(watermark: datetime) -> None:
+    with get_sessionmaker()() as db:
+        db.add(
+            BillingCursor(kind="usage_daily", watermark=watermark, updated_at=datetime.now(UTC))
+        )
+        db.commit()
+
+
+def test_below_watermark_snapshot_warns(app_env):
+    """A forward wall-clock step parks the watermark in the future; usage that
+    lands with reported_at below it is skipped forever and must be logged."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-a@ex.com")
+    # Simulate the jump: watermark already 10 days ahead of real time.
+    future = billing._floor_day(datetime.now(UTC)) + timedelta(days=10)
+    _set_watermark(future)
+    # A real report now lands below that watermark (but at/after last_closed_end).
+    _plant(tenant_id, server_id, datetime.now(UTC), _usage_payload(active_ids=["a1"]))
+
+    handler, restore = _capture_billing_logs()
+    try:
+        created = _sweep()
+    finally:
+        restore()
+
+    assert created == 0  # watermark is ahead of last_closed_end: nothing billed
+    warnings = [m for lvl, m in handler.messages if lvl == logging.WARNING]
+    assert any("below the watermark" in m for m in warnings), warnings
+    assert any("min reported_at=" in m for m in warnings)
+
+
+def test_large_watermark_advance_warns(app_env):
+    """An abnormally large single-run advance (outage recovery / clock step) is
+    surfaced, but only once a watermark already exists."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-b@ex.com")
+    # Watermark 5 days behind last_closed_end -> one run jumps >2 days forward.
+    behind = billing._floor_day(datetime.now(UTC)) - timedelta(days=5)
+    _set_watermark(behind)
+    _plant(tenant_id, server_id, _closed_day(days_ago=4), _usage_payload(active_ids=["a1"]))
+
+    handler, restore = _capture_billing_logs()
+    try:
+        _sweep()
+    finally:
+        restore()
+
+    warnings = [m for lvl, m in handler.messages if lvl == logging.WARNING]
+    assert any("watermark advancing" in m for m in warnings), warnings
+
+
+def test_normal_first_sweep_is_quiet(app_env):
+    """A first run (no cursor) backfilling a few days must not warn on advance,
+    and a healthy sweep emits no below-watermark warning."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-c@ex.com")
+    _plant(tenant_id, server_id, _closed_day(days_ago=3), _usage_payload(active_ids=["a1"]))
+
+    handler, restore = _capture_billing_logs()
+    try:
+        assert _sweep() == 1
+    finally:
+        restore()
+
+    warnings = [m for lvl, m in handler.messages if lvl == logging.WARNING]
+    assert warnings == []
+
+
+# -- G28: multi-day span chunked per-day yields identical results -------------
+def test_multiday_chunked_sweep(app_env):
+    """Three distinct closed days are aggregated into one event per (tenant, day)
+    by the day-at-a-time loader, with per-day payloads intact."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g28-a@ex.com")
+    _plant(tenant_id, server_id, _closed_day(days_ago=3), _usage_payload(active_ids=["d3a", "d3b"]))
+    _plant(tenant_id, server_id, _closed_day(days_ago=4), _usage_payload(active_ids=["d4a"]))
+    _plant(tenant_id, server_id, _closed_day(days_ago=5), _usage_payload(active_ids=["d5a"], max_util=42.0))
+
+    assert _sweep() == 3
+    events = _events(tenant_id)
+    assert len(events) == 3
+    by_start = {billing._floor_day(e.period_start.astimezone(UTC)): e for e in events}
+    d3 = by_start[billing._floor_day(_closed_day(days_ago=3))]
+    d4 = by_start[billing._floor_day(_closed_day(days_ago=4))]
+    d5 = by_start[billing._floor_day(_closed_day(days_ago=5))]
+    assert d3.payload["account_ids"] == ["d3a", "d3b"]
+    assert d3.payload["snapshot_count"] == 1
+    assert d4.payload["account_ids"] == ["d4a"]
+    assert d5.payload["account_ids"] == ["d5a"]
+    assert d5.payload["max_utilization_pct"] == 42.0
+    # Each event spans exactly its own UTC day.
+    for e in events:
+        assert e.period_end - e.period_start == timedelta(days=1)
+
+    # Idempotent re-run over the same multi-day span creates nothing new.
+    assert _sweep() == 0
+    assert len(_events(tenant_id)) == 3
