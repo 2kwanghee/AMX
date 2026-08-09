@@ -244,7 +244,7 @@ func (f *Fake) ReadQuarantine(_ context.Context) (map[string]string, error) {
 // DeliverLock records the call and returns a no-op release. The Fake models no
 // real config home, so there is no cross-process lock to take; tests assert the
 // call ordering (lock is taken around the swap) via the call log.
-func (f *Fake) DeliverLock(_ context.Context) (func() error, error) {
+func (f *Fake) DeliverLock(_ context.Context) func() error {
 	f.mu.Lock()
 	f.log("deliver_lock")
 	f.mu.Unlock()
@@ -253,7 +253,7 @@ func (f *Fake) DeliverLock(_ context.Context) (func() error, error) {
 		f.log("deliver_unlock")
 		f.mu.Unlock()
 		return nil
-	}, nil
+	}
 }
 
 // --- test helpers -----------------------------------------------------------

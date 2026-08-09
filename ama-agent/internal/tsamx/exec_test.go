@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestWriteFileAtomic verifies the credential/identity writer is atomic (temp +
@@ -66,10 +67,7 @@ func TestDeliverLockExclusive(t *testing.T) {
 	dir := t.TempDir()
 	b := &ExecBridge{ConfigDir: dir}
 
-	release, err := b.DeliverLock(context.Background())
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
+	release := b.DeliverLock(context.Background())
 	lockPath := filepath.Join(dir, deliverLockName)
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("lock file not created: %v", err)
@@ -96,13 +94,72 @@ func TestDeliverLockExclusive(t *testing.T) {
 	_ = syscall.Flock(int(f2.Fd()), syscall.LOCK_UN)
 }
 
-// TestDeliverLockNoConfigDirIsNoop: with no config home there is nothing to
-// protect, so DeliverLock returns a no-op release and no error.
-func TestDeliverLockNoConfigDirIsNoop(t *testing.T) {
-	b := &ExecBridge{}
-	release, err := b.DeliverLock(context.Background())
+// TestDeliverLockFailOpen (B1b review item 1b): when the lock is already held by
+// another holder (a long-lived runner), DeliverLock must NOT block indefinitely —
+// it retries up to LockMaxWait then returns a no-op release so the deliver
+// proceeds unlocked (fail-open). We verify it gives up within a bound and does not
+// steal the lock (the other holder still owns it afterward).
+func TestDeliverLockFailOpen(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, deliverLockName)
+
+	// Another process/holder owns the lock (models a running runner).
+	holder, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		t.Fatalf("no-config DeliverLock err: %v", err)
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	b := &ExecBridge{ConfigDir: dir, LockMaxWait: 150 * time.Millisecond}
+	start := time.Now()
+	release := b.DeliverLock(context.Background())
+	elapsed := time.Since(start)
+
+	if release == nil {
+		t.Fatal("DeliverLock returned a nil release (must always be usable)")
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("DeliverLock returned too fast (%v) — did it wait out the bound?", elapsed)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("DeliverLock blocked far past its bound (%v) — not fail-open", elapsed)
+	}
+	// The holder must still own the lock — fail-open does not steal it.
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("holder lost the lock after DeliverLock fail-open: %v", err)
+	}
+	_ = release() // no-op release must be safe to call
+}
+
+// TestDeliverLockDefaultsToClaudeHome (B1b review item 3): with no ConfigDir,
+// DeliverLock resolves ~/.claude (matching the amx-claude wrapper's default) so
+// both sides flock the SAME file. We point HOME at a temp dir and check the lock
+// lands under <HOME>/.claude.
+func TestDeliverLockDefaultsToClaudeHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	b := &ExecBridge{} // ConfigDir empty -> must resolve ~/.claude
+	release := b.DeliverLock(context.Background())
+	defer release()
+
+	lockPath := filepath.Join(home, ".claude", deliverLockName)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("expected lock under ~/.claude (%s): %v", lockPath, err)
+	}
+}
+
+// TestDeliverLockNoHomeIsNoop: with neither a config home nor a resolvable HOME,
+// DeliverLock returns a usable no-op release and takes no lock.
+func TestDeliverLockNoHomeIsNoop(t *testing.T) {
+	t.Setenv("HOME", "")
+	b := &ExecBridge{}
+	release := b.DeliverLock(context.Background())
+	if release == nil {
+		t.Fatal("release must never be nil")
 	}
 	if err := release(); err != nil {
 		t.Fatalf("no-op release err: %v", err)

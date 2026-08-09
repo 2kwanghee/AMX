@@ -57,17 +57,21 @@ type Bridge interface {
 	ReadQuarantine(ctx context.Context) (map[string]string, error)
 
 	// DeliverLock takes an exclusive, cross-process advisory lock over the
-	// runner's config home for the whole deliver credential-swap critical section
-	// (write -> add -> restore, SSOT §6.3 / B1b) and returns a release func. A
-	// runner launched through the deploy/amx-claude wrapper takes a *shared* lock
-	// on the same file before it reads .credentials.json, so it can never start
-	// up inside the window where the freshly delivered account is momentarily
-	// active — closing the over-charge window that B1a only narrows. This is
-	// distinct from the engine lock (which serializes AMA-internal mutations); the
-	// flock coordinates AMA with the separate runner processes. The lock is
-	// process-associated, so an AMA crash releases it automatically. Bridges with
-	// no config home return a no-op release and a nil error.
-	DeliverLock(ctx context.Context) (func() error, error)
+	// runner's config home for the deliver credential-swap critical section (SSOT
+	// §6.3 / B1b) and returns a release func — ALWAYS non-nil, so the caller can
+	// unconditionally defer it. A runner launched through the deploy/amx-claude
+	// wrapper takes a *shared* lock on the same file before it starts claude, so it
+	// cannot begin inside the window where the freshly delivered account is
+	// momentarily active — closing the over-charge window that B1a only narrows.
+	//
+	// Acquisition is NON-BLOCKING with a bounded retry and is invoked OUTSIDE the
+	// engine lock: if it cannot be taken within the bound (e.g. a long-lived runner
+	// holds the shared lock) it returns a no-op release and the deliver proceeds
+	// WITHOUT the lock (fail-open), so it can never stall the engine lock or the
+	// scheduler. Distinct from the engine lock (which serializes AMA-internal
+	// mutations); the flock coordinates AMA with the separate runner processes and
+	// is process-associated, so an AMA crash releases it automatically.
+	DeliverLock(ctx context.Context) func() error
 }
 
 // ListResult mirrors `tsamx list --json` (tsamx json_output schema v1).

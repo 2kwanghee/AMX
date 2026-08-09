@@ -324,3 +324,107 @@ func TestDeliverRestoreFailureDiverges(t *testing.T) {
 		t.Fatal("B should have been added before the failed restore")
 	}
 }
+
+// statusErrBridge fails Status, so a test can exercise B1b review item 4: the
+// runner's prior active account is unknown, so after Add the new account may be
+// left live and deliver must surface DIVERGED (not a false CONVERGED).
+type statusErrBridge struct {
+	*tsamx.Fake
+}
+
+func (b *statusErrBridge) Status(_ context.Context) (*tsamx.StatusResult, error) {
+	return nil, errors.New("status unavailable")
+}
+
+// TestDeliverStatusErrorDiverges (B1b item 4): a Status read failure before Add
+// means the prior active account is unknown, so deliver reports DIVERGED
+// (active_unknown) rather than hiding a possible over-charge behind CONVERGED. The
+// account is still installed so a later reconcile/redeliver can settle it.
+func TestDeliverStatusErrorDiverges(t *testing.T) {
+	fake := tsamx.NewFake()
+	ctx := context.Background()
+	if err := fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+		t.Fatal(err)
+	}
+	hn := newHarnessBridge(t, &statusErrBridge{Fake: fake}, &sync.Mutex{}, nil)
+	ack := hn.apply(t, hn.deliverCmd(t, "d1", "acc-b", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_DIVERGED {
+		t.Fatalf("status-error convergence = %v, want DIVERGED", ack.Convergence)
+	}
+	if ack.ErrorCode != "active_unknown" {
+		t.Fatalf("error_code = %q, want active_unknown", ack.ErrorCode)
+	}
+	if !fake.Has("b@x.io") {
+		t.Fatal("B should still be installed for a later reconcile")
+	}
+}
+
+// blockingLockBridge blocks inside DeliverLock until released, so a test can prove
+// the deliver lock is taken OUTSIDE the engine lock: while a deliver waits on the
+// lock, another engine-locked command must still make progress (B1b review item
+// 1 — the engine can never freeze behind a runner holding the shared lock).
+type blockingLockBridge struct {
+	*tsamx.Fake
+	lockStarted chan struct{}
+	lockRelease chan struct{}
+	once        sync.Once
+}
+
+func (b *blockingLockBridge) DeliverLock(ctx context.Context) func() error {
+	b.once.Do(func() { close(b.lockStarted) })
+	<-b.lockRelease
+	return b.Fake.DeliverLock(ctx)
+}
+
+// TestDeliverLockTakenOutsideEngineLock (B1b item 1, regression): with the lock
+// acquired BEFORE the engine lock, a deliver stuck waiting on the deliver lock
+// does NOT hold the engine lock, so a concurrent set_active (which needs the
+// engine lock) completes. On the pre-fix code (lock inside the engine lock) this
+// would deadlock the engine and time out.
+func TestDeliverLockTakenOutsideEngineLock(t *testing.T) {
+	engine := &sync.Mutex{}
+	bb := &blockingLockBridge{
+		Fake:        tsamx.NewFake(),
+		lockStarted: make(chan struct{}),
+		lockRelease: make(chan struct{}),
+	}
+	ctx := context.Background()
+	if err := bb.Fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+		t.Fatal(err)
+	}
+	hn := newHarnessBridge(t, bb, engine, reporter.NewOutbox())
+
+	deliverDone := make(chan struct{})
+	go func() {
+		hn.apply(t, hn.deliverCmd(t, "d1", "acc-b", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+		close(deliverDone)
+	}()
+	<-bb.lockStarted // deliver is now parked in DeliverLock, holding NO engine lock
+
+	// A command that needs the engine lock must still run — the engine is free.
+	saDone := make(chan *amxv1.CommandAck, 1)
+	go func() {
+		saDone <- hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+			CommandId: "sa-1",
+			Cmd: &amxv1.AmsCommand_SetActive{SetActive: &amxv1.SetAccountActive{
+				Account: &amxv1.AccountRef{AmsAccountId: "acc-a", Email: "a@x.io"},
+				Active:  true,
+			}},
+		}))
+	}()
+	select {
+	case ack := <-saDone:
+		if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+			t.Fatalf("set_active during blocked deliver: %v detail=%q", ack.Convergence, ack.Detail)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("engine frozen: set_active blocked while deliver waited on the deliver lock")
+	}
+
+	close(bb.lockRelease) // let the deliver acquire the lock and finish
+	select {
+	case <-deliverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deliver did not finish after the deliver lock was released")
+	}
+}

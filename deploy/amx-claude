@@ -10,12 +10,19 @@
 # runners launched through it.
 #
 # How: AMA holds an EXCLUSIVE flock on `<CLAUDE_CONFIG_DIR>/.amx-deliver.lock`
-# for the whole swap. This wrapper takes a SHARED flock on the same file before
-# exec'ing claude, so its startup blocks until any in-progress deliver finishes.
-# The lock file is separate from the credential files, so claude never touches
-# it. Shared vs exclusive: many runners may hold the shared lock at once (they
-# do not serialize against each other), but none can overlap AMA's exclusive
-# swap.
+# for the whole swap. This wrapper takes a SHARED flock on the same file, waits
+# (bounded) for any in-progress deliver to finish, then RELEASES it and starts
+# claude. We do NOT hold the lock for claude's lifetime: that would make AMA's
+# exclusive deliver wait for the runner to exit (a long interactive session could
+# stall deliver, and thus the whole switching engine, for hours). The lock is
+# separate from the credential files, so claude never touches it.
+#
+# Best-effort, not a hard guarantee: after releasing the lock there is a tiny gap
+# before claude reads the credential. B1a (previous-active restore + atomic write)
+# is the PRIMARY defense that bounds that gap to a sub-second, torn-free window;
+# this wrapper is the secondary "do not start on top of an in-progress deliver"
+# guard. Perfect hand-off would require claude to expose its credential-read
+# instant, which it does not. See docs/DEPLOYMENT-RUNNER.md.
 #
 # Usage: drop-in replacement for `claude`. All arguments — including `-p
 # <command>` used by the ClickEye webhook path — are passed through unchanged.
@@ -46,7 +53,11 @@ if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
 	exec "$CLAUDE_BIN" "$@"
 fi
 
-# Take a SHARED lock on the deliver lock file for the claude process lifetime,
-# then hand off to claude. `flock` creates the file if needed and holds the lock
-# until the command it wraps exits.
-exec flock -s "$LOCK_FILE" "$CLAUDE_BIN" "$@"
+# Wait (bounded) for any in-progress deliver to release the exclusive lock, then
+# drop our shared lock immediately and start claude. `-w` bounds the wait; if it
+# times out (deliver still running) we start anyway — best-effort, B1a bounds the
+# residual exposure. `-c true` acquires+releases without holding across claude.
+# AMX_DELIVER_WAIT overrides the wait bound (seconds; default 5).
+flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
+
+exec "$CLAUDE_BIN" "$@"

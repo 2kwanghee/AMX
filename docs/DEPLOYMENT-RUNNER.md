@@ -42,19 +42,29 @@ deliver 크리티컬 섹션(SSOT §6.3, AMA `handleDeliver`)은 다음을 한 �
 - 결과: 활성이 신규로 바뀌어 있는 창이 수백 ms 이하로 좁아진다. 래퍼를 설치하지
   않아도 노출은 이 수준으로 제한된다.
 
-### 층 2 — B1b: flock 조율 (래퍼 설치 시 창 완전 차단)
-- **AMA**: deliver 크리티컬 섹션 전체 동안 `$CLAUDE_CONFIG_DIR/.amx-deliver.lock`에
-  **배타 락**(`flock LOCK_EX`, `internal/tsamx/exec.go` `DeliverLock`,
-  `handleDeliver`에서 획득·해제)을 잡는다. 엔진 락(AMA 내부 직렬화)과 별개로,
-  이 flock은 **러너 프로세스와의 프로세스 간 조율** 전용이다.
-- **러너 래퍼(`deploy/amx-claude`)**: `claude`를 exec 하기 전에 같은 파일에
-  **공유 락**(`flock -s`)을 잡는다. 공유 락은 진행 중인 deliver(배타)가 끝날
-  때까지 대기하므로, 러너의 startup read가 크리티컬 섹션과 **겹치지 않는다**.
-- **락이 창을 닫는 근거**: AMA가 `LOCK_EX`를 쥔 구간(기록~add~복귀) 동안 래퍼의
-  `LOCK_SH` 요청은 커널에서 블록된다 → 러너의 credential read는 반드시 복귀 완료
-  **후**에 일어난다. 공유끼리는 블록하지 않으므로 러너 다중 기동은 직렬화되지 않는다.
+### 층 2 — B1b: flock 조율 (래퍼 설치 시 "진행 중 deliver 위 기동" 차단)
+- **AMA**: deliver 크리티컬 섹션(기록~add~복귀) 동안 `$CLAUDE_CONFIG_DIR/.amx-deliver.lock`에
+  **배타 락**(`flock LOCK_EX`, `internal/tsamx/exec.go` `DeliverLock`)을 잡는다.
+  - **획득은 논블록·상한 재시도**(`LOCK_EX|LOCK_NB`, 50ms 간격, 상한 기본 5s) 이고
+    **`handleDeliver`가 엔진 락을 잡기 _전에_ 호출**한다. 러너가 공유 락을 오래
+    쥐고 있어 상한 내 획득에 실패하면 **flock 없이 진행**(fail-open) — deliver가
+    **무한 블록되지 않으며 엔진 락을 점유하지 않는다.** 따라서 장수명 러너가 떠
+    있어도 스케줄러 틱·다른 명령은 계속 진행(엔진 프리즈 없음). fail-open 시 노출은
+    층 1(B1a)이 sub-second로 방어.
+  - 엔진 락(AMA 내부 직렬화)과 별개로, 이 flock은 **러너 프로세스와의 조율** 전용.
+- **러너 래퍼(`deploy/amx-claude`)**: `claude` 기동 **전에** 같은 파일에 **공유 락**을
+  `flock -w <상한> -s <lock> -c true`로 잡아 **진행 중 deliver가 끝날 때까지 대기한 뒤
+  즉시 놓고** `exec claude`. **claude 수명 동안 락을 유지하지 않는다** — 유지하면
+  AMA의 배타 deliver가 러너 종료까지 대기해(장시간 대화형 → deliver·스위칭 엔진 스톨)
+  가용성을 해친다.
+- **락이 창을 닫는 근거(보조)**: 래퍼가 공유 락을 얻는 시점에 deliver가 배타 락을
+  쥐고 있으면 래퍼는 상한까지 대기 → 러너 기동이 진행 중 deliver 위에서 시작하지
+  않는다. 락을 놓은 뒤 claude read까지의 짧은 틈은 층 1(B1a 원자적·sub-second)이
+  방어하는 **best-effort** 보조 방어다(완벽 무중단은 claude가 credential read 시점을
+  노출해야 가능하나 불가).
 
-lock 파일은 credential 파일과 **분리**되어 있어 claude가 절대 건드리지 않는다.
+lock 파일은 credential 파일과 **분리**되어 있어 claude가 절대 건드리지 않는다. AMA·래퍼가
+`CLAUDE_CONFIG_DIR` 미설정이면 **양쪽 다 `~/.claude`로 해석**해 같은 lock 파일을 잡는다.
 
 ## 4. 래퍼 설치
 
@@ -84,16 +94,23 @@ lock 파일은 credential 파일과 **분리**되어 있어 claude가 절대 건
 - AMA와 러너가 **같은 `CLAUDE_CONFIG_DIR`**를 보도록 배포에서 보장해야 한다(§1의
   공유 config 전제). 경로가 어긋나면 두 flock이 다른 파일을 잡아 조율이 무효가 된다.
 
-## 6. 트레이드오프 (운영 주의)
+## 6. 트레이드오프 (운영 주의) — 가용성 우선 설계
 
-참조 래퍼는 공유 락을 **claude 프로세스 수명 동안** 유지한다(가장 단순하고
-레이스 없는 형태). 함의:
+핵심 원칙: **flock이 가용성을 해치지 않는다.** 초기 설계(래퍼가 claude 수명 동안
+락 유지 + AMA가 블로킹 배타 락)는 장수명 대화형 러너 하나가 deliver의 배타 락을
+무한 대기시키고, 그 대기가 **엔진 락을 점유해 스케줄러 틱·자동 스위칭(§6.4 무인운영)을
+정지**시키는 치명 결함이 있었다. 현재 설계는 이를 제거했다:
 
-- 다중 러너는 공유 락이라 서로 직렬화되지 않는다(동시 기동 OK).
-- 반면 AMA의 **deliver(배타)는 실행 중인 러너가 모두 락을 놓을 때까지 대기**한다.
-  `-p` 배치는 단수명이라 대기가 짧다. 장수명 대화형 세션이 상시 떠 있으면 deliver
-  지연이 길어질 수 있다.
-- 완화: deliver는 운영자/AMS 발행으로 드물고 크리티컬 섹션은 sub-second다. 상시
-  대화형 부하에서 deliver 지연을 없애려면 층 1(B1a)만으로도 노출은 sub-second이므로
-  래퍼를 배치 경로에만 적용하는 선택이 가능하다. startup 구간에만 락을 한정하는
-  정교화(러너 기동 후 조기 해제)는 후속 배포 설계 과제로 둔다.
+- **AMA**: 배타 락 획득이 **논블록·상한(기본 5s)·fail-open**이고 **엔진 락 밖**에서
+  일어난다. 상한 초과 시 flock 없이 deliver를 진행한다. → deliver도 엔진도 절대
+  무한 블록되지 않는다. fail-open 시 방어는 층 1(B1a sub-second)로 축소되지만
+  **무인 운영(자동 스위칭)은 계속 돈다.**
+- **래퍼**: 공유 락을 **잠깐 확인 후 놓고** claude를 기동한다(수명 유지 안 함). →
+  실행 중 러너가 deliver를 지연시키지 않는다. 다중 러너 동시 기동 OK.
+- **잔여 노출**: 래퍼가 락을 놓은 뒤 claude read까지의 짧은 틈, 그리고 AMA fail-open
+  구간. 둘 다 층 1(B1a: 이전 활성 복귀 + 원자적 쓰기, sub-second·torn-free)이 방어하는
+  **best-effort** 구간이다. 완벽한 무중단은 claude가 credential read 시점을 노출해야
+  가능하나 불가하므로, **B1a가 주 방어, B1b flock은 "진행 중 deliver 위 기동 방지"
+  보조**라는 역할 분담이 설계 결론이다.
+- **튜닝**: 래퍼 대기 상한은 `AMX_DELIVER_WAIT`(초, 기본 5), AMA 측 상한은
+  `ExecBridge.LockMaxWait`(기본 5s)로 조정한다. 0이면 기본값.

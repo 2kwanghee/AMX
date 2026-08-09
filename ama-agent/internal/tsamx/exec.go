@@ -18,6 +18,15 @@ import (
 // is kept separate from the credential files so the runner never touches it.
 const deliverLockName = ".amx-deliver.lock"
 
+// deliverLockMaxWait bounds how long DeliverLock retries a non-blocking flock
+// before proceeding WITHOUT the lock (fail-open). A runner (amx-claude) may hold
+// a shared lock; waiting is bounded so a deliver can never block indefinitely.
+// B1a (previous-active restore + atomic write) still bounds exposure on fail-open.
+const deliverLockMaxWait = 5 * time.Second
+
+// deliverLockRetryInterval is the poll gap between non-blocking flock attempts.
+const deliverLockRetryInterval = 50 * time.Millisecond
+
 // EnvBinary names the tsamx executable when it is not on PATH (a venv shim, a
 // uv-managed install). Read once by NewExecBridge.
 const EnvBinary = "AMX_TSAMX_BIN"
@@ -41,6 +50,17 @@ type ExecBridge struct {
 	DataHome string
 	// Timeout bounds a single CLI invocation (default 30s).
 	Timeout time.Duration
+	// LockMaxWait overrides the deliver lock's bounded retry window (0 = default
+	// deliverLockMaxWait). Tests set a short value to exercise the fail-open path
+	// quickly; production leaves it at the default.
+	LockMaxWait time.Duration
+}
+
+func (b *ExecBridge) lockMaxWait() time.Duration {
+	if b.LockMaxWait > 0 {
+		return b.LockMaxWait
+	}
+	return deliverLockMaxWait
 }
 
 // NewExecBridge returns an ExecBridge configured from the daemon's environment.
@@ -213,37 +233,74 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// DeliverLock implements Bridge.DeliverLock: an exclusive flock (LOCK_EX) over
-// <configDir>/.amx-deliver.lock, held for the deliver critical section (B1b). The
-// amx-claude wrapper takes a shared lock (LOCK_SH) on the same path before it
-// reads the credential, so it blocks for the (sub-second) swap rather than
-// reading a half-swapped or momentarily-new credential. When no config home is
-// configured there is nothing to protect, so the release is a no-op.
-func (b *ExecBridge) DeliverLock(_ context.Context) (func() error, error) {
-	configDir := b.ConfigDir
+// lockConfigHome resolves the config home the deliver lock lives in. It mirrors
+// the amx-claude wrapper's default (CLAUDE_CONFIG_DIR, else ~/.claude) so both
+// sides flock the SAME file even when the daemon has no explicit ConfigDir —
+// otherwise the flock would be silently ineffective (B1b review item 3).
+func (b *ExecBridge) lockConfigHome() string {
+	if b.ConfigDir != "" {
+		return b.ConfigDir
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".claude")
+	}
+	return ""
+}
+
+// DeliverLock implements Bridge.DeliverLock: it takes an exclusive flock
+// (LOCK_EX) over <configHome>/.amx-deliver.lock for the deliver critical section
+// (B1b) and returns a release func. The amx-claude wrapper takes a shared lock on
+// the same path before it starts claude, so a runner cannot begin inside the swap
+// window and read a half-swapped or momentarily-new credential.
+//
+// Crucially the acquisition is NON-BLOCKING with a bounded retry (LOCK_EX|LOCK_NB,
+// polled up to deliverLockMaxWait) and is called by handleDeliver OUTSIDE the
+// engine lock. If the lock cannot be taken within the bound — e.g. a long-lived
+// interactive runner is holding the shared lock — DeliverLock gives up and returns
+// a no-op release so the deliver proceeds WITHOUT it (fail-open, availability
+// first). It therefore never blocks the engine, and every path returns a usable
+// release (never nil), so the caller can always defer it.
+func (b *ExecBridge) DeliverLock(ctx context.Context) func() error {
+	noop := func() error { return nil }
+	configDir := b.lockConfigHome()
 	if configDir == "" {
-		return func() error { return nil }, nil
+		return noop
 	}
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return nil, err
+		return noop // fail-open: cannot create the home, proceed unlocked
 	}
 	f, err := os.OpenFile(filepath.Join(configDir, deliverLockName), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, err
+		return noop
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return func() error {
-		// Closing the fd releases the lock; unlock explicitly first for clarity.
-		unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		closeErr := f.Close()
-		if unlockErr != nil {
-			return unlockErr
+	deadline := time.Now().Add(b.lockMaxWait())
+	for {
+		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if lockErr == nil {
+			return func() error {
+				unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				closeErr := f.Close()
+				if unlockErr != nil {
+					return unlockErr
+				}
+				return closeErr
+			}
 		}
-		return closeErr
-	}, nil
+		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+			_ = f.Close() // unexpected flock failure: fail-open
+			return noop
+		}
+		if time.Now().After(deadline) {
+			_ = f.Close() // could not acquire within the bound: fail-open
+			return noop
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return noop
+		case <-time.After(deliverLockRetryInterval):
+		}
+	}
 }
 
 // Remove runs `tsamx remove <account>`.
