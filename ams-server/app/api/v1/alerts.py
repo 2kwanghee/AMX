@@ -15,10 +15,10 @@ import uuid
 from fastapi import APIRouter, Query
 
 from app import schemas
-from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.services import inventory
 
-router = APIRouter(prefix="/tenants/{tenant_id}", tags=["alerts"], dependencies=[AdminAuth])
+router = APIRouter(prefix="/tenants/{tenant_id}", tags=["alerts"], dependencies=[TenantScope])
 
 
 @router.get("/alerts", response_model=schemas.AlertPage)

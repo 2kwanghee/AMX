@@ -7,11 +7,11 @@ import uuid
 from fastapi import APIRouter, Query, Response, status
 
 from app import schemas
-from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.core.errors import not_found
 from app.services import commands, inventory
 
-router = APIRouter(prefix="/tenants/{tenant_id}", tags=["servers"], dependencies=[AdminAuth])
+router = APIRouter(prefix="/tenants/{tenant_id}", tags=["servers"], dependencies=[TenantScope])
 
 
 def _to_wire(db, server) -> schemas.Server:

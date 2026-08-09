@@ -48,11 +48,27 @@ def create_tenant(db: Session, name: str) -> Tenant:
     return tenant
 
 
-def list_tenants(db: Session, limit: int, offset: int) -> tuple[list[Tenant], int]:
-    total = db.scalar(select(func.count()).select_from(Tenant)) or 0
-    rows = db.scalars(
-        select(Tenant).order_by(Tenant.created_at, Tenant.id).limit(limit).offset(offset)
-    ).all()
+def list_tenants(
+    db: Session,
+    limit: int,
+    offset: int,
+    allowed_tenant_ids: frozenset[str] | None = None,
+) -> tuple[list[Tenant], int]:
+    """List tenants, optionally scoped to an allow-set (F1 RBAC, §4).
+
+    `allowed_tenant_ids=None` means every tenant (a global-admin). A non-None
+    set is a tenant-admin's own tenant(s); an empty set yields nothing. The
+    filter is applied to both the page and the count so `total_size` reflects
+    only what the caller may see.
+    """
+    count_q = select(func.count()).select_from(Tenant)
+    rows_q = select(Tenant).order_by(Tenant.created_at, Tenant.id)
+    if allowed_tenant_ids is not None:
+        allowed_uuids = [uuid.UUID(t) for t in allowed_tenant_ids]
+        count_q = count_q.where(Tenant.id.in_(allowed_uuids))
+        rows_q = rows_q.where(Tenant.id.in_(allowed_uuids))
+    total = db.scalar(count_q) or 0
+    rows = db.scalars(rows_q.limit(limit).offset(offset)).all()
     return list(rows), total
 
 
