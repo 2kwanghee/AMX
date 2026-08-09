@@ -442,13 +442,16 @@ message AmaMessage {
 내부 라우팅은 불요. gRPC 세션 presence 공유(직접 push 최적화)는 미도입(O7, SaaS 단계).
 (claim-before-write 특성상 write 실패한 명령은 즉시 재전송이 아니라 sent-ack 타임아웃(§D2, 기본 90s)으로
 복구된다 — 멱등이라 유실은 없고 지연만.) 재큐잉은 `MAX_SEND_ATTEMPTS`(기본 5)까지, 소진 시 명령을
-`failed`로 확정하고 배정을 재발행 가능한 resting 상태로 되돌린 뒤 **경보를 개방**한다 —
-recall 계열은 D1 `recall_failed`(account 스코프) 재사용, 그 외는 신규 `command_send_failed`
-(account-scoped: `server:kind:account`, 서버-scoped 명령: `server:kind`). 같은 대상의 후속 명령이
-CONVERGED로 acked되면 auto-resolve. D2 판정 갭 2건(수용):
-- **갭3 오프라인 서버**: report가 오지 않으면 reconcile-on-report에 도달하지 못하므로 sent 스위퍼의
-  경보 개방/복구가 지연될 수 있다 — 이 경우는 별도 `server_offline` 경보(§5.6, `last_seen_at` 스위퍼)가
-  커버하므로 이중 배선하지 않는다.
+`failed`로 확정하고 배정을 재발행 가능한 resting 상태로 되돌린다. 경보는 **account-scoped 명령의
+최종 실패에만** 개방한다 — recall 계열은 D1 `recall_failed` 재사용, 그 외(deliver/activate/deactivate/
+recover)는 신규 `command_send_failed`, 모두 `server:kind:account` 키. 같은 대상의 후속 명령이
+CONVERGED로 acked되면 auto-resolve. **서버-scoped 명령**(set_mode/set_policy/req_report)의 최종
+실패는 경보를 열지 않는다 — 다음 세션의 정책 재-assertion이 의도를 재적용하는 자가치유 부류라 침묵이
+설계 의도다(수동 경보 영구 누적·3종 dedupe 키 공유 방지). 승계 명령이 배정의 pending 마커를 이미
+가져간 구(舊) 명령도 경보를 열지 않는다(승계 명령이 자기 결과로 보고). D2 판정 갭 2건(수용):
+- **갭3 오프라인 서버**: report가 오지 않으면 reconcile-on-report에 도달하지 못하나, 오프라인 서버는
+  `server_offline` 경보(§5.6, `last_seen_at` 스위퍼)가 커버한다. `command_send_failed`는 account-scoped
+  이므로 `server_offline`과 스코프가 달라 이중 개방이 아니다.
 - **갭4 flapping 창**: 타임아웃(90s)×cap(5) 누적으로 최악 ~12분 동안 경보 미개방/지연 창이 존재할 수
   있으나, 멱등 재큐잉이 그 사이 대부분을 흡수하므로 수용한다.
 

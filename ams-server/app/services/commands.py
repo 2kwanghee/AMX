@@ -462,23 +462,32 @@ def _open_send_failure_alert(
 ) -> None:
     """Open the operator alert for a command that exhausted its send retries.
 
-    The cap-exhausted revert leaves the intent unrecoverable without an operator
+    Only account-scoped commands whose revert actually applied
+    (``assignment`` non-None — see :func:`_revert_assignment_on_send_failure`)
+    alert; the failure leaves the intent unrecoverable without an operator
     (deliver -> pending, activate/deactivate -> marker dropped, recall -> settled
-    recalling), so the silent failure must surface as an alert:
+    recalling), so it must surface:
 
-    * ``recall`` re-uses the D1 ``recall_failed`` kind, account-scoped, so a
-      re-armed recall that fails on the wire and one that fails on a DIVERGED ack
-      dedupe onto the SAME open alert (``{server_id}:recall_failed:{account_id}``).
-    * every other type opens ``command_send_failed``, keyed by the standard
-      account/server scope: account-scoped commands (deliver/activate/deactivate)
-      dedupe per account (``{server_id}:command_send_failed:{account_id}``),
-      server-scoped commands (assignment_id NULL) per server
-      (``{server_id}:command_send_failed``).
+    * ``recall`` re-uses the D1 ``recall_failed`` kind, so a re-armed recall that
+      fails on the wire and one that fails on a DIVERGED ack dedupe onto the SAME
+      open alert (``{server_id}:recall_failed:{account_id}``).
+    * every other account-scoped type opens ``command_send_failed`` per account
+      (``{server_id}:command_send_failed:{account_id}``).
+
+    **No alert for server-scoped commands** (set_mode/set_policy/req_report,
+    assignment_id NULL): their intent is not lost — the next session's policy
+    re-assertion re-applies it — so a silent final failure is by design. Alerting
+    them would accumulate a manual alert on a self-healing condition, share one
+    dedupe key across the three types, and double-open against ``server_offline``.
+    A **superseded** command (a newer command already owns the assignment) also
+    does not alert: the successor reports its own result.
 
     ``detail`` carries only command_type / account_id / last_error — never the
     payload, which may hold credential material.
     """
-    account_id = assignment.account_id if assignment is not None else None
+    if assignment is None:
+        return
+    account_id = assignment.account_id
     kind = "recall_failed" if command.command_type == "recall" else "command_send_failed"
     alerts.open_alert(
         db,
@@ -510,6 +519,11 @@ def _revert_assignment_on_send_failure(
     commands (assignment_id NULL) and switch_now (never sets a pending marker)
     revert nothing — marking the command ``failed`` is enough, and a session
     re-assertion re-applies server-scoped policy on the next connect.
+
+    Returns the reverted assignment, or None when nothing was reverted (no
+    assignment, or a newer command already owns it). The caller opens the
+    send-failure alert only for a non-None return, so server-scoped and
+    superseded commands never alert.
     """
     if command.assignment_id is None:
         return None
@@ -522,9 +536,10 @@ def _revert_assignment_on_send_failure(
     if assignment is None:
         return None
     if assignment.pending_command_id != command.command_id:
-        # A newer command already owns the assignment; do not clobber it. Still
-        # return the row so the alert can be scoped to its account_id.
-        return assignment
+        # A newer command already owns the assignment; do not clobber it, and do
+        # not alert — the successor reports its own result (return None so the
+        # caller opens no alert for this superseded command).
+        return None
     assignment.last_error = "sent_ack_timeout"
     assignment.pending_command_id = None
     if command.command_type == "deliver":

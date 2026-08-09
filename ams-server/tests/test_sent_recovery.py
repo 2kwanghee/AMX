@@ -241,7 +241,10 @@ def test_sent_timeout_recall_over_cap_opens_recall_failed(app_env):
     assert _open_alerts(server_id, "command_send_failed") == []
 
 
-def test_sent_timeout_server_scoped_over_cap_opens_server_alert(app_env):
+def test_sent_timeout_server_scoped_over_cap_opens_no_alert(app_env):
+    # Server-scoped commands self-heal via the next session's policy re-assertion,
+    # so their silent final failure opens NO alert (would accumulate a manual
+    # alert on a self-healing condition and double-open against server_offline).
     tenant_id, _account_id, server_id = _seed_tenant_account_server("d2alertsrv@ex.com")
     with get_sessionmaker()() as db:
         commands.request_switch_mode(db, tenant_id, server_id, mode="manual")
@@ -253,13 +256,40 @@ def test_sent_timeout_server_scoped_over_cap_opens_server_alert(app_env):
     _age_sent(command_id, seconds=1000, send_attempts=5)
 
     with get_sessionmaker()() as db:
-        commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+        _, failed = commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
 
-    opened = _open_alerts(server_id, "command_send_failed")
-    assert len(opened) == 1
-    # Server-scoped: no account, so the dedupe key is server+kind only.
-    assert opened[0].account_id is None
-    assert opened[0].detail["command_type"] == "set_mode"
+    assert failed == [command_id]  # still marked failed
+    assert _open_alerts(server_id, "command_send_failed") == []
+
+
+def test_superseded_command_final_failure_opens_no_alert(app_env):
+    # A stuck sent command whose assignment a newer command already owns must not
+    # alert — the successor reports its own result (review B guard 4).
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d2super@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        old_command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    # A newer command takes over the assignment's pending marker.
+    with get_sessionmaker()() as db:
+        a = inventory.get_assignment(db, tenant_id, assignment_id)
+        a.pending_command_id = "cmd_newer_owner"
+        db.commit()
+    _age_sent(old_command_id, seconds=1000, send_attempts=5)
+
+    with get_sessionmaker()() as db:
+        _, failed = commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    assert failed == [old_command_id]
+    assert _open_alerts(server_id, "command_send_failed") == []
+    # The superseded command did not clobber the newer owner's marker.
+    a = _assignment(tenant_id, assignment_id)
+    assert a.pending_command_id == "cmd_newer_owner"
 
 
 def test_repeated_cap_exhaust_dedupes_to_one_alert(app_env):
