@@ -355,6 +355,10 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
   ① reconcile-on-report가 로컬 잔존 시 자동 재recall(CAP 상한)·이미 제거됐으면 `detached`로
   정착, ② REST `POST …:recall`로 수동 재요청 — 둘로 회복되어 영구 stranded되지 않는다.
   인플라이트 recall(`pending_command_id` 존재)은 회복 대상에서 제외한다.
+  recall 실패(확인 경로 DIVERGED/REJECTED)는 `recall_failed` 경보를 열어 운영자에게
+  노출한다(계정 스코프, dedupe `server_id:recall_failed:account_id`; 재recall 성공 시 자동
+  해소). 수동 재요청은 `recall_retry_count`로 상한(`AMX_MAX_RECALL_RETRIES`, 기본 3)되며 초과
+  시 409 + `recall_failed` 경보만 — 영구 실패 recall이 무한 재발행되지 않는다.
 - **미ack 명령 회복 (D2)**: 에이전트가 명령 수신 후 ack 전 끊겨 `agent_commands`가 `sent`로
   남으면, 타임아웃(기본 3×heartbeat) 스윕이 `queued`로 재큐해 멱등 재전송(같은 command_id)하고,
   `send_attempts` 상한 초과 시 `failed`로 두며 배정을 재발행 가능 상태로 되돌린다.

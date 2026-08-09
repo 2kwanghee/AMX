@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from app.core.errors import ApiError
 from app.db import get_sessionmaker
-from app.models import Account, AgentCommand
+from app.models import Account, AgentCommand, Alert
 from app.services import commands, inventory, reconcile
 
 from tests.test_grpc_channel import (
@@ -53,6 +53,48 @@ def _correction_rows(assignment_id, correction):
                 AgentCommand.payload["reconcile_correction"].astext == correction,
             )
         ).all()
+
+
+def _set_state(tenant_id, assignment_id, state):
+    with get_sessionmaker()() as db:
+        a = inventory.get_assignment(db, tenant_id, assignment_id)
+        a.state = state
+        db.commit()
+
+
+def _set_retry_count(tenant_id, assignment_id, n):
+    with get_sessionmaker()() as db:
+        a = inventory.get_assignment(db, tenant_id, assignment_id)
+        a.recall_retry_count = n
+        db.commit()
+
+
+def _open_recall_failed(server_id):
+    with get_sessionmaker()() as db:
+        return db.scalars(
+            select(Alert).where(
+                Alert.server_id == server_id,
+                Alert.kind == "recall_failed",
+                Alert.status == "open",
+            )
+        ).all()
+
+
+def _fail_recall(tenant_id, account_id, server_id, assignment_id, convergence):
+    """Drive an installed assignment through recall then a failing ack."""
+    _set_state(tenant_id, assignment_id, "active")
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+        command_id = a.pending_command_id
+    with get_sessionmaker()() as db:
+        reconcile.apply_ack(
+            db,
+            tenant_id=tenant_id,
+            command_id=command_id,
+            convergence=convergence,
+            error_code="tsamx_disable_failed",
+        )
+    return command_id
 
 
 def _assignment(tenant_id, assignment_id):
@@ -193,3 +235,93 @@ def test_rest_recall_rejects_inflight_recalling(app_env):
     with get_sessionmaker()() as db:
         with pytest.raises(ApiError):
             commands.request_recall(db, tenant_id, assignment_id)
+
+
+# -- recall_failed alert on the confirm path ----------------------------------
+@pytest.mark.parametrize("convergence", [reconcile.DIVERGED, reconcile.REJECTED])
+def test_recall_ack_failure_opens_alert_and_settles(app_env, convergence):
+    tenant_id, account_id, server_id = _seed_tenant_account_server(
+        f"d1fail{convergence}@ex.com"
+    )
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _fail_recall(tenant_id, account_id, server_id, assignment_id, convergence)
+
+    # Settled recalling: state kept, pending marker cleared, error recorded.
+    a = _assignment(tenant_id, assignment_id)
+    assert a.state == "recalling"
+    assert a.pending_command_id is None
+    assert a.last_error == "tsamx_disable_failed"
+    # An account-scoped recall_failed alert is opened for the operator.
+    alerts_open = _open_recall_failed(server_id)
+    assert len(alerts_open) == 1
+    assert alerts_open[0].account_id == account_id
+    assert alerts_open[0].severity == "warning"
+
+
+def test_recall_failure_alert_dedupes(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1dedupe@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _fail_recall(tenant_id, account_id, server_id, assignment_id, reconcile.DIVERGED)
+    # A second failing recall cycle on the same account must not stack a 2nd alert.
+    _fail_recall(tenant_id, account_id, server_id, assignment_id, reconcile.REJECTED)
+    assert len(_open_recall_failed(server_id)) == 1
+
+
+def test_recall_converged_resolves_alert_and_resets_counter(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1resolve@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _fail_recall(tenant_id, account_id, server_id, assignment_id, reconcile.DIVERGED)
+    assert len(_open_recall_failed(server_id)) == 1
+
+    # Operator re-arms; this time the recall converges.
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+        command_id = a.pending_command_id
+        assert a.recall_retry_count == 1  # the re-arm counted
+    with get_sessionmaker()() as db:
+        reconcile.apply_ack(
+            db, tenant_id=tenant_id, command_id=command_id, convergence=reconcile.CONVERGED
+        )
+
+    a = _assignment(tenant_id, assignment_id)
+    assert a.state == "detached"
+    assert a.recall_retry_count == 0  # reset on success
+    assert _open_recall_failed(server_id) == []  # alert auto-resolved
+
+
+# -- REST manual-retry cap ----------------------------------------------------
+def test_rest_recall_retry_cap_returns_409_and_alerts(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1cap409@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    # Settled recalling already at the retry cap.
+    _settle_recalling(tenant_id, assignment_id)
+    _set_retry_count(tenant_id, assignment_id, commands.MAX_RECALL_RETRIES)
+
+    with get_sessionmaker()() as db:
+        with pytest.raises(ApiError) as excinfo:
+            commands.request_recall(db, tenant_id, assignment_id)
+    assert excinfo.value.status == 409
+    # No new recall command was queued past the cap.
+    with get_sessionmaker()() as db:
+        rows = db.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.command_type == "recall",
+            )
+        ).all()
+    assert rows == []
+    # A recall_failed alert is opened for operator intervention.
+    assert len(_open_recall_failed(server_id)) == 1
+
+
+def test_rest_recall_retry_increments_under_cap(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1capinc@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _settle_recalling(tenant_id, assignment_id)
+    _set_retry_count(tenant_id, assignment_id, commands.MAX_RECALL_RETRIES - 1)
+
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+        assert a.recall_retry_count == commands.MAX_RECALL_RETRIES
+        assert a.state == "recalling"
+        assert a.pending_command_id is not None
