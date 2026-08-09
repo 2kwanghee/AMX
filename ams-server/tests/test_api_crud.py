@@ -78,13 +78,14 @@ def test_the_configured_token_is_accepted(client):
 # -- Principal type contract (P5-S1) ------------------------------------------
 # The value is not yet read by any endpoint (scoping is S2); these pin the type
 # `require_admin` now returns so S2 can build on a stable contract.
-def test_require_admin_returns_an_admin_principal_for_a_valid_token(app_env):
-    from app.core.auth import ALL_TENANTS, Principal, require_admin
+def test_require_admin_returns_a_global_admin_principal_for_a_valid_token(app_env):
+    from app.core.auth import Principal, require_admin
 
     principal = require_admin(authorization=f"Bearer {TEST_ADMIN_TOKEN}")
     assert isinstance(principal, Principal)
-    assert principal.kind == "admin"
-    assert principal.tenant_ids == ALL_TENANTS == "*"
+    assert principal.role == "global-admin"
+    assert principal.all_tenants is True
+    assert principal.tenant_ids == frozenset()
 
 
 def test_require_admin_still_rejects_missing_or_bad_tokens(app_env):

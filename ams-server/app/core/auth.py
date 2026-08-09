@@ -8,17 +8,18 @@ there is no default and no in-code fallback to fall back to.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
 from fastapi import Header
 
 from app.config import get_settings
 from app.core.errors import ApiError
 
-# Sentinel for a principal that reaches every tenant. P1/P5-S1 is a single
-# administrator, so the only principal today carries this. S2 (F1 RBAC) narrows
-# this to an explicit tenant set and enforces it from the shared dependency.
-ALL_TENANTS = "*"
+# The 2-role vocabulary S2 (F1 RBAC) enforces. The single administrator today is
+# a global-admin; S2 adds tenant-admin. Kept as a Literal so a stray role value
+# is a type error rather than a silent authorization gap.
+Role = Literal["global-admin", "tenant-admin"]
 
 
 @dataclass(frozen=True)
@@ -26,12 +27,17 @@ class Principal:
     """The authenticated caller behind a request.
 
     P5-S1 introduces the type only; it is not yet read by any endpoint (scoping
-    is S2). `tenant_ids` is `"*"` (ALL_TENANTS) for the single admin today; S2
-    will widen it to a concrete tenant set.
+    is S2). Tenant reach is modelled so S2 changes only *values*, never this
+    type: `all_tenants=True` is the global-admin's every-tenant reach, and
+    `tenant_ids` is the explicit allow-set an S2 tenant-admin carries
+    (`all_tenants=False, tenant_ids=frozenset({tid})`). The two are kept
+    separate so no code is tempted to compare a tenant id against a `"*"`
+    string.
     """
 
-    kind: str
-    tenant_ids: str
+    role: Role
+    all_tenants: bool
+    tenant_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 def require_admin(authorization: str | None = Header(default=None)) -> Principal:
@@ -46,4 +52,4 @@ def require_admin(authorization: str | None = Header(default=None)) -> Principal
     # belongs. Encoding both sides also keeps the comparison constant-time.
     if not secrets.compare_digest(token.encode("utf-8"), get_settings().admin_token.encode("utf-8")):
         raise ApiError(401, "Unauthorized", "auth.invalid_token", "Invalid admin token.")
-    return Principal(kind="admin", tenant_ids=ALL_TENANTS)
+    return Principal(role="global-admin", all_tenants=True)
