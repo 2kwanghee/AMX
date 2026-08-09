@@ -4,7 +4,7 @@
 > SSOT는 `docs/AMX-DESIGN.md`. proto/gRPC 무변경(RBAC은 REST 평면).
 
 ## 핵심 결정
-- **집행 = 라우터 공통 의존성**. accounts/servers/assignments/alerts는 prefix `/tenants/{tenant_id}` → `require_tenant_scope`(tenant_id 경로 + Principal) 하나를 라우터 `dependencies`에 → 엔드포인트 누락 불가. 스코프 dep + 서비스층 재검증 + 복합 FK + 메타테스트 = 4중.
+- **집행 = 라우터 공통 의존성**. accounts/servers/assignments/alerts는 prefix `/tenants/{tenant_id}` → `require_tenant_scope`(tenant_id 경로 + Principal) 하나를 라우터 `dependencies`에 → 엔드포인트 누락 불가. **방어는 두 속성쌍의 중첩**: (도달 제어) 스코프 dep + 메타테스트가 "타 테넌트 경로 도달 불가"를, (데이터 무결성) 서비스층 tenant 재검증 + §5.1 복합 FK가 "요청 내 타 테넌트 데이터 혼입·참조 위반 불가"를 지킨다. 스코프 dep을 우회해 임의 tenant_id 경로를 지정하는 공격의 백스톱은 메타테스트(스코프 없는 라우터 추가 시 실패)다 — 서비스층/FK는 도달 제어를 대체하지 않는다.
 - **부트스트랩 = AMX_ADMIN_TOKEN 유지**. 루트 Bearer는 항상 `global-admin/all_tenants`(하위호환·M2M·break-glass), admins 비어도 잠금 불가.
 - **세션 = DB opaque 토큰**(`admin_sessions`, 해시 저장). 로그인 email+password(bcrypt)→토큰. require_admin이 Bearer를 (1)AMX_ADMIN_TOKEN 상수비교→(2)세션 해시조회 순 검증.
 - **교차 테넌트=404**(은닉, 서비스층 일치), **역량 거부=403**(tenant create/관리). 스코프(404) 먼저→역량(403).
