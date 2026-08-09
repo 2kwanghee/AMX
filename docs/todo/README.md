@@ -16,7 +16,7 @@
 
 | 순위 | 내용 | 파일 | 상태 |
 |---|---|---|---|
-| ① | 배포 필수 — B1(PR #23) · B4(PR #24) · A1(기구현 확인 — 잔여: 가용성 패치·소급 반증) | [01-deploy-critical.md](01-deploy-critical.md) | 진행 중 |
+| ① | 배포 필수 — B1(PR #23) · B4(PR #24) · A1(기구현 확인 + 가용성 패치 PR #25 · 소급 반증 완료) | [01-deploy-critical.md](01-deploy-critical.md) | **작업 완료** — PR 3건 머지 대기 |
 | ② | 청구 하드닝 — G25(테넌트 삭제 가드) · G26(export 정정 수단) | [02-billing-hardening.md](02-billing-hardening.md) | 대기 |
 | ③ | 운영 안정화 — D1(recall 실패 회복) · D2(sent-미ack 고착) · C1(이벤트 무손실) | [03-ops-stabilization.md](03-ops-stabilization.md) | 대기 |
 | ④ | 나머지 — E1·E2(콘솔), B2·B3(운영 절차), 문서 정정, G nits | [04-low-cost-misc.md](04-low-cost-misc.md) | 대기 |

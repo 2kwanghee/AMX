@@ -43,9 +43,9 @@ AMA `internal/resync/`(fingerprint 감지, lock 밖 전송, 수락 시 baseline 
 래칫) — 리부트 생존·시계 되감김 안전측. as-built 우선으로 승인, §5.7에 기록.
 
 **A1 잔여 작업** (이것만 남음)
-1. **가용성 격리 패치 (R2, 진행 중)**: `_apply_cred_update`의 `crypto.encrypt_secret`가 try/except 밖 —
-   DEK 부재/KEK 오류 시 세션 스트림 전체가 드롭. 해당 건만 거부하고 스트림 유지하도록 격리.
-   완료조건: DEK 미구성 상태 cred_update 수신 시 스트림 유지 테스트 통과.
+1. **가용성 격리 패치 — 완료 (PR #25)**: `crypto.encrypt_secret`(KekError) + `observed_at.ToDatetime`
+   (ValueError/OverflowError, 리뷰 B 발견) 두 지점 격리 — 해당 건만 거부, 스트림 유지, DB 무변경.
+   208 passed, R2 2인 정족수 통과. 이월 3건은 BACKLOG G32.
 2. **ADVERSARY 소급 반증 — 완료 (2026-08-09)**: 6개 각도 중 핵심 방어선(위조 주입·롤백 재생·
    AMS 경합·암호 경계·NULL 선점) 전부 반증 불성립 — 병합본 견고 판정. 성립 발견은 BACKLOG
    **G29**(자원 소모, 중 — 내재화에선 위협 낮음, 외부 노출 전 필수), **G30**(baseline 무ack 전진, 중 —
