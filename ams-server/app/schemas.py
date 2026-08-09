@@ -206,6 +206,14 @@ class SwitchNowRequest(Wire):
     strategy: Literal["best", "next_available"] | None = None
 
 
+class RecallRequest(Wire):
+    # D1 operator escape hatch: past the retry cap the plain :recall 409s. A
+    # global-admin may set force=true to bypass the cap and re-arm a permanently
+    # stranded recall (the route enforces the global-admin gate; the service
+    # resets recall_retry_count to 0).
+    force: bool = False
+
+
 class UsageSnapshot(Wire):
     id: uuid.UUID
     server_id: uuid.UUID

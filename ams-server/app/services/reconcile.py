@@ -26,7 +26,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Account, AgentCommand, Assignment, UsageSnapshot
-from app.services import commands
+from app.services import alerts, commands
 
 _logger = logging.getLogger("ams.reconcile")
 
@@ -129,6 +129,27 @@ def apply_ack(
         if command.command_type == "deliver":
             # §5.2 ack.fail -> pending: re-eligible for a fresh deliver.
             assignment.state = "pending"
+        elif command.command_type == "recall" and assignment.state == "recalling":
+            # D1 (recovery-architecture §1): the recall failed. The assignment is
+            # left settled ``recalling`` (pending marker now NULL) for the manual
+            # REST re-arm and reconcile auto-recall, and the operator is alarmed so
+            # a stranded recall is visible rather than silently stuck. The state
+            # guard drops a stale/duplicate recall ack that arrives after the
+            # assignment has already moved on (detached, or re-delivered) — it must
+            # not resurrect a bogus recall_failed alert for a settled account.
+            alerts.open_alert(
+                db,
+                tenant_id=tenant_id,
+                server_id=command.server_id,
+                account_id=assignment.account_id,
+                kind="recall_failed",
+                severity="warning",
+                detail={
+                    "reason": convergence,
+                    "last_error": assignment.last_error,
+                    "command_id": command_id,
+                },
+            )
         assignment.updated_at = _now()
     db.commit()
 
@@ -141,6 +162,15 @@ def _apply_converged(db: Session, command: AgentCommand, assignment: Assignment)
         assignment.delivered_at = _now()
     elif ctype == "recall":
         assignment.state = "detached"
+        # D1: the recall finally succeeded — clear the retry counter and resolve
+        # any standing recall_failed alert for this account.
+        assignment.recall_retry_count = 0
+        alerts.resolve(
+            db,
+            server_id=assignment.server_id,
+            kind="recall_failed",
+            account_id=assignment.account_id,
+        )
         account = db.scalar(
             select(Account).where(
                 Account.id == assignment.account_id,
@@ -170,8 +200,15 @@ def _settle_recall_detached(db: Session, assignment: Assignment) -> None:
     assignment.state = "detached"
     assignment.pending_command_id = None
     assignment.last_error = None
+    assignment.recall_retry_count = 0
     assignment.acked_at = _now()
     assignment.updated_at = _now()
+    alerts.resolve(
+        db,
+        server_id=assignment.server_id,
+        kind="recall_failed",
+        account_id=assignment.account_id,
+    )
     account = db.scalar(
         select(Account).where(
             Account.id == assignment.account_id,

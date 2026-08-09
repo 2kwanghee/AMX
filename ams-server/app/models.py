@@ -57,7 +57,7 @@ COMMAND_TYPES = (
 )
 COMMAND_STATUSES = ("queued", "sent", "acked", "failed")
 SWITCH_STRATEGIES = ("best", "next_available")
-ALERT_KINDS = ("all_exhausted", "drift", "server_offline", "quarantine")
+ALERT_KINDS = ("all_exhausted", "drift", "server_offline", "quarantine", "recall_failed")
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")
 ADMIN_ROLES = ("global-admin", "tenant-admin")
@@ -322,6 +322,14 @@ class Assignment(Base):
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     pending_command_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # D1 recall-failure recovery (recovery-architecture §1): how many times a
+    # failed/stranded recall (settled ``recalling``, pending_command_id NULL) has
+    # been manually re-armed via REST ``:recall``. Capped by AMX_MAX_RECALL_RETRIES
+    # so a permanently-failing recall cannot be re-issued forever; reset to 0 when
+    # the recall finally converges (detached) or a fresh recall cycle begins.
+    recall_retry_count: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default=text("0")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.core import crypto
 from app.core.errors import conflict
 from app.models import Account, AgentCommand, Assignment, Server
-from app.services import inventory
+from app.services import alerts, inventory
 
 # D2 sent-未ack recovery (recovery-architecture §2). A command the poll loop
 # pushed but the agent never acked stays ``sent`` forever, stranding its
@@ -30,6 +30,12 @@ from app.services import inventory
 # (default 90s = 3×30s) so an ordinary in-flight ack is never mistaken for a loss.
 SENT_ACK_TIMEOUT_SECONDS = float(os.environ.get("AMX_SENT_ACK_TIMEOUT", "90"))
 MAX_SEND_ATTEMPTS = int(os.environ.get("AMX_MAX_SEND_ATTEMPTS", "5"))
+
+# D1 recall-failure recovery (recovery-architecture §1). A failed recall settles
+# to ``recalling`` (pending_command_id NULL) and REST ``:recall`` re-arms it. This
+# caps the manual re-arms so a permanently-failing recall cannot be re-issued
+# forever; past the cap the action 409s and only opens a ``recall_failed`` alert.
+MAX_RECALL_RETRIES = int(os.environ.get("AMX_MAX_RECALL_RETRIES", "3"))
 
 
 def _now() -> datetime:
@@ -118,7 +124,7 @@ def request_deliver(
 
 
 def request_recall(
-    db: Session, tenant_id: uuid.UUID, assignment_id: uuid.UUID
+    db: Session, tenant_id: uuid.UUID, assignment_id: uuid.UUID, *, force: bool = False
 ) -> Assignment:
     assignment = inventory.get_assignment(db, tenant_id, assignment_id)
     # D1 manual escape hatch (recovery-architecture §1): a settled recalling
@@ -136,6 +142,41 @@ def request_recall(
             "assignment.not_recallable",
             f"recall requires an installed assignment; state is '{assignment.state}'.",
         )
+    # D1 retry cap: a settled recalling is a re-arm of a recall that already failed
+    # once, so bound it. Past MAX_RECALL_RETRIES the recall is treated as durably
+    # failed — 409 and a ``recall_failed`` alert, no new command. A first recall
+    # from an installed state is attempt 0 and resets any stale counter.
+    # ``force`` (global-admin, gated at the route) is the escape hatch: it bypasses
+    # the cap and resets the counter so a permanently-stranded recall — otherwise
+    # blocked from recall *and* from account/server deletion (state != detached) —
+    # can be re-armed and driven to detached.
+    if settled_recalling and force:
+        assignment.recall_retry_count = 0
+    elif settled_recalling:
+        if assignment.recall_retry_count >= MAX_RECALL_RETRIES:
+            alerts.open_alert(
+                db,
+                tenant_id=tenant_id,
+                server_id=assignment.server_id,
+                account_id=assignment.account_id,
+                kind="recall_failed",
+                severity="warning",
+                detail={
+                    "reason": "recall retries exhausted",
+                    "retries": assignment.recall_retry_count,
+                    "last_error": assignment.last_error,
+                },
+            )
+            db.commit()
+            raise conflict(
+                "assignment.recall_retries_exhausted",
+                f"recall has failed {assignment.recall_retry_count} times "
+                f"(cap {MAX_RECALL_RETRIES}); a recall_failed alert is open for "
+                "operator intervention.",
+            )
+        assignment.recall_retry_count += 1
+    else:
+        assignment.recall_retry_count = 0
     # O2: recall keeps the local credential record and only disables it; a full
     # wipe would set purge_local_copy=true. Default is preservation.
     command = enqueue(

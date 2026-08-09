@@ -13,7 +13,7 @@ from fastapi import APIRouter, Query
 
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
-from app.core.errors import bad_request
+from app.core.errors import ApiError, bad_request
 from app.services import commands, inventory
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["assignments"], dependencies=[TenantScope])
@@ -104,9 +104,23 @@ def deliver_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSes
     summary="recall",
     response_model=schemas.Assignment,
 )
-def recall_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
+def recall_assignment(
+    tenant_id: uuid.UUID,
+    assignment_id: uuid.UUID,
+    db: DbSession,
+    principal: AdminPrincipal,
+    body: schemas.RecallRequest | None = None,
+):
+    # D1 escape hatch: `force` bypasses the retry cap on a stranded recall, so it
+    # is a global-admin-only capability (a tenant-admin gets a real 403 here — the
+    # cross-tenant caller was already hidden as 404 by TenantScope).
+    force = body.force if body is not None else False
+    if force and principal.role != "global-admin":
+        raise ApiError(
+            403, "Forbidden", "auth.forbidden", "force recall requires a global-admin."
+        )
     return schemas.Assignment.model_validate(
-        commands.request_recall(db, tenant_id, assignment_id)
+        commands.request_recall(db, tenant_id, assignment_id, force=force)
     )
 
 
