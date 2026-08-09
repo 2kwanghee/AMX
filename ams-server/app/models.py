@@ -15,6 +15,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -57,6 +58,7 @@ SWITCH_STRATEGIES = ("best", "next_available")
 ALERT_KINDS = ("all_exhausted", "drift", "server_offline", "quarantine")
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")
+ADMIN_ROLES = ("global-admin", "tenant-admin")
 
 
 class Base(DeclarativeBase):
@@ -78,6 +80,75 @@ class Tenant(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Admin(Base):
+    """A human administrator (F1 RBAC, §5.1).
+
+    `tenant_id` is the isolation anchor: a `tenant-admin` carries exactly one
+    non-null tenant_id and reaches only that tenant; a `global-admin` carries
+    NULL and reaches every tenant. The CHECK constraint makes the two roles the
+    only representable shapes, so a row can never be a tenant-admin with no
+    tenant (unbounded) nor a global-admin pinned to one tenant. The FK is
+    RESTRICT so a tenant with live admins cannot be deleted out from under them.
+    """
+
+    __tablename__ = "admins"
+    __table_args__ = (
+        # Case-insensitive uniqueness: login normalises email to lower() before
+        # lookup, so the DB must reject `A@x`/`a@x` as the same principal.
+        Index("uq_admins_email_lower", text("lower(email)"), unique=True),
+        CheckConstraint(
+            "(role = 'global-admin' AND tenant_id IS NULL) OR "
+            "(role = 'tenant-admin' AND tenant_id IS NOT NULL)",
+            name="ck_admins_role_tenant",
+        ),
+        CheckConstraint(
+            "role IN ('global-admin','tenant-admin')", name="ck_admins_role"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    # bcrypt hash of a sha256+base64 pre-hash of the password (never the raw
+    # password; the pre-hash sidesteps bcrypt's 72-byte truncation). No endpoint
+    # or log ever returns this.
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True
+    )
+    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AdminSession(Base):
+    """An opaque bearer session issued by `/auth/login` (§3).
+
+    Only the hash of the token is stored, so a database disclosure does not hand
+    out live sessions. CASCADE from `admins` means disabling-then-deleting an
+    admin removes their sessions with them; expiry is enforced in the query
+    (`expires_at > now`), not by a sweeper.
+    """
+
+    __tablename__ = "admin_sessions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    admin_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("admins.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
     )
 
 

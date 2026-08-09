@@ -243,3 +243,16 @@ class AlertAckRequest(Wire):
 class EventPage(Wire):
     items: list[UsageSnapshot]
     page_info: PageInfo | None = None
+
+
+# -- F1 RBAC (P5 S2a) ---------------------------------------------------------
+class LoginRequest(Wire):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class LoginResponse(Wire):
+    session_token: str
+    role: Literal["global-admin", "tenant-admin"]
+    tenant_ids: list[str]
+    expires_at: datetime

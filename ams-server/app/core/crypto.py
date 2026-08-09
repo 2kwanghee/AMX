@@ -8,11 +8,13 @@ non-test caller is the deliver path (P2) and `scripts/verify_credential.py`.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import secrets
 from typing import Any
 
+import bcrypt
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import get_settings
@@ -64,6 +66,34 @@ def new_token(nbytes: int = 32) -> str:
 
 def hash_token(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode()).hexdigest()
+
+
+def _password_prehash(password: str) -> bytes:
+    """A fixed-length, NUL-free input for bcrypt.
+
+    bcrypt silently truncates at 72 bytes and stops at the first NUL byte, so a
+    long or binary-heavy password would have its tail ignored. Pre-hashing with
+    SHA-256 caps the length at 32 bytes; base64-encoding removes NUL bytes and
+    keeps the digest inside bcrypt's 72-byte window (44 chars).
+    """
+    return base64.b64encode(hashlib.sha256(password.encode("utf-8")).digest())
+
+
+def hash_password(password: str) -> str:
+    """bcrypt hash of the pre-hashed password. Store only this, never the raw."""
+    return bcrypt.hashpw(_password_prehash(password), bcrypt.gensalt()).decode("ascii")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Constant-time bcrypt verification of a candidate password.
+
+    Returns False (never raises) on a malformed stored hash, so a corrupt row
+    is an authentication failure rather than a 500.
+    """
+    try:
+        return bcrypt.checkpw(_password_prehash(password), password_hash.encode("ascii"))
+    except (ValueError, TypeError):
+        return False
 
 
 def dumps_credential(payload: dict[str, Any]) -> str:

@@ -12,14 +12,14 @@ import uuid
 from fastapi import APIRouter, Query, Request, Response, status
 
 from app import schemas
-from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.config import get_settings
 from app.core import crypto
 from app.core.errors import bad_request
 from app.services import inventory
 from app.services import oauth_enroll
 
-router = APIRouter(prefix="/tenants/{tenant_id}", tags=["accounts"], dependencies=[AdminAuth])
+router = APIRouter(prefix="/tenants/{tenant_id}", tags=["accounts"], dependencies=[TenantScope])
 
 
 @router.get("/accounts", response_model=schemas.AccountPage)

@@ -46,10 +46,23 @@ def require_admin(authorization: str | None = Header(default=None)) -> Principal
         raise ApiError(
             401, "Unauthorized", "auth.missing_bearer", "Bearer token required."
         )
-    # Compared as UTF-8 bytes, not as str: compare_digest raises TypeError on a
-    # str containing any code point above U+00FF, so a non-ASCII Authorization
-    # header would otherwise leave an unhandled 500 and a traceback where a 401
-    # belongs. Encoding both sides also keeps the comparison constant-time.
-    if not secrets.compare_digest(token.encode("utf-8"), get_settings().admin_token.encode("utf-8")):
-        raise ApiError(401, "Unauthorized", "auth.invalid_token", "Invalid admin token.")
-    return Principal(role="global-admin", all_tenants=True)
+    # Priority 1 — the bootstrap root token (AMX_ADMIN_TOKEN). Unchanged from
+    # P1: a matching root Bearer is always a global-admin reaching every tenant,
+    # independent of the admins table, so the system can never lock itself out
+    # (break-glass / M2M). Compared as UTF-8 bytes, not str: compare_digest
+    # raises TypeError on a code point above U+00FF, so a non-ASCII header would
+    # otherwise 500 where a 401 belongs. Encoding both sides is constant-time.
+    if secrets.compare_digest(token.encode("utf-8"), get_settings().admin_token.encode("utf-8")):
+        return Principal(role="global-admin", all_tenants=True, tenant_ids=frozenset())
+    # Priority 2 — a DB-backed opaque session (F1 RBAC, §3). Looked up by token
+    # hash, expiry-checked, and rejected for a disabled admin. Imported lazily to
+    # keep app.core.auth free of a service-layer import cycle.
+    from app.db import get_sessionmaker
+    from app.services.admins import resolve_session
+
+    with get_sessionmaker()() as session:
+        principal = resolve_session(session, token)
+    if principal is not None:
+        return principal
+    # Priority 3 — neither the root token nor a live session matched.
+    raise ApiError(401, "Unauthorized", "auth.invalid_token", "Invalid admin token.")
