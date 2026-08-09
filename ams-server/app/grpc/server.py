@@ -827,7 +827,18 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         if not cred.HasField("observed_at"):
             _logger.warning("cred_update rejected: no observed_at (account %s)", account_id)
             return
-        observed_at = cred.observed_at.ToDatetime(tzinfo=UTC)
+        # protobuf does not range-check Timestamp seconds on the wire, so a
+        # malformed stamp (e.g. seconds=2**62) makes ToDatetime raise. Left
+        # uncaught it would unwind the session read loop and drop the whole agent
+        # stream (availability); isolate it as an opaque reject like the guards
+        # around it. The raw value is never logged, only the account id.
+        try:
+            observed_at = cred.observed_at.ToDatetime(tzinfo=UTC)
+        except (ValueError, OverflowError):
+            _logger.warning(
+                "cred_update rejected: invalid observed_at (account %s)", account_id
+            )
+            return
         # observed_at drives an irreversible monotonic ratchet: once stored, every
         # future re-sync must beat it. A stamp implausibly far in the future would
         # therefore pin the account forever and starve honest rotations (lock-in).

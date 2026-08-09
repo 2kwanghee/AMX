@@ -610,3 +610,73 @@ def test_cred_update_encrypt_failure_session_survives(app_env, monkeypatch):
         "at-rest encryption unavailable" in m and str(account_id) in m
         for m in rejects
     )
+
+
+def test_cred_update_invalid_observed_at_session_survives(app_env, monkeypatch):
+    """A1: an out-of-range observed_at Timestamp rejects the push, not the session.
+
+    protobuf does not range-check Timestamp seconds on the wire, so a stamp like
+    seconds=2**62 makes ``ToDatetime`` raise. Left uncaught it unwinds the session
+    read loop and drops the whole agent stream. It must be an opaque per-update
+    reject: the account is untouched (the parse fails before any DB access), a
+    rejected line is logged, and a sentinel pushed afterwards still lands.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("badts@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    sentinel_id = _add_account(tenant_id, "badts-sentinel@ex.com", "rt-sentinel-orig")
+    _assign(tenant_id, sentinel_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    rejects: list[str] = []
+    real_warning = grpc_server._logger.warning
+
+    def spy_warning(msg, *args, **kwargs):
+        rejects.append(msg % args if args else msg)
+        return real_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(grpc_server._logger, "warning", spy_warning)
+
+    ts_sentinel = datetime.now(UTC) + timedelta(seconds=5)
+
+    def _bad_ts_cred_update(acc_id, encrypted) -> pb.AmaMessage:
+        msg = pb.AmaMessage(
+            cred_update=pb.CredentialUpdate(
+                account=pb.AccountRef(ams_account_id=str(acc_id)),
+                encrypted_credential=encrypted,
+                server_credential="",
+            )
+        )
+        # Assigning the scalar marks observed_at present; 2**62 overflows datetime
+        # so ToDatetime raises (protobuf never range-checks it on the wire).
+        msg.cred_update.observed_at.seconds = 2**62
+        return msg
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek_bytes, key_id = await _open_session(channel, token)
+            enc = _seal(
+                kek_bytes, key_id, account_id, AGENT_ID,
+                _oauth_secret("badts@ex.com", "rt-bad-ts"),
+            )
+            await call.write(_bad_ts_cred_update(account_id, enc))
+            enc_s = _seal(
+                kek_bytes, key_id, sentinel_id, AGENT_ID,
+                _oauth_secret("badts-sentinel@ex.com", "rt-sentinel-new"),
+            )
+            await call.write(_cred_update(sentinel_id, enc_s, "", ts_sentinel))
+            await asyncio.to_thread(_wait_observed, tenant_id, sentinel_id, ts_sentinel)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+
+    # (b) account row unchanged: original secret stands, no observed_at ratchet.
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    assert _stored(tenant_id, account_id).credential_observed_at is None
+    # (a) session survived: the sentinel pushed after the bad stamp was applied.
+    assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
+    # (c) a rejected line was logged for the failed account.
+    assert any(
+        "invalid observed_at" in m and str(account_id) in m for m in rejects
+    )
