@@ -77,6 +77,9 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G11 | reconcile 재recall 인플라이트(CORRECTION_RECALL 큐잉, `pending_command_id` 미설정) 중 REST `:recall`이 중복 recall 명령 발행 가능 — recall 멱등이라 상태 무손상, 저심각 | 회복 리뷰 B |
 | G12 | C1 완전무손실(b2): AMS 앱-ack + AccountEvent event_id dedup(proto 변경) — 현재 stream.Send 성공 후 AMS 커밋 전 crash의 잔존창(audit 중복/유실)은 결정8 수용 | 회복 설계 이월 |
 | G13 | quarantine 경보가 event-only — `alerts.sync_from_report`에 리포트의 quarantined 상태 추가하면 C1 잔존손실에도 가시성 유지(소규모 인접 하드닝) | 회복 설계 이월 |
+| G14 | 로그인 타이밍 오라클 — 미존재 email은 bcrypt 스킵으로 존재 여부가 타이밍에 노출(자격증명 물질 노출은 없음). dummy bcrypt로 균일화 가능 | F1 리뷰 A·ADVERSARY (SaaS) |
+| G15 | `require_admin`이 세션 인증 요청당 DB 세션 2개 오픈 + `resolve_session` JOIN 후 admin 재조회(중복 1쿼리) — 효율, 기능 정상 | F1 리뷰 A·B |
+| G16 | `mask_secret` 4hex(16bit) 교차 테넌트 상관 핸들 — 자격증명 노출 아님, 수용 명시 | F1 ADVERSARY (SaaS) |
 
 ---
 

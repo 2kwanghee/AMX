@@ -256,6 +256,25 @@ usage_snapshots (
   payload JSONB,                       -- 보고 원문 보존
   reported_at TIMESTAMPTZ
 )
+
+-- 관리자 RBAC (P5 F1, §7)
+admins (
+  id UUID PK,
+  email TEXT, UNIQUE(lower(email)),
+  password_hash TEXT,                  -- bcrypt (sha256 프리해시)
+  role TEXT,                           -- global-admin | tenant-admin
+  tenant_id UUID NULL FK → tenants,    -- tenant-admin의 소속 테넌트(격리 앵커), ON DELETE RESTRICT
+  disabled BOOLEAN DEFAULT false,
+  CHECK ((role='global-admin' AND tenant_id IS NULL)
+      OR (role='tenant-admin' AND tenant_id IS NOT NULL))
+)
+
+admin_sessions (
+  id UUID PK,
+  admin_id UUID FK → admins ON DELETE CASCADE,
+  token_hash TEXT UNIQUE,              -- sha256(raw); raw는 발급 시 1회만 반환
+  expires_at TIMESTAMPTZ
+)
 ```
 
 **★ 테넌트 격리 불변식 (요구 AMS-7)**
@@ -606,7 +625,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | AMA 인증 | 1회성 enroll-token(발급 시 해시만 DB 저장) → 최초 등록 시 장수명 server credential 교환 → 이후 세션은 credential 제시. credential은 서버측에서 tenant_id에 바인딩 |
 | 테넌트 격리 | DB 복합 FK 불변식(§5.1) + 서비스 계층 검증 + 명령 하달 시 서버 등록 tenant로 필터(클라이언트 제공 tenant 불신) — 삼중 방어 |
 | 변조 대응 | AMS reconcile(desired vs actual) + 드리프트 경보. 로컬 완전 방지는 불가함을 전제(§6.2) |
-| REST 인증 | AMS 콘솔/API는 관리자 인증 + 테넌트 RBAC (P1은 단일 관리자로 시작 가능) |
+| REST 인증 | **다중 관리자 + 2-role RBAC (P5 F1)**: `admins` 테이블(bcrypt) + DB opaque 세션토큰(`admin_sessions`, TTL·해시저장·revoke). 역할 = `global-admin`(전 테넌트) / `tenant-admin`(자기 테넌트만). 스코프 집행은 **라우터 공통 의존성** `require_tenant_scope`(경로 `/tenants/{tid}` ↔ Principal 스코프) — 엔드포인트 누락 불가. 교차 테넌트 = **404 은닉**, 역량 거부 = 403(스코프 먼저→역량). **부트스트랩** = `AMX_ADMIN_TOKEN` Bearer(항상 global-admin, admins 무관 상시 유효 → 구조적 잠금 불가, M2M/break-glass). 첫 인간 관리자는 `admin_cli`. 격리는 스코프 dep(도달 제어) + 서비스층 tenant 재검증·§5.1 복합 FK(데이터 무결성) + 메타테스트(회귀 방어)로 중첩 |
 
 ---
 
