@@ -96,6 +96,8 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G30 | **A1 baseline 무ack 전진(중, 가용성)** — AMA가 전송 수락만으로 baseline 전진, AMS는 "not newer"를 조용히 무시 → 에이전트 시계 앞선 1회 push 후 보정 창(≤5분)의 정상 갱신이 재시도 없이 유실, 다음 회전까지 AMS 사본 stale(재인증 폴백으로 정합성은 유지). 권고: AMS 무시 시 AMA baseline 미전진(앱레벨 ack — C1/G12 ack 인프라와 공유 가능) | A1 ADVERSARY 소급 |
 | G31 | A1 저심각 — `UpdateBaseline`이 재deliver 경합 창에서 구 평문으로 매니페스트 덮어씀(다음 tick 자가치유, fingerprint CAS 권고) · `del plaintext`는 메모리 소거 아님(docstring "wiped" 과장 정정) | A1 ADVERSARY 소급 |
 | G32 | A1 가용성 격리의 이월 3건 — ① DEK 전면 장애 시 유실이 조용해짐(종전엔 세션 절단이 자기 고지) → `alerts.open_alert(kind="cred_resync_failed")` 관측 지점 권고 ② `except KekError` 협소: legacy Fernet 키 오설정(ValueError)·향후 KMS provider 예외는 미격리 ③ `_handle_upstream` 타 분기(usage/event/ack)도 디스패치 레벨 무격리 | A1 패치 리뷰 B |
+| G33 | **openapi.yaml drift 일괄 해소** — `:recall` force/403(D1)·billing 경로(F5)·alerts 경로(P4)가 openapi 미반영. 계약 문서 일괄 동기화 필요 | D1 리뷰 B · F5 · P4 |
+| G34 | D1 이월 — force recall 감사 기록 부재(감사 테이블 자체 없음, 상용 전 검토) · alerts.py docstring recall_failed 미반영 · 0011 downgrade는 recall_failed 행 존재 시 CHECK 재생성 실패 가능 · stale ack이 pending_command_id/last_error clobber(D1 이전부터, deliver 포함 공통) · alerts.resolve tenant 필터 부재 · 경보 ack 후 재실패 미재부상(기존 설계) | D1 리뷰 A·B |
 
 ---
 
