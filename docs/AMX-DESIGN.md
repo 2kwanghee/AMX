@@ -351,14 +351,18 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
   `tsamx enable`로 단축된다(credential 재전송 불필요). 레코드가 없거나
   `purge_local_copy=true`로 삭제됐던 경우에만 full deliver.
 - **recall 실패 회복 (D1)**: recall이 DIVERGED/REJECTED로 실패하면 배정은 `recalling`에
-  머물되 `pending_command_id=NULL`(정착·비인플라이트 표식)이 된다. 이 정착 recalling은
-  ① reconcile-on-report가 로컬 잔존 시 자동 재recall(CAP 상한)·이미 제거됐으면 `detached`로
-  정착, ② REST `POST …:recall`로 수동 재요청 — 둘로 회복되어 영구 stranded되지 않는다.
-  인플라이트 recall(`pending_command_id` 존재)은 회복 대상에서 제외한다.
-  recall 실패(확인 경로 DIVERGED/REJECTED)는 `recall_failed` 경보를 열어 운영자에게
-  노출한다(계정 스코프, dedupe `server_id:recall_failed:account_id`; 재recall 성공 시 자동
-  해소). 수동 재요청은 `recall_retry_count`로 상한(`AMX_MAX_RECALL_RETRIES`, 기본 3)되며 초과
-  시 409 + `recall_failed` 경보만 — 영구 실패 recall이 무한 재발행되지 않는다.
+  머물되 `pending_command_id=NULL`(정착·비인플라이트 표식)이 되고, 확인 경로에서 계정 스코프
+  `recall_failed` 경보(dedupe `server_id:recall_failed:account_id`)를 연다. 정착 recalling은
+  ① reconcile-on-report가 로컬 잔존 시 자동 재recall(`CORRECTION_CAP`, 기본 3)·이미 제거됐으면
+  `detached`로 정착, ② REST `POST …:recall`로 수동 재요청(`recall_retry_count` 상한
+  `AMX_MAX_RECALL_RETRIES`, 기본 3)으로 회복된다. 자동·수동 상한은 **분리**되어 총 재시도 예산은
+  6이며, 재recall이 CONVERGED로 성공하면 카운터·경보가 자동 해소된다. 인플라이트
+  recall(`pending_command_id` 존재)은 회복 대상에서 제외한다.
+  - **상한 초과 종착지**: 두 상한이 모두 소진되면 자동 회복은 멈추고 `recall_failed` 경보만
+    유지된다(무한 재발행 방지). 이 배정은 `recalling`이라 `detached`가 아니어서 계정·서버 삭제도
+    막히므로, 최종 탈출구로 global-admin이 `POST …:recall {"force": true}`를 발행한다 —
+    force는 상한을 우회하고 `recall_retry_count`를 0으로 리셋해 재무장하며, 성공하면 배정이
+    `detached`로 정착해 stranded가 해소된다.
 - **미ack 명령 회복 (D2)**: 에이전트가 명령 수신 후 ack 전 끊겨 `agent_commands`가 `sent`로
   남으면, 타임아웃(기본 3×heartbeat) 스윕이 `queued`로 재큐해 멱등 재전송(같은 command_id)하고,
   `send_attempts` 상한 초과 시 `failed`로 두며 배정을 재발행 가능 상태로 되돌린다.

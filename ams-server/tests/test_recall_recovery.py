@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.core.errors import ApiError
 from app.db import get_sessionmaker
 from app.models import Account, AgentCommand, Alert
-from app.services import commands, inventory, reconcile
+from app.services import admins, commands, inventory, reconcile
 
 from tests.test_grpc_channel import (
     _create_assignment,
@@ -325,3 +325,82 @@ def test_rest_recall_retry_increments_under_cap(app_env):
         assert a.recall_retry_count == commands.MAX_RECALL_RETRIES
         assert a.state == "recalling"
         assert a.pending_command_id is not None
+
+
+# -- force escape hatch past the cap (global-admin only) ----------------------
+def test_force_recall_global_admin_bypasses_cap(app_env, client):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1force@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _settle_recalling(tenant_id, assignment_id)
+    _set_retry_count(tenant_id, assignment_id, commands.MAX_RECALL_RETRIES)
+    base = f"/api/v1/tenants/{tenant_id}/assignments/{assignment_id}"
+
+    # At the cap the plain recall is blocked...
+    assert client.post(f"{base}:recall").status_code == 409
+    # ...but the bootstrap client is a global-admin; force bypasses and re-arms.
+    r = client.post(f"{base}:recall", json={"force": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "recalling"
+    a = _assignment(tenant_id, assignment_id)
+    assert a.recall_retry_count == 0
+    assert a.pending_command_id is not None
+
+
+def test_force_recall_tenant_admin_forbidden(app_env, client, db):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1forcerbac@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _settle_recalling(tenant_id, assignment_id)
+    _set_retry_count(tenant_id, assignment_id, commands.MAX_RECALL_RETRIES)
+    # A tenant-admin scoped to THIS tenant (so TenantScope passes and the 403 is a
+    # real capability refusal, not a hidden 404).
+    admins.create_admin(
+        db,
+        email="ta-d1@ex.com",
+        password="pw-correct-horse",
+        role="tenant-admin",
+        tenant_id=tenant_id,
+    )
+    db.commit()
+    token = client.post(
+        "/api/v1/auth/login",
+        json={"email": "ta-d1@ex.com", "password": "pw-correct-horse"},
+    ).json()["sessionToken"]
+    base = f"/api/v1/tenants/{tenant_id}/assignments/{assignment_id}"
+
+    r = client.post(
+        f"{base}:recall",
+        json={"force": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 403, r.text
+    # No new recall command was queued for the refused force.
+    with get_sessionmaker()() as db2:
+        rows = db2.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.command_type == "recall",
+            )
+        ).all()
+    assert rows == []
+
+
+# -- stale recall ack does not resurrect a bogus alert ------------------------
+def test_stale_recall_ack_after_settle_opens_no_alert(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1stale@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "active")
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+        command_id = a.pending_command_id
+    # The assignment settles elsewhere (recall converged / re-delivered) before the
+    # stale failing ack arrives.
+    _set_state(tenant_id, assignment_id, "detached")
+    with get_sessionmaker()() as db:
+        reconcile.apply_ack(
+            db,
+            tenant_id=tenant_id,
+            command_id=command_id,
+            convergence=reconcile.DIVERGED,
+            error_code="stale",
+        )
+    assert _open_recall_failed(server_id) == []

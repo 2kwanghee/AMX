@@ -124,7 +124,7 @@ def request_deliver(
 
 
 def request_recall(
-    db: Session, tenant_id: uuid.UUID, assignment_id: uuid.UUID
+    db: Session, tenant_id: uuid.UUID, assignment_id: uuid.UUID, *, force: bool = False
 ) -> Assignment:
     assignment = inventory.get_assignment(db, tenant_id, assignment_id)
     # D1 manual escape hatch (recovery-architecture §1): a settled recalling
@@ -146,7 +146,13 @@ def request_recall(
     # once, so bound it. Past MAX_RECALL_RETRIES the recall is treated as durably
     # failed — 409 and a ``recall_failed`` alert, no new command. A first recall
     # from an installed state is attempt 0 and resets any stale counter.
-    if settled_recalling:
+    # ``force`` (global-admin, gated at the route) is the escape hatch: it bypasses
+    # the cap and resets the counter so a permanently-stranded recall — otherwise
+    # blocked from recall *and* from account/server deletion (state != detached) —
+    # can be re-armed and driven to detached.
+    if settled_recalling and force:
+        assignment.recall_retry_count = 0
+    elif settled_recalling:
         if assignment.recall_retry_count >= MAX_RECALL_RETRIES:
             alerts.open_alert(
                 db,

@@ -129,11 +129,14 @@ def apply_ack(
         if command.command_type == "deliver":
             # §5.2 ack.fail -> pending: re-eligible for a fresh deliver.
             assignment.state = "pending"
-        elif command.command_type == "recall":
+        elif command.command_type == "recall" and assignment.state == "recalling":
             # D1 (recovery-architecture §1): the recall failed. The assignment is
             # left settled ``recalling`` (pending marker now NULL) for the manual
             # REST re-arm and reconcile auto-recall, and the operator is alarmed so
-            # a stranded recall is visible rather than silently stuck.
+            # a stranded recall is visible rather than silently stuck. The state
+            # guard drops a stale/duplicate recall ack that arrives after the
+            # assignment has already moved on (detached, or re-delivered) — it must
+            # not resurrect a bogus recall_failed alert for a settled account.
             alerts.open_alert(
                 db,
                 tenant_id=tenant_id,
