@@ -7,11 +7,18 @@ from typing import Annotated
 from fastapi import Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.auth import require_admin
+from app.core.auth import Principal, require_admin
 from app.db import get_session
 
 DbSession = Annotated[Session, Depends(get_session)]
+# Router-level enforcement: raises 401 before any handler runs, and no handler
+# can be added without it. Its resolved value (a Principal) is discarded here.
 AdminAuth = Depends(require_admin)
+# Endpoint-level access to the same authenticated Principal. `require_admin` is
+# the identical callable, so FastAPI's per-request dependency cache runs it once
+# whether a handler takes this or only AdminAuth applies. Handlers declare it to
+# reserve the slot P5-S2 reads for tenant scoping; S1 does not use the value.
+AdminPrincipal = Annotated[Principal, Depends(require_admin)]
 
 PageSize = Annotated[int, Query(alias="pageSize", ge=1, le=200)]
 PageToken = Annotated[str | None, Query(alias="pageToken")]

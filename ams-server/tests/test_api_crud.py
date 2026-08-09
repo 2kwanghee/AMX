@@ -75,6 +75,39 @@ def test_the_configured_token_is_accepted(client):
     assert response.status_code == 200
 
 
+# -- Principal type contract (P5-S1) ------------------------------------------
+# The value is not yet read by any endpoint (scoping is S2); these pin the type
+# `require_admin` now returns so S2 can build on a stable contract.
+def test_require_admin_returns_a_global_admin_principal_for_a_valid_token(app_env):
+    from app.core.auth import Principal, require_admin
+
+    principal = require_admin(authorization=f"Bearer {TEST_ADMIN_TOKEN}")
+    assert isinstance(principal, Principal)
+    assert principal.role == "global-admin"
+    assert principal.all_tenants is True
+    assert principal.tenant_ids == frozenset()
+
+
+def test_require_admin_still_rejects_missing_or_bad_tokens(app_env):
+    import pytest
+
+    from app.core.auth import require_admin
+    from app.core.errors import ApiError
+
+    cases = {
+        None: "auth.missing_bearer",
+        "": "auth.missing_bearer",
+        "Bearer ": "auth.missing_bearer",
+        "Bearer wrong-token": "auth.invalid_token",
+        f"Basic {TEST_ADMIN_TOKEN}": "auth.missing_bearer",
+    }
+    for header, code in cases.items():
+        with pytest.raises(ApiError) as excinfo:
+            require_admin(authorization=header)
+        assert excinfo.value.status == 401
+        assert excinfo.value.code == code
+
+
 # -- Validation failures ------------------------------------------------------
 CANARY = "canary-plaintext-must-not-appear-9f3a1c"
 

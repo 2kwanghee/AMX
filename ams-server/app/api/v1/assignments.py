@@ -12,7 +12,7 @@ import uuid
 from fastapi import APIRouter, Query
 
 from app import schemas
-from app.api.deps import AdminAuth, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
 from app.core.errors import bad_request
 from app.services import commands, inventory
 
@@ -23,6 +23,7 @@ router = APIRouter(prefix="/tenants/{tenant_id}", tags=["assignments"], dependen
 def list_assignments(
     tenant_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     serverId: uuid.UUID | None = Query(default=None),  # noqa: N803
     accountId: uuid.UUID | None = Query(default=None),  # noqa: N803
     state: schemas.AssignmentState | None = Query(default=None),
@@ -48,7 +49,7 @@ def list_assignments(
 
 
 @router.post("/assignments", response_model=schemas.Assignment, status_code=201)
-def create_assignment(tenant_id: uuid.UUID, body: schemas.AssignmentCreate, db: DbSession):
+def create_assignment(tenant_id: uuid.UUID, body: schemas.AssignmentCreate, db: DbSession, principal: AdminPrincipal):
     if body.deliver_immediately:
         raise bad_request(
             "assignment.deliver_immediately_unsupported",
@@ -62,7 +63,7 @@ def create_assignment(tenant_id: uuid.UUID, body: schemas.AssignmentCreate, db: 
 
 
 @router.get("/assignments/{assignment_id}", response_model=schemas.Assignment)
-def get_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+def get_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     return schemas.Assignment.model_validate(
         inventory.get_assignment(db, tenant_id, assignment_id)
     )
@@ -74,6 +75,7 @@ def update_assignment(
     assignment_id: uuid.UUID,
     body: schemas.AssignmentUpdate,
     db: DbSession,
+    principal: AdminPrincipal,
 ):
     # The contract notes that `pinned` also issues a SetAccountActive command;
     # in P1 only the AMS-side flag is recorded, and it converges on nothing.
@@ -91,7 +93,7 @@ def update_assignment(
     summary="deliver",
     response_model=schemas.Assignment,
 )
-def deliver_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+def deliver_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     return schemas.Assignment.model_validate(
         commands.request_deliver(db, tenant_id, assignment_id)
     )
@@ -102,7 +104,7 @@ def deliver_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSes
     summary="recall",
     response_model=schemas.Assignment,
 )
-def recall_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+def recall_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     return schemas.Assignment.model_validate(
         commands.request_recall(db, tenant_id, assignment_id)
     )
@@ -113,7 +115,7 @@ def recall_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSess
     summary="activate",
     response_model=schemas.Assignment,
 )
-def activate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+def activate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     return schemas.Assignment.model_validate(
         commands.request_activate(db, tenant_id, assignment_id)
     )
@@ -124,7 +126,7 @@ def activate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSe
     summary="deactivate",
     response_model=schemas.Assignment,
 )
-def deactivate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+def deactivate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     return schemas.Assignment.model_validate(
         commands.request_deactivate(db, tenant_id, assignment_id)
     )
@@ -135,7 +137,7 @@ def deactivate_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: Db
     summary="recover",
     response_model=schemas.Assignment,
 )
-def recover_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession):
+def recover_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     # §5.2 quarantined -> active via SetAccountActive(activate, clear_quarantine).
     return schemas.Assignment.model_validate(
         commands.request_recover(db, tenant_id, assignment_id)
@@ -151,6 +153,7 @@ def switch_now(
     tenant_id: uuid.UUID,
     assignment_id: uuid.UUID,
     db: DbSession,
+    principal: AdminPrincipal,
     body: schemas.SwitchNowRequest | None = None,
 ):
     strategy = body.strategy if body is not None else None
