@@ -37,6 +37,14 @@ MAX_SEND_ATTEMPTS = int(os.environ.get("AMX_MAX_SEND_ATTEMPTS", "5"))
 # forever; past the cap the action 409s and only opens a ``recall_failed`` alert.
 MAX_RECALL_RETRIES = int(os.environ.get("AMX_MAX_RECALL_RETRIES", "3"))
 
+# Command types that never set assignment.pending_command_id (§6.3: non-state
+# commands). For these a None/mismatched marker is not a settle/supersede signal —
+# they have no successor — so their cap-exhausted final failure alerts regardless
+# of the marker. Marker-setting types (deliver/recall/activate/deactivate) instead
+# treat None (settled, e.g. _settle_recall_detached) or a mismatch (superseded) as
+# "already handled elsewhere" and suppress the alert.
+_MARKERLESS_COMMAND_TYPES = frozenset({"switch_now"})
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -450,13 +458,64 @@ def sweep_sent_timeouts(
             command.status = "failed"
             command.detail = "sent_ack_timeout"
             command.updated_at = _now()
-            _revert_assignment_on_send_failure(db, command)
+            assignment = _revert_assignment_on_send_failure(db, command)
+            _open_send_failure_alert(db, command, assignment)
             failed.append(command.command_id)
     db.commit()
     return requeued, failed
 
 
-def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> None:
+def _open_send_failure_alert(
+    db: Session, command: AgentCommand, assignment: Assignment | None
+) -> None:
+    """Open the operator alert for a command that exhausted its send retries.
+
+    Only account-scoped commands whose revert actually applied
+    (``assignment`` non-None — see :func:`_revert_assignment_on_send_failure`)
+    alert; the failure leaves the intent unrecoverable without an operator
+    (deliver -> pending, activate/deactivate -> marker dropped, recall -> settled
+    recalling), so it must surface:
+
+    * ``recall`` re-uses the D1 ``recall_failed`` kind, so a re-armed recall that
+      fails on the wire and one that fails on a DIVERGED ack dedupe onto the SAME
+      open alert (``{server_id}:recall_failed:{account_id}``).
+    * every other account-scoped type opens ``command_send_failed`` per account
+      (``{server_id}:command_send_failed:{account_id}``).
+
+    **No alert for server-scoped commands** (set_mode/set_policy/req_report,
+    assignment_id NULL): their intent is not lost — the next session's policy
+    re-assertion re-applies it — so a silent final failure is by design. Alerting
+    them would accumulate a manual alert on a self-healing condition, share one
+    dedupe key across the three types, and double-open against ``server_offline``.
+    A **superseded** command (a newer command already owns the assignment) also
+    does not alert: the successor reports its own result.
+
+    ``detail`` carries only command_type / account_id / last_error — never the
+    payload, which may hold credential material.
+    """
+    if assignment is None:
+        return
+    account_id = assignment.account_id
+    kind = "recall_failed" if command.command_type == "recall" else "command_send_failed"
+    alerts.open_alert(
+        db,
+        tenant_id=command.tenant_id,
+        server_id=command.server_id,
+        account_id=account_id,
+        kind=kind,
+        severity="warning",
+        detail={
+            "reason": "send retries exhausted",
+            "command_type": command.command_type,
+            "account_id": str(account_id) if account_id is not None else None,
+            "last_error": command.detail,
+        },
+    )
+
+
+def _revert_assignment_on_send_failure(
+    db: Session, command: AgentCommand
+) -> Assignment | None:
     """Revert the assignment of a permanently-failed ``sent`` command.
 
     Mirrors the DIVERGED/REJECTED ack handling in ``reconcile.apply_ack``: only
@@ -468,9 +527,14 @@ def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> No
     commands (assignment_id NULL) and switch_now (never sets a pending marker)
     revert nothing — marking the command ``failed`` is enough, and a session
     re-assertion re-applies server-scoped policy on the next connect.
+
+    Returns the reverted assignment, or None when nothing was reverted (no
+    assignment, or a newer command already owns it). The caller opens the
+    send-failure alert only for a non-None return, so server-scoped and
+    superseded commands never alert.
     """
     if command.assignment_id is None:
-        return
+        return None
     assignment = db.scalar(
         select(Assignment).where(
             Assignment.id == command.assignment_id,
@@ -478,9 +542,17 @@ def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> No
         )
     )
     if assignment is None:
-        return
-    if assignment.pending_command_id != command.command_id:
-        return
+        return None
+    if (
+        command.command_type not in _MARKERLESS_COMMAND_TYPES
+        and assignment.pending_command_id != command.command_id
+    ):
+        # A marker-setting command whose marker is now None (settled elsewhere,
+        # e.g. _settle_recall_detached detached the account) or points at another
+        # command (superseded) is already handled — do not clobber the assignment
+        # and do not alert (return None so the caller opens none). A marker-less
+        # type (switch_now) skips this and still alerts on final failure.
+        return None
     assignment.last_error = "sent_ack_timeout"
     assignment.pending_command_id = None
     if command.command_type == "deliver":
@@ -490,3 +562,4 @@ def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> No
     # activate/deactivate/recover: leave the resting state (inactive/active/
     #   quarantined); dropping the marker re-opens it to a fresh command.
     assignment.updated_at = _now()
+    return assignment

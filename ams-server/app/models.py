@@ -57,7 +57,14 @@ COMMAND_TYPES = (
 )
 COMMAND_STATUSES = ("queued", "sent", "acked", "failed")
 SWITCH_STRATEGIES = ("best", "next_available")
-ALERT_KINDS = ("all_exhausted", "drift", "server_offline", "quarantine", "recall_failed")
+ALERT_KINDS = (
+    "all_exhausted",
+    "drift",
+    "server_offline",
+    "quarantine",
+    "recall_failed",
+    "command_send_failed",
+)
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")
 ADMIN_ROLES = ("global-admin", "tenant-admin")

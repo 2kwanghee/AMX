@@ -183,6 +183,16 @@ def _apply_converged(db: Session, command: AgentCommand, assignment: Assignment)
         assignment.state = "active"
     elif ctype == "deactivate":
         assignment.state = "inactive"
+    # D2 auto-resolve: a later command against this account that finally acks
+    # CONVERGED means the send path recovered, so clear any standing
+    # command_send_failed alert (mirrors the recall_failed resolve above). The
+    # recall branch already resolved its own recall_failed alert.
+    alerts.resolve(
+        db,
+        server_id=assignment.server_id,
+        kind="command_send_failed",
+        account_id=assignment.account_id,
+    )
     assignment.acked_at = _now()
     assignment.pending_command_id = None
     assignment.last_error = None
