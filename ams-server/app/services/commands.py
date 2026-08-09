@@ -450,13 +450,55 @@ def sweep_sent_timeouts(
             command.status = "failed"
             command.detail = "sent_ack_timeout"
             command.updated_at = _now()
-            _revert_assignment_on_send_failure(db, command)
+            assignment = _revert_assignment_on_send_failure(db, command)
+            _open_send_failure_alert(db, command, assignment)
             failed.append(command.command_id)
     db.commit()
     return requeued, failed
 
 
-def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> None:
+def _open_send_failure_alert(
+    db: Session, command: AgentCommand, assignment: Assignment | None
+) -> None:
+    """Open the operator alert for a command that exhausted its send retries.
+
+    The cap-exhausted revert leaves the intent unrecoverable without an operator
+    (deliver -> pending, activate/deactivate -> marker dropped, recall -> settled
+    recalling), so the silent failure must surface as an alert:
+
+    * ``recall`` re-uses the D1 ``recall_failed`` kind, account-scoped, so a
+      re-armed recall that fails on the wire and one that fails on a DIVERGED ack
+      dedupe onto the SAME open alert (``{server_id}:recall_failed:{account_id}``).
+    * every other type opens ``command_send_failed``, keyed by the standard
+      account/server scope: account-scoped commands (deliver/activate/deactivate)
+      dedupe per account (``{server_id}:command_send_failed:{account_id}``),
+      server-scoped commands (assignment_id NULL) per server
+      (``{server_id}:command_send_failed``).
+
+    ``detail`` carries only command_type / account_id / last_error — never the
+    payload, which may hold credential material.
+    """
+    account_id = assignment.account_id if assignment is not None else None
+    kind = "recall_failed" if command.command_type == "recall" else "command_send_failed"
+    alerts.open_alert(
+        db,
+        tenant_id=command.tenant_id,
+        server_id=command.server_id,
+        account_id=account_id,
+        kind=kind,
+        severity="warning",
+        detail={
+            "reason": "send retries exhausted",
+            "command_type": command.command_type,
+            "account_id": str(account_id) if account_id is not None else None,
+            "last_error": command.detail,
+        },
+    )
+
+
+def _revert_assignment_on_send_failure(
+    db: Session, command: AgentCommand
+) -> Assignment | None:
     """Revert the assignment of a permanently-failed ``sent`` command.
 
     Mirrors the DIVERGED/REJECTED ack handling in ``reconcile.apply_ack``: only
@@ -470,7 +512,7 @@ def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> No
     re-assertion re-applies server-scoped policy on the next connect.
     """
     if command.assignment_id is None:
-        return
+        return None
     assignment = db.scalar(
         select(Assignment).where(
             Assignment.id == command.assignment_id,
@@ -478,9 +520,11 @@ def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> No
         )
     )
     if assignment is None:
-        return
+        return None
     if assignment.pending_command_id != command.command_id:
-        return
+        # A newer command already owns the assignment; do not clobber it. Still
+        # return the row so the alert can be scoped to its account_id.
+        return assignment
     assignment.last_error = "sent_ack_timeout"
     assignment.pending_command_id = None
     if command.command_type == "deliver":
@@ -490,3 +534,4 @@ def _revert_assignment_on_send_failure(db: Session, command: AgentCommand) -> No
     # activate/deactivate/recover: leave the resting state (inactive/active/
     #   quarantined); dropping the marker re-opens it to a fresh command.
     assignment.updated_at = _now()
+    return assignment

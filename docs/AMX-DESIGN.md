@@ -441,7 +441,16 @@ message AmaMessage {
 트랜잭션 스코프 **advisory lock**(`pg_try_advisory_xact_lock`)으로 중복 실행을 배제한다. 세션 레지스트리·
 내부 라우팅은 불요. gRPC 세션 presence 공유(직접 push 최적화)는 미도입(O7, SaaS 단계).
 (claim-before-write 특성상 write 실패한 명령은 즉시 재전송이 아니라 sent-ack 타임아웃(§D2, 기본 90s)으로
-복구된다 — 멱등이라 유실은 없고 지연만.)
+복구된다 — 멱등이라 유실은 없고 지연만.) 재큐잉은 `MAX_SEND_ATTEMPTS`(기본 5)까지, 소진 시 명령을
+`failed`로 확정하고 배정을 재발행 가능한 resting 상태로 되돌린 뒤 **경보를 개방**한다 —
+recall 계열은 D1 `recall_failed`(account 스코프) 재사용, 그 외는 신규 `command_send_failed`
+(account-scoped: `server:kind:account`, 서버-scoped 명령: `server:kind`). 같은 대상의 후속 명령이
+CONVERGED로 acked되면 auto-resolve. D2 판정 갭 2건(수용):
+- **갭3 오프라인 서버**: report가 오지 않으면 reconcile-on-report에 도달하지 못하므로 sent 스위퍼의
+  경보 개방/복구가 지연될 수 있다 — 이 경우는 별도 `server_offline` 경보(§5.6, `last_seen_at` 스위퍼)가
+  커버하므로 이중 배선하지 않는다.
+- **갭4 flapping 창**: 타임아웃(90s)×cap(5) 누적으로 최악 ~12분 동안 경보 미개방/지연 창이 존재할 수
+  있으나, 멱등 재큐잉이 그 사이 대부분을 흡수하므로 수용한다.
 
 ### 5.5 어카운트 등록 — AMS 중앙 OAuth 플로우
 

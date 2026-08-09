@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.db import get_sessionmaker
-from app.models import AgentCommand
+from app.models import AgentCommand, Alert
 from app.services import commands, inventory, reconcile
 
 from tests.test_grpc_channel import (
@@ -56,6 +56,17 @@ def _command(command_id):
 def _assignment(tenant_id, assignment_id):
     with get_sessionmaker()() as db:
         return inventory.get_assignment(db, tenant_id, assignment_id)
+
+
+def _open_alerts(server_id, kind):
+    with get_sessionmaker()() as db:
+        return db.scalars(
+            select(Alert).where(
+                Alert.server_id == server_id,
+                Alert.kind == kind,
+                Alert.status == "open",
+            )
+        ).all()
 
 
 # -- re-queue path ------------------------------------------------------------
@@ -174,6 +185,139 @@ def test_sent_timeout_server_scoped_over_cap_only_marks_failed(app_env):
         _, failed = commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
     assert failed == [command_id]
     assert _command(command_id).status == "failed"
+
+
+# -- cap-exhausted alerts (D2 fix) --------------------------------------------
+def test_sent_timeout_deliver_over_cap_opens_command_send_failed(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d2alertdel@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    _age_sent(command_id, seconds=1000, send_attempts=5)
+
+    with get_sessionmaker()() as db:
+        commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    # A non-recall final failure opens command_send_failed (account-scoped),
+    # never recall_failed.
+    opened = _open_alerts(server_id, "command_send_failed")
+    assert len(opened) == 1
+    alert = opened[0]
+    assert alert.account_id == account_id
+    assert alert.severity == "warning"
+    assert alert.detail["command_type"] == "deliver"
+    assert alert.detail["last_error"] == "sent_ack_timeout"
+    # No credential/payload leak in the detail.
+    assert set(alert.detail) == {"reason", "command_type", "account_id", "last_error"}
+    assert _open_alerts(server_id, "recall_failed") == []
+
+
+def test_sent_timeout_recall_over_cap_opens_recall_failed(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d2alertrec@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "active")
+    with get_sessionmaker()() as db:
+        commands.request_recall(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    _age_sent(command_id, seconds=1000, send_attempts=5)
+
+    with get_sessionmaker()() as db:
+        commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    # recall re-uses the D1 kind; no command_send_failed for a recall.
+    recall = _open_alerts(server_id, "recall_failed")
+    assert len(recall) == 1
+    assert recall[0].account_id == account_id
+    assert _open_alerts(server_id, "command_send_failed") == []
+
+
+def test_sent_timeout_server_scoped_over_cap_opens_server_alert(app_env):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("d2alertsrv@ex.com")
+    with get_sessionmaker()() as db:
+        commands.request_switch_mode(db, tenant_id, server_id, mode="manual")
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.command_type == "set_mode"
+            )
+        )
+    _age_sent(command_id, seconds=1000, send_attempts=5)
+
+    with get_sessionmaker()() as db:
+        commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    opened = _open_alerts(server_id, "command_send_failed")
+    assert len(opened) == 1
+    # Server-scoped: no account, so the dedupe key is server+kind only.
+    assert opened[0].account_id is None
+    assert opened[0].detail["command_type"] == "set_mode"
+
+
+def test_repeated_cap_exhaust_dedupes_to_one_alert(app_env):
+    # Two failing deliver commands for the same assignment collapse onto one open
+    # command_send_failed alert (partial-unique dedupe on account scope).
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d2dedupe@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    for _ in range(2):
+        _set_state(tenant_id, assignment_id, "pending", pending_command_id=None)
+        with get_sessionmaker()() as db:
+            commands.request_deliver(db, tenant_id, assignment_id)
+            command_id = db.scalar(
+                select(AgentCommand.command_id).where(
+                    AgentCommand.assignment_id == assignment_id,
+                    AgentCommand.status == "queued",
+                )
+            )
+        _age_sent(command_id, seconds=1000, send_attempts=5)
+        with get_sessionmaker()() as db:
+            commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    assert len(_open_alerts(server_id, "command_send_failed")) == 1
+
+
+def test_converged_followup_auto_resolves_command_send_failed(app_env):
+    # After a send failure opens the alert, a later deliver that acks CONVERGED
+    # resolves it (the send path recovered).
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d2resolve@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    _age_sent(command_id, seconds=1000, send_attempts=5)
+    with get_sessionmaker()() as db:
+        commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+    assert len(_open_alerts(server_id, "command_send_failed")) == 1
+
+    # A fresh deliver that converges.
+    _set_state(tenant_id, assignment_id, "pending", pending_command_id=None)
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        new_command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.status == "queued",
+            )
+        )
+    with get_sessionmaker()() as db:
+        reconcile.apply_ack(
+            db, tenant_id=tenant_id, command_id=new_command_id, convergence="converged"
+        )
+
+    assert _open_alerts(server_id, "command_send_failed") == []
 
 
 # -- no contention with reconcile ---------------------------------------------
