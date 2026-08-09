@@ -98,6 +98,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G32 | A1 가용성 격리의 이월 3건 — ① DEK 전면 장애 시 유실이 조용해짐(종전엔 세션 절단이 자기 고지) → `alerts.open_alert(kind="cred_resync_failed")` 관측 지점 권고 ② `except KekError` 협소: legacy Fernet 키 오설정(ValueError)·향후 KMS provider 예외는 미격리 ③ `_handle_upstream` 타 분기(usage/event/ack)도 디스패치 레벨 무격리 | A1 패치 리뷰 B |
 | G33 | **openapi.yaml drift 일괄 해소** — `:recall` force/403(D1)·billing 경로(F5)·alerts 경로(P4)가 openapi 미반영. 계약 문서 일괄 동기화 필요 | D1 리뷰 B · F5 · P4 |
 | G34 | D1 이월 — force recall 감사 기록 부재(감사 테이블 자체 없음, 상용 전 검토) · alerts.py docstring recall_failed 미반영 · 0011 downgrade는 recall_failed 행 존재 시 CHECK 재생성 실패 가능 · stale ack이 pending_command_id/last_error clobber(D1 이전부터, deliver 포함 공통) · alerts.resolve tenant 필터 부재 · 경보 ack 후 재실패 미재부상(기존 설계) | D1 리뷰 A·B |
+| G35 | D2 이월 — switch_now 최종 실패의 last_error 기록 vs `_revert_assignment_on_send_failure` docstring 문구 불일치(경미) · switch_now 실패에 account-scoped 경보를 여는 시맨틱 검토 여지(다음 명령 CONVERGED로 해소돼 결함 아님) | D2 리뷰 B |
 
 ---
 
