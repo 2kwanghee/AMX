@@ -342,6 +342,15 @@ func (b *ExecBridge) ConfigSetThreshold(ctx context.Context, pct float64) error 
 	return err
 }
 
+// ConfigSet runs `tsamx config set autoswitch.<key> <value>` for the F4 (O4-B)
+// central policy fields (cooldown_seconds, hysteresis_pct).
+func (b *ExecBridge) ConfigSet(ctx context.Context, key string, value float64) error {
+	// Format compactly (no trailing zeros); tsamx accepts an integer or decimal.
+	val := strconv.FormatFloat(value, 'g', -1, 64)
+	_, err := b.run(ctx, b.env("", ""), "config", "set", "autoswitch."+key, val)
+	return err
+}
+
 // AutoOnce runs `tsamx auto --once` and returns the CLI's exit code. `auto` must
 // be the first argument (tsamx pre-dispatches it), so it is passed verbatim.
 // Exit codes: 0 switched, 2 no action, 3 blocked. Exit 1 (error) and any

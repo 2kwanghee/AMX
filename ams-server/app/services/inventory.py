@@ -372,11 +372,14 @@ def set_server_policy(
     *,
     threshold_pct=_UNSET,
     default_strategy=_UNSET,
+    cooldown_seconds=_UNSET,
+    hysteresis_pct=_UNSET,
 ) -> Server:
-    """Persist the O4-C switching policy columns (design note O4-C).
+    """Persist the switching policy columns (O4-C threshold/strategy + F4 O4-B
+    cooldown/hysteresis).
 
     Only fields actually supplied are written, so a PATCH that carries just one
-    leaves the other in place. Commit is the caller's; the gRPC re-assertion and
+    leaves the others in place. Commit is the caller's; the gRPC re-assertion and
     the outbox SetPolicy read these columns back.
     """
     server = get_server(db, tenant_id, server_id)
@@ -384,6 +387,10 @@ def set_server_policy(
         server.threshold_pct = threshold_pct
     if default_strategy is not _UNSET:
         server.default_strategy = default_strategy
+    if cooldown_seconds is not _UNSET:
+        server.cooldown_seconds = cooldown_seconds
+    if hysteresis_pct is not _UNSET:
+        server.hysteresis_pct = hysteresis_pct
     server.updated_at = _now()
     return server
 

@@ -126,6 +126,11 @@ class ServerUpdate(Wire):
     # clears central control back to the tsamx-local default.
     threshold_pct: float | None = Field(default=None, ge=0, le=100)
     default_strategy: SwitchStrategy | None = None
+    # F4 (O4-B) full central policy. Ranges mirror tsamx settings validation
+    # (cooldown_seconds 0..86400, hysteresis_pct 0..50). A provided None clears
+    # central control back to the tsamx-local default; 0 is a real value.
+    cooldown_seconds: float | None = Field(default=None, ge=0, le=86400)
+    hysteresis_pct: float | None = Field(default=None, ge=0, le=50)
 
 
 class Server(Wire):
@@ -136,6 +141,8 @@ class Server(Wire):
     switch_mode: SwitchMode
     threshold_pct: float | None = None
     default_strategy: SwitchStrategy | None = None
+    cooldown_seconds: float | None = None
+    hysteresis_pct: float | None = None
     status: ServerStatus
     agent_id: str | None = None
     agent_version: str | None = None

@@ -66,12 +66,9 @@ def update_server(
     # (so a name-only PATCH does not clear the policy), then re-delivered to a
     # connected agent via the outbox.
     fields = body.model_fields_set
-    if "threshold_pct" in fields or "default_strategy" in fields:
-        kwargs = {}
-        if "threshold_pct" in fields:
-            kwargs["threshold_pct"] = body.threshold_pct
-        if "default_strategy" in fields:
-            kwargs["default_strategy"] = body.default_strategy
+    policy_fields = ("threshold_pct", "default_strategy", "cooldown_seconds", "hysteresis_pct")
+    if any(f in fields for f in policy_fields):
+        kwargs = {f: getattr(body, f) for f in policy_fields if f in fields}
         inventory.set_server_policy(db, tenant_id, server_id, **kwargs)
         db.commit()
         commands.request_set_policy(db, tenant_id, server_id)

@@ -112,6 +112,63 @@ func TestSetPolicyZeroThresholdSkipsInjection(t *testing.T) {
 	}
 }
 
+// TestSetPolicyInjectsCooldownAndHysteresis (F4, O4-B): non-negative
+// cooldown_seconds/hysteresis_pct are injected via `config set autoswitch.*`,
+// and 0 is a real value (cooldown disabled), NOT skipped like threshold 0.
+func TestSetPolicyInjectsCooldownAndHysteresis(t *testing.T) {
+	fake := tsamx.NewFake()
+	hn := newHarnessBridge(t, fake, &sync.Mutex{}, nil)
+
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-f4-1",
+		Cmd: &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{
+			ThresholdPct:    0,   // keep local default (threshold-specific 0=unset)
+			CooldownSeconds: 0,   // real value: disable cooldown
+			HysteresisPct:   7.5, // real value
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("set_policy convergence = %v detail=%q", ack.Convergence, ack.Detail)
+	}
+	if v, ok := fake.ConfigValue("cooldown_seconds"); !ok || v != 0 {
+		t.Fatalf("cooldown_seconds config = %v ok=%v, want 0 injected", v, ok)
+	}
+	if v, ok := fake.ConfigValue("hysteresis_pct"); !ok || v != 7.5 {
+		t.Fatalf("hysteresis_pct config = %v ok=%v, want 7.5", v, ok)
+	}
+	// Threshold 0 stays unset (O4-C semantics), independent of the F4 fields.
+	if containsPrefix(fake.CallLog(), "config set autoswitch.threshold") {
+		t.Fatalf("threshold injected despite pct=0: %v", fake.CallLog())
+	}
+}
+
+// TestSetPolicyNegativeCooldownHysteresisSkips (F4): the negative "unset"
+// sentinel (AMS delivers it for NULL columns) must skip injection so the
+// tsamx-local default stays in force. Independent of threshold.
+func TestSetPolicyNegativeCooldownHysteresisSkips(t *testing.T) {
+	fake := tsamx.NewFake()
+	hn := newHarnessBridge(t, fake, &sync.Mutex{}, nil)
+
+	hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "pol-f4-2",
+		Cmd: &amxv1.AmsCommand_SetPolicy{SetPolicy: &amxv1.SetPolicy{
+			ThresholdPct:    88,
+			CooldownSeconds: -1, // unset -> skip
+			HysteresisPct:   -1, // unset -> skip
+		}},
+	}))
+	if _, ok := fake.ConfigValue("cooldown_seconds"); ok {
+		t.Fatalf("cooldown_seconds injected despite negative sentinel: %v", fake.CallLog())
+	}
+	if _, ok := fake.ConfigValue("hysteresis_pct"); ok {
+		t.Fatalf("hysteresis_pct injected despite negative sentinel: %v", fake.CallLog())
+	}
+	// Threshold still applies independently.
+	if fake.Threshold != 88 {
+		t.Fatalf("threshold = %v, want 88", fake.Threshold)
+	}
+}
+
 func TestSwitchNowUsesDefaultStrategy(t *testing.T) {
 	fake := tsamx.NewFake()
 	ctx := context.Background()

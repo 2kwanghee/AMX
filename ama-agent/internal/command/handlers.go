@@ -354,9 +354,10 @@ func (h *Handler) handleSetMode(_ context.Context, cmd *amxv1.AmsCommand, sm *am
 	return ack
 }
 
-// handleSetPolicy applies the O4-C hybrid policy (design note §O4-C): threshold
-// is injected into the tsamx engine (config set autoswitch.threshold), and the
-// default strategy is kept in memory for auto/switch_now. Runs under the engine
+// handleSetPolicy applies the central switching policy (O4-C + F4 O4-B):
+// threshold, cooldown_seconds and hysteresis_pct are injected into the tsamx
+// engine (config set autoswitch.*), and the default strategy is kept in memory
+// for auto/switch_now. Runs under the engine
 // lock — a threshold change alters the criterion an in-flight tick evaluates, so
 // it must be serialized. Memory-only and re-asserted each session, so it is NOT
 // gated by the applied log (re-application is idempotent).
@@ -385,6 +386,23 @@ func (h *Handler) handleSetPolicy(ctx context.Context, cmd *amxv1.AmsCommand, sp
 
 	if pct := sp.GetThresholdPct(); pct > 0 {
 		if err := h.bridge.ConfigSetThreshold(ctx, pct); err != nil {
+			out := diverged(ack, "tsamx_config", err)
+			h.record(out, "set_policy", "", "")
+			return out
+		}
+	}
+	// F4 (O4-B) full central policy. cooldown_seconds/hysteresis_pct use a
+	// negative "unset" sentinel — 0 is a real value (proto SetPolicy 3/4), unlike
+	// threshold above where 0 means "keep the local default". So inject on >= 0.
+	if cd := sp.GetCooldownSeconds(); cd >= 0 {
+		if err := h.bridge.ConfigSet(ctx, "cooldown_seconds", cd); err != nil {
+			out := diverged(ack, "tsamx_config", err)
+			h.record(out, "set_policy", "", "")
+			return out
+		}
+	}
+	if hy := sp.GetHysteresisPct(); hy >= 0 {
+		if err := h.bridge.ConfigSet(ctx, "hysteresis_pct", hy); err != nil {
 			out := diverged(ack, "tsamx_config", err)
 			h.record(out, "set_policy", "", "")
 			return out

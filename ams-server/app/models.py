@@ -263,6 +263,12 @@ class Server(Base):
     # memory only, so a restart recovers it from here, not from an agent sidecar.
     threshold_pct: Mapped[float | None] = mapped_column(nullable=True)
     default_strategy: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # F4 (O4-B) full central policy. NULL means "not centrally set" — AMS delivers
+    # the negative "unset" sentinel and the tsamx-local default stays in force. A
+    # stored 0 is a real value (e.g. cooldown_seconds=0 disables the cooldown),
+    # unlike threshold_pct where 0 itself means "unset" (proto SetPolicy 1 vs 3/4).
+    cooldown_seconds: Mapped[float | None] = mapped_column(nullable=True)
+    hysteresis_pct: Mapped[float | None] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="offline")
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

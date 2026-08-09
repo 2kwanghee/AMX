@@ -130,10 +130,16 @@ def _now_ts() -> Timestamp:
     return ts
 
 
-def _set_policy_msg(threshold_pct, default_strategy) -> pb.SetPolicy:
-    """Build a SetPolicy from stored columns. NULL/absent values push nothing —
+def _set_policy_msg(
+    threshold_pct, default_strategy, cooldown_seconds=None, hysteresis_pct=None
+) -> pb.SetPolicy:
+    """Build a SetPolicy from stored columns.
+
     threshold_pct 0 and strategy UNSPECIFIED both mean "keep the tsamx-local
-    default" per the proto (O4-C)."""
+    default" per the proto (O4-C). cooldown_seconds/hysteresis_pct use the F4
+    (O4-B) convention instead: a stored 0 is a real value, so NULL is delivered
+    as the negative "unset" sentinel — and must be set explicitly, since the
+    proto's own 0.0 default would otherwise read as a real value on the agent."""
     policy = pb.SetPolicy()
     if threshold_pct:
         policy.threshold_pct = float(threshold_pct)
@@ -141,6 +147,8 @@ def _set_policy_msg(threshold_pct, default_strategy) -> pb.SetPolicy:
         policy.default_strategy = _SWITCH_STRATEGY.get(
             default_strategy, pb.SwitchNow.SWITCH_STRATEGY_UNSPECIFIED
         )
+    policy.cooldown_seconds = float(cooldown_seconds) if cooldown_seconds is not None else -1.0
+    policy.hysteresis_pct = float(hysteresis_pct) if hysteresis_pct is not None else -1.0
     return policy
 
 
@@ -407,7 +415,10 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         if ctype == "set_policy":
             cmd.set_policy.CopyFrom(
                 _set_policy_msg(
-                    row.payload.get("threshold_pct"), row.payload.get("default_strategy")
+                    row.payload.get("threshold_pct"),
+                    row.payload.get("default_strategy"),
+                    row.payload.get("cooldown_seconds"),
+                    row.payload.get("hysteresis_pct"),
                 )
             )
             sign_command(self._signer, cmd)
@@ -501,6 +512,8 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             mode = _SWITCH_MODE.get(server.switch_mode, pb.SWITCH_MODE_UNSPECIFIED)
             threshold_pct = server.threshold_pct
             default_strategy = server.default_strategy
+            cooldown_seconds = server.cooldown_seconds
+            hysteresis_pct = server.hysteresis_pct
         out: list[pb.AmsCommand] = []
         set_mode = pb.AmsCommand(
             command_id="reassert_mode_" + uuid.uuid4().hex,
@@ -516,7 +529,11 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             issued_at=_now_ts(),
             target_agent_id=agent_id,
         )
-        set_policy.set_policy.CopyFrom(_set_policy_msg(threshold_pct, default_strategy))
+        set_policy.set_policy.CopyFrom(
+            _set_policy_msg(
+                threshold_pct, default_strategy, cooldown_seconds, hysteresis_pct
+            )
+        )
         sign_command(self._signer, set_policy)
         out.append(set_policy)
         return out
