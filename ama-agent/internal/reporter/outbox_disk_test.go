@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 )
@@ -134,6 +135,81 @@ func TestDiskOutboxSkipsCorruptTail(t *testing.T) {
 	got := drainAll(t, o2)
 	if len(got) != 2 || got[0].GetEventId() != "good1" || got[1].GetEventId() != "good2" {
 		t.Fatalf("after corrupt tail, recovered = %+v, want [good1 good2]", got)
+	}
+}
+
+// TestDiskOutboxCompactionConcurrentEnqueueNoLoss is the F1 regression, made
+// deterministic with compactMidHook: while a compaction is between rewriting the
+// log (old inode unlinked) and swapping the append fd, a concurrent Enqueue fires.
+// If compaction is not serialized with Enqueue under o.mu, that Enqueue writes to
+// the dead inode and the event vanishes on reload. The fix holds o.mu across the
+// whole compaction, so the concurrent Enqueue blocks until the new fd is in place
+// and its write lands in the live file. Run with -race.
+func TestDiskOutboxCompactionConcurrentEnqueueNoLoss(t *testing.T) {
+	// Lower the threshold so a single delivered filler triggers compaction.
+	savedThresh := outboxCompactThreshold
+	outboxCompactThreshold = 1
+	defer func() { outboxCompactThreshold = savedThresh }()
+
+	dir := t.TempDir()
+	o := mustOpen(t, dir)
+
+	// filler is enqueued first (lowest seq) so Flush delivers it — triggering
+	// compaction — before it reaches the never-delivered survivor and stops.
+	if err := o.Enqueue(&amxv1.AccountEvent{EventId: "filler"}); err != nil {
+		t.Fatalf("enqueue filler: %v", err)
+	}
+	if err := o.Enqueue(&amxv1.AccountEvent{EventId: "survivor"}); err != nil {
+		t.Fatalf("enqueue survivor: %v", err)
+	}
+
+	// The hook races an Enqueue into the compaction window. In another goroutine so
+	// the fixed code (which holds o.mu during compact) makes it block on o.mu; the
+	// sleep gives it time to reach — and, if unsynchronized, complete — the write.
+	var savedHook = compactMidHook
+	enqueued := make(chan struct{})
+	compactMidHook = func() {
+		go func() {
+			_ = o.Enqueue(&amxv1.AccountEvent{EventId: "midkeep"})
+			close(enqueued)
+		}()
+		time.Sleep(50 * time.Millisecond)
+	}
+	defer func() { compactMidHook = savedHook }()
+
+	// Deliver only the filler; survivor stays. This triggers exactly one compaction.
+	if err := o.Flush(func(ev *amxv1.AccountEvent) error {
+		if ev.GetEventId() == "filler" {
+			return nil
+		}
+		return errors.New("hold non-filler")
+	}); err == nil {
+		t.Fatal("expected Flush to stop at the held survivor")
+	}
+
+	// Let the racing Enqueue finish (it lands after the fd swap in the fixed code).
+	select {
+	case <-enqueued:
+	case <-time.After(2 * time.Second):
+		t.Fatal("racing Enqueue never completed")
+	}
+	compactMidHook = savedHook
+
+	// Reload: both the survivor and the mid-compaction enqueue must be on disk.
+	o2 := mustOpen(t, dir)
+	got := drainAll(t, o2)
+	seen := make(map[string]struct{}, len(got))
+	for _, ev := range got {
+		seen[ev.GetEventId()] = struct{}{}
+	}
+	if _, ok := seen["survivor"]; !ok {
+		t.Fatal("survivor lost across compaction")
+	}
+	if _, ok := seen["midkeep"]; !ok {
+		t.Fatal("event enqueued during the compaction window was lost (F1)")
+	}
+	if _, ok := seen["filler"]; ok {
+		t.Fatal("delivered filler resurrected on reload")
 	}
 }
 

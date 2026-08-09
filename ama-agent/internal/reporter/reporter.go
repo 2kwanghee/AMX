@@ -320,9 +320,15 @@ func (o *Outbox) deleteDelivered(seq uint64) {
 	}
 	_ = o.log.appendDel(seq)
 	if o.log.shouldCompact() {
+		// Hold o.mu across the whole compaction (snapshot + file rewrite + fd swap).
+		// Enqueue's disk append also runs under o.mu, so it cannot interleave here:
+		// otherwise an Enqueue between snapshotting the live set and swapping in the
+		// rewritten file would write to the old, about-to-be-unlinked inode and be
+		// lost (F1). o.queue is the authoritative live set at swap time, so no queued
+		// event is dropped. Compaction is rare (per outboxCompactThreshold deletes)
+		// and rewrites only the small live set, so the lock hold is brief.
 		o.mu.Lock()
-		live := append([]outboxItem(nil), o.queue...)
+		_ = o.log.compact(o.queue)
 		o.mu.Unlock()
-		_ = o.log.compact(live)
 	}
 }

@@ -20,8 +20,9 @@ const OutboxLogFileName = "outbox.log"
 
 // outboxCompactThreshold is how many delete tombstones may accumulate before the
 // log is rewritten to just its live records, so append-only growth stays bounded
-// on a long-lived agent that never restarts.
-const outboxCompactThreshold = 256
+// on a long-lived agent that never restarts. A var (not const) only so tests can
+// lower it to force compaction; production never changes it.
+var outboxCompactThreshold = 256
 
 // outboxItem is one queued event plus the monotonic sequence that keys its
 // on-disk add/del records (event_id is not a stable delete key: emitters may omit
@@ -174,12 +175,21 @@ func (l *outboxLog) shouldCompact() bool {
 	return l.dels >= outboxCompactThreshold
 }
 
+// compactMidHook, when non-nil, is called inside compact after the log has been
+// rewritten (old inode now unlinked) but before the append fd is swapped — the
+// exact window in which a concurrent, unsynchronized Enqueue would write to the
+// dead inode and lose its event. Test-only; nil in production.
+var compactMidHook func()
+
 // compact rewrites the log to just the given live items and reopens the append
 // handle. The caller supplies the authoritative live set (the Outbox's in-memory
 // queue) so compaction cannot race a concurrent replay.
 func (l *outboxLog) compact(items []outboxItem) error {
 	if err := rewriteOutbox(l.path, items); err != nil {
 		return err
+	}
+	if compactMidHook != nil {
+		compactMidHook()
 	}
 	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
