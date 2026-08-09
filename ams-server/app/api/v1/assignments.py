@@ -12,11 +12,11 @@ import uuid
 from fastapi import APIRouter, Query
 
 from app import schemas
-from app.api.deps import AdminAuth, AdminPrincipal, DbSession, PageSize, PageToken, next_page_token, offset_from_token
+from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.core.errors import bad_request
 from app.services import commands, inventory
 
-router = APIRouter(prefix="/tenants/{tenant_id}", tags=["assignments"], dependencies=[AdminAuth])
+router = APIRouter(prefix="/tenants/{tenant_id}", tags=["assignments"], dependencies=[TenantScope])
 
 
 @router.get("/assignments", response_model=schemas.AssignmentPage)
