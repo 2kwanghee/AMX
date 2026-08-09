@@ -68,3 +68,21 @@ def export_billing_event(
 ):
     event = billing.export_billing_event(db, tenant_id, event_id)
     return schemas.BillingEvent.model_validate(event)
+
+
+@router.post(
+    "/billing/events/{event_id}/void",
+    response_model=schemas.BillingEvent,
+    dependencies=[GlobalAdmin],
+)
+def void_billing_event(
+    tenant_id: uuid.UUID,
+    event_id: uuid.UUID,
+    db: DbSession,
+    principal: AdminPrincipal,
+):
+    # G26: reverse an exported event and re-aggregate the day. Returns the void
+    # (reversal) event. Cross-tenant id -> 404 (before GlobalAdmin's 403);
+    # pending target -> 409; re-void -> idempotent 200 with the existing void.
+    event = billing.void_billing_event(db, tenant_id, event_id)
+    return schemas.BillingEvent.model_validate(event)

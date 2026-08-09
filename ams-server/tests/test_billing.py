@@ -10,9 +10,12 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
+from app.core.errors import ApiError
 from app.db import get_sessionmaker
-from app.models import BillingCursor, BillingEvent, UsageSnapshot
-from app.services import billing
+from app.models import BillingCursor, BillingEvent, Tenant, UsageSnapshot
+from app.services import billing, inventory
 
 from tests.test_grpc_channel import _seed_tenant_account_server
 
@@ -202,3 +205,166 @@ def test_malformed_rows_skipped(app_env):
     assert payload["snapshot_count"] == 1
     assert payload["account_days"] == 1
     assert payload["account_ids"] == ["a1"]
+
+
+# -- helpers for G25/G26 ------------------------------------------------------
+def _drop_inventory(tenant_id, account_id, server_id):
+    """Delete a tenant's account + server so only ledger guards remain."""
+    with get_sessionmaker()() as db:
+        inventory.delete_account(db, tenant_id, account_id)
+        inventory.delete_server(db, tenant_id, server_id)
+
+
+def _by_kind(events):
+    out: dict = {}
+    for e in events:
+        out.setdefault(e.kind, []).append(e)
+    return out
+
+
+# -- G25: tenant delete blocked while pending billing exists ------------------
+def test_delete_tenant_blocked_by_pending_billing(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("g25-a@ex.com")
+    _plant(tenant_id, server_id, _closed_day(), _usage_payload(active_ids=["a1"]))
+    assert _sweep() == 1  # one pending billing_event
+    _drop_inventory(tenant_id, account_id, server_id)
+
+    with get_sessionmaker()() as db:
+        with pytest.raises(ApiError) as ei:
+            inventory.delete_tenant(db, tenant_id)
+    assert ei.value.status == 409
+    assert ei.value.code == "tenant.has_pending_billing"
+
+    # The tenant and its pending ledger survive the refused delete.
+    with get_sessionmaker()() as db:
+        assert db.get(Tenant, tenant_id) is not None
+    assert len(_events(tenant_id)) == 1
+
+
+# -- G25: exported-only ledger no longer blocks delete ------------------------
+def test_delete_tenant_allowed_after_export(app_env, client):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("g25-b@ex.com")
+    _plant(tenant_id, server_id, _closed_day(), _usage_payload(active_ids=["a1"]))
+    assert _sweep() == 1
+    event_id = _events(tenant_id)[0].id
+    exported = client.post(
+        f"/api/v1/tenants/{tenant_id}/billing/events/{event_id}/export"
+    )
+    assert exported.status_code == 200
+    _drop_inventory(tenant_id, account_id, server_id)
+
+    with get_sessionmaker()() as db:
+        inventory.delete_tenant(db, tenant_id)  # exported-only ledger: allowed
+    with get_sessionmaker()() as db:
+        assert db.get(Tenant, tenant_id) is None
+    # billing_events cascaded away with the tenant.
+    assert len(_events(tenant_id)) == 0
+
+
+# -- G25: a tenant with no billing at all deletes cleanly ---------------------
+def test_delete_tenant_with_no_billing(app_env):
+    with get_sessionmaker()() as db:
+        tenant = inventory.create_tenant(db, "g25-c-" + uuid.uuid4().hex[:8])
+        tenant_id = tenant.id
+    with get_sessionmaker()() as db:
+        inventory.delete_tenant(db, tenant_id)
+    with get_sessionmaker()() as db:
+        assert db.get(Tenant, tenant_id) is None
+
+
+# -- G26: void reverses an exported event and re-aggregates the day -----------
+def test_void_reaggregates_and_preserves_original(app_env, client):
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g26-a@ex.com")
+    day = _closed_day()
+    _plant(tenant_id, server_id, day, _usage_payload(active_ids=["a1"]))
+    assert _sweep() == 1
+    original = _events(tenant_id)[0]
+    original_id = original.id
+    assert original.payload["account_days"] == 1
+
+    exported = client.post(
+        f"/api/v1/tenants/{tenant_id}/billing/events/{original_id}/export"
+    )
+    assert exported.status_code == 200
+
+    # A late snapshot for the same day lands after the watermark passed.
+    _plant(
+        tenant_id, server_id, day.replace(hour=20),
+        _usage_payload(active_ids=["a1", "a2"]),
+    )
+
+    voided = client.post(
+        f"/api/v1/tenants/{tenant_id}/billing/events/{original_id}/void"
+    )
+    assert voided.status_code == 200
+    body = voided.json()
+    assert body["kind"] == "usage_daily_void"
+    assert body["status"] == "pending"
+    # payload is an opaque JSONB dict — its keys are not camelCased on the wire.
+    assert body["payload"]["voids_event_id"] == str(original_id)
+    assert body["payload"]["voided_payload"]["account_days"] == 1
+
+    by_kind = _by_kind(_events(tenant_id))
+    assert set(by_kind) == {"usage_daily", "usage_daily_void", "usage_daily_reagg"}
+    # Original row is immutable: still exported, unchanged aggregate.
+    orig = by_kind["usage_daily"][0]
+    assert orig.id == original_id
+    assert orig.status == "exported"
+    assert orig.payload["account_days"] == 1
+    # Re-aggregation picks up the late snapshot.
+    reagg = by_kind["usage_daily_reagg"][0]
+    assert reagg.status == "pending"
+    assert reagg.payload["account_days"] == 2
+    assert reagg.payload["account_ids"] == ["a1", "a2"]
+    # Net over the day = original - void + reagg = corrected truth (2).
+    void_ev = by_kind["usage_daily_void"][0]
+    net = (
+        orig.payload["account_days"]
+        - void_ev.payload["voided_payload"]["account_days"]
+        + reagg.payload["account_days"]
+    )
+    assert net == 2
+
+    # Double void of the same original is an idempotent no-op (200).
+    again = client.post(
+        f"/api/v1/tenants/{tenant_id}/billing/events/{original_id}/void"
+    )
+    assert again.status_code == 200
+    assert again.json()["kind"] == "usage_daily_void"
+    assert len(_events(tenant_id)) == 3  # no duplicate void/reagg rows
+
+    # Sweep idempotency invariant holds: the voided day is behind the watermark.
+    assert _sweep() == 0
+    assert len(_events(tenant_id)) == 3
+
+
+# -- G26: a pending (un-exported) event cannot be voided ----------------------
+def test_void_pending_rejected(app_env, client):
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g26-b@ex.com")
+    _plant(tenant_id, server_id, _closed_day(), _usage_payload(active_ids=["a1"]))
+    assert _sweep() == 1
+    event_id = _events(tenant_id)[0].id
+
+    denied = client.post(
+        f"/api/v1/tenants/{tenant_id}/billing/events/{event_id}/void"
+    )
+    assert denied.status_code == 409
+    assert denied.json()["code"] == "billing.void_requires_exported"
+    assert len(_events(tenant_id)) == 1  # nothing created
+
+
+# -- G26: cross-tenant void is a 404, not a leak ------------------------------
+def test_void_cross_tenant_404(app_env, client):
+    tenant_a, _a, server_a = _seed_tenant_account_server("g26-cA@ex.com")
+    tenant_b, _b, _server_b = _seed_tenant_account_server("g26-cB@ex.com")
+    _plant(tenant_a, server_a, _closed_day(), _usage_payload(active_ids=["a1"]))
+    assert _sweep() == 1
+    event_a = _events(tenant_a)[0].id
+    client.post(f"/api/v1/tenants/{tenant_a}/billing/events/{event_a}/export")
+
+    denied = client.post(
+        f"/api/v1/tenants/{tenant_b}/billing/events/{event_a}/void"
+    )
+    assert denied.status_code == 404
+    # The event under its real tenant is untouched by the cross-tenant attempt.
+    assert len(_events(tenant_a)) == 1
