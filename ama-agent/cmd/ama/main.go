@@ -29,6 +29,12 @@ import (
 // reportInterval is the usage-report cadence (SSOT §6.5, design note §1).
 const reportInterval = 5 * time.Minute
 
+// heartbeatInterval is the liveness cadence (design note §8): AMS marks a server
+// offline after 3 missed beats (AMX_OFFLINE_AFTER = 3×30s), so this must stay at
+// or below the server's AMX_HEARTBEAT_INTERVAL. AMX_HEARTBEAT_INTERVAL on the
+// agent (a Go duration) overrides it for tests.
+const heartbeatInterval = 30 * time.Second
+
 // eventFlushInterval is how often the live outbox drain attempts delivery of
 // queued AccountEvents on an already-connected session (see the drain goroutine).
 const eventFlushInterval = 1 * time.Second
@@ -241,6 +247,35 @@ func run() error {
 					continue
 				}
 				client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Usage{Usage: r}})
+			}
+		}
+	}()
+
+	// Heartbeat ticker (design note §8): AMS touches last_seen only on hb, so
+	// without this the server flips offline 90s after Register even though the
+	// stream is healthy (usage reports do not count as liveness). TrySend drops
+	// the beat while disconnected — harmless, the next one supersedes it.
+	hbInterval := heartbeatInterval
+	if v := os.Getenv("AMX_HEARTBEAT_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			hbInterval = d
+		} else {
+			log.Printf("AMX_HEARTBEAT_INTERVAL %q: invalid (using default)", v)
+		}
+	}
+	go func() {
+		t := time.NewTicker(hbInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Hb{Hb: &amxv1.Heartbeat{
+					AgentId:     agentID,
+					SwitchMode:  handler.SwitchMode(),
+					OutboxDepth: uint32(outbox.Depth()),
+				}}})
 			}
 		}
 	}()
