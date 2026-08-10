@@ -34,10 +34,18 @@ import httpx
 from app.core.errors import ApiError, bad_request
 
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
-OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
+OAUTH_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
+OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
+# Claude Code 2.1.226 바이너리의 기본 로그인 scope 집합(`JKi = xo([...Qag,...LUe])`,
+# xo=Set 중복 제거)과 정확히 일치시킨다. 개인(Pro/Max)·조직 계정 모두 이 집합으로
+# 승인된다(2026-08-10 실측). 순서·구성은 바이너리와 맞춘 값이므로 임의 변경 금지.
+# 주의: 과거 "Invalid request format"의 원인은 scope가 아니라 state 길이였다
+# (PkceFlowStore.create 참고).
+OAUTH_SCOPES = (
+    "org:create_api_key user:profile user:inference "
+    "user:sessions:claude_code user:mcp_servers user:file_upload"
+)
 
 _logger = logging.getLogger("ams.oauth")
 
@@ -75,7 +83,10 @@ class PkceFlowStore:
             flow_id="flow_" + secrets.token_urlsafe(16),
             tenant_id=tenant_id,
             verifier=verifier,
-            state=_b64url(secrets.token_bytes(16)),
+            # 32바이트 필수: claude.ai 승인 API는 16바이트(22자) state를
+            # "Invalid request format"으로 거부한다. Claude Code CLI와 동일하게
+            # 32바이트(43자 base64url)를 쓴다 (2026-08-10 브라우저 이분법으로 실측).
+            state=_b64url(secrets.token_bytes(32)),
             expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
             label=label,
         )
