@@ -325,11 +325,33 @@ for a in "$@"; do
 done
 
 do_up()   { case "$1" in db) db_up;; server) server_up;; web) web_up;; all) server_up; web_up;; esac; }
+
+# up/restart 직후 예열이 끝나기 전에 status를 찍으면 x로 보여 오해를 부른다.
+# 대상 구성요소가 전부 응답할 때까지 최대 60초 조용히 기다린 뒤 상태를 출력한다.
+comp_ready() { # <comp> — 준비되면 0
+  case "$1" in
+    db)     docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1 ;;
+    server) curl -fsS "http://127.0.0.1:$REST_PORT/healthz" >/dev/null 2>&1 && port_listening "$GRPC_PORT" ;;
+    web)    [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/login" 2>/dev/null)" = 200 ] ;;
+    all)    comp_ready server && comp_ready web ;;
+  esac
+}
+wait_ready() { # <comp>
+  local i
+  info "예열 대기 중… (최대 60초)"
+  for i in $(seq 1 30); do
+    comp_ready "$1" && return 0
+    sleep 2
+  done
+  warn "60초 안에 전부 준비되지 않았습니다 — 아래 상태에서 x인 항목은 'logs' 명령으로 원인을 확인하세요."
+  return 0
+}
 do_down() { case "$1" in db) db_down;; server) server_down;; web) web_down;; all) web_down; server_down; db_down;; esac; }
 
 case "$ACTION" in
   up)
     load_env; do_up "$COMP"
+    wait_ready "$COMP"
     info ""; status_all
     ;;
   down)
@@ -339,6 +361,7 @@ case "$ACTION" in
   restart)
     [ -f "$ENV_FILE" ] && load_env || gen_env
     do_down "$COMP"; sleep 1; load_env; do_up "$COMP"
+    wait_ready "$COMP"
     info ""; status_all
     ;;
   status)
