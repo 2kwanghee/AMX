@@ -226,7 +226,7 @@ class SetSwitchMode(_message.Message):
     def __init__(self, mode: _Optional[_Union[SwitchMode, str]] = ...) -> None: ...
 
 class SwitchNow(_message.Message):
-    __slots__ = ("account", "strategy", "assignment_id")
+    __slots__ = ("assignment_id", "account", "strategy")
     class SwitchStrategy(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         SWITCH_STRATEGY_UNSPECIFIED: _ClassVar[SwitchNow.SwitchStrategy]
@@ -235,13 +235,13 @@ class SwitchNow(_message.Message):
     SWITCH_STRATEGY_UNSPECIFIED: SwitchNow.SwitchStrategy
     SWITCH_STRATEGY_BEST: SwitchNow.SwitchStrategy
     SWITCH_STRATEGY_NEXT_AVAILABLE: SwitchNow.SwitchStrategy
+    ASSIGNMENT_ID_FIELD_NUMBER: _ClassVar[int]
     ACCOUNT_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
-    ASSIGNMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    assignment_id: str
     account: AccountRef
     strategy: SwitchNow.SwitchStrategy
-    assignment_id: str
-    def __init__(self, account: _Optional[_Union[AccountRef, _Mapping]] = ..., strategy: _Optional[_Union[SwitchNow.SwitchStrategy, str]] = ..., assignment_id: _Optional[str] = ...) -> None: ...
+    def __init__(self, assignment_id: _Optional[str] = ..., account: _Optional[_Union[AccountRef, _Mapping]] = ..., strategy: _Optional[_Union[SwitchNow.SwitchStrategy, str]] = ...) -> None: ...
 
 class SetPolicy(_message.Message):
     __slots__ = ("threshold_pct", "default_strategy", "cooldown_seconds", "hysteresis_pct")

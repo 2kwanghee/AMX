@@ -307,17 +307,26 @@ message SetSwitchMode {
 
 // Manual switch (§6.3 switch_now). Non-state command: only last_switched_at moves.
 message SwitchNow {
-  oneof target {
-    // Switch to this specific account: `tsamx switch <email>`.
-    AccountRef account = 1;
-    // Let tsamx rank candidates: `tsamx switch --strategy best`.
-    SwitchStrategy strategy = 2;
-  }
-
   // Assignment the request originated from, for correlation and the audit trail.
   // Symmetric with the other account-scoped commands. Empty when `strategy` is
   // used, since no single assignment is named.
   string assignment_id = 3;
+
+  // The oneof members are deliberately numbered ABOVE every regular field.
+  // AmsCommand signatures are Ed25519 over a deterministic re-serialization on
+  // each side, and Go's protobuf marshaler emits oneof members after regular
+  // fields regardless of field number, while Python emits strictly by number.
+  // With a oneof numbered below a regular field the two byte streams diverge
+  // and every SwitchNow fails verification (signature_invalid — 2026-08-10
+  // 실측). Keep any future oneof in a signed message numbered last, and keep
+  // reserved 1, 2 so the old numbers are never reused.
+  reserved 1, 2;
+  oneof target {
+    // Switch to this specific account: `tsamx switch <email>`.
+    AccountRef account = 4;
+    // Let tsamx rank candidates: `tsamx switch --strategy best`.
+    SwitchStrategy strategy = 5;
+  }
 
   enum SwitchStrategy {
     SWITCH_STRATEGY_UNSPECIFIED = 0;

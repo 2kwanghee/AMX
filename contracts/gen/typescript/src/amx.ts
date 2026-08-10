@@ -485,20 +485,18 @@ export interface SetSwitchMode {
 
 /** Manual switch (§6.3 switch_now). Non-state command: only last_switched_at moves. */
 export interface SwitchNow {
-  /** Switch to this specific account: `tsamx switch <email>`. */
-  account?:
-    | AccountRef
-    | undefined;
-  /** Let tsamx rank candidates: `tsamx switch --strategy best`. */
-  strategy?:
-    | SwitchNow_SwitchStrategy
-    | undefined;
   /**
    * Assignment the request originated from, for correlation and the audit trail.
    * Symmetric with the other account-scoped commands. Empty when `strategy` is
    * used, since no single assignment is named.
    */
   assignmentId: string;
+  /** Switch to this specific account: `tsamx switch <email>`. */
+  account?:
+    | AccountRef
+    | undefined;
+  /** Let tsamx rank candidates: `tsamx switch --strategy best`. */
+  strategy?: SwitchNow_SwitchStrategy | undefined;
 }
 
 export enum SwitchNow_SwitchStrategy {
@@ -2772,19 +2770,19 @@ export const SetSwitchMode: MessageFns<SetSwitchMode> = {
 };
 
 function createBaseSwitchNow(): SwitchNow {
-  return { account: undefined, strategy: undefined, assignmentId: "" };
+  return { assignmentId: "", account: undefined, strategy: undefined };
 }
 
 export const SwitchNow: MessageFns<SwitchNow> = {
   encode(message: SwitchNow, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.account !== undefined) {
-      AccountRef.encode(message.account, writer.uint32(10).fork()).join();
-    }
-    if (message.strategy !== undefined) {
-      writer.uint32(16).int32(message.strategy);
-    }
     if (message.assignmentId !== "") {
       writer.uint32(26).string(message.assignmentId);
+    }
+    if (message.account !== undefined) {
+      AccountRef.encode(message.account, writer.uint32(34).fork()).join();
+    }
+    if (message.strategy !== undefined) {
+      writer.uint32(40).int32(message.strategy);
     }
     return writer;
   },
@@ -2796,28 +2794,28 @@ export const SwitchNow: MessageFns<SwitchNow> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.account = AccountRef.decode(reader, reader.uint32());
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
-            break;
-          }
-
-          message.strategy = reader.int32() as any;
-          continue;
-        }
         case 3: {
           if (tag !== 26) {
             break;
           }
 
           message.assignmentId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.account = AccountRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.strategy = reader.int32() as any;
           continue;
         }
       }
@@ -2831,26 +2829,26 @@ export const SwitchNow: MessageFns<SwitchNow> = {
 
   fromJSON(object: any): SwitchNow {
     return {
-      account: isSet(object.account) ? AccountRef.fromJSON(object.account) : undefined,
-      strategy: isSet(object.strategy) ? switchNow_SwitchStrategyFromJSON(object.strategy) : undefined,
       assignmentId: isSet(object.assignmentId)
         ? globalThis.String(object.assignmentId)
         : isSet(object.assignment_id)
         ? globalThis.String(object.assignment_id)
         : "",
+      account: isSet(object.account) ? AccountRef.fromJSON(object.account) : undefined,
+      strategy: isSet(object.strategy) ? switchNow_SwitchStrategyFromJSON(object.strategy) : undefined,
     };
   },
 
   toJSON(message: SwitchNow): unknown {
     const obj: any = {};
+    if (message.assignmentId !== "") {
+      obj.assignmentId = message.assignmentId;
+    }
     if (message.account !== undefined) {
       obj.account = AccountRef.toJSON(message.account);
     }
     if (message.strategy !== undefined) {
       obj.strategy = switchNow_SwitchStrategyToJSON(message.strategy);
-    }
-    if (message.assignmentId !== "") {
-      obj.assignmentId = message.assignmentId;
     }
     return obj;
   },
@@ -2860,11 +2858,11 @@ export const SwitchNow: MessageFns<SwitchNow> = {
   },
   fromPartial(object: DeepPartial<SwitchNow>): SwitchNow {
     const message = createBaseSwitchNow();
+    message.assignmentId = object.assignmentId ?? "";
     message.account = (object.account !== undefined && object.account !== null)
       ? AccountRef.fromPartial(object.account)
       : undefined;
     message.strategy = object.strategy ?? undefined;
-    message.assignmentId = object.assignmentId ?? "";
     return message;
   },
 };

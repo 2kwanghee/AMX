@@ -1620,15 +1620,15 @@ func (x *SetSwitchMode) GetMode() SwitchMode {
 // Manual switch (§6.3 switch_now). Non-state command: only last_switched_at moves.
 type SwitchNow struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// Assignment the request originated from, for correlation and the audit trail.
+	// Symmetric with the other account-scoped commands. Empty when `strategy` is
+	// used, since no single assignment is named.
+	AssignmentId string `protobuf:"bytes,3,opt,name=assignment_id,json=assignmentId,proto3" json:"assignment_id,omitempty"`
 	// Types that are valid to be assigned to Target:
 	//
 	//	*SwitchNow_Account
 	//	*SwitchNow_Strategy
-	Target isSwitchNow_Target `protobuf_oneof:"target"`
-	// Assignment the request originated from, for correlation and the audit trail.
-	// Symmetric with the other account-scoped commands. Empty when `strategy` is
-	// used, since no single assignment is named.
-	AssignmentId  string `protobuf:"bytes,3,opt,name=assignment_id,json=assignmentId,proto3" json:"assignment_id,omitempty"`
+	Target        isSwitchNow_Target `protobuf_oneof:"target"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1663,6 +1663,13 @@ func (*SwitchNow) Descriptor() ([]byte, []int) {
 	return file_amx_proto_rawDescGZIP(), []int{12}
 }
 
+func (x *SwitchNow) GetAssignmentId() string {
+	if x != nil {
+		return x.AssignmentId
+	}
+	return ""
+}
+
 func (x *SwitchNow) GetTarget() isSwitchNow_Target {
 	if x != nil {
 		return x.Target
@@ -1688,25 +1695,18 @@ func (x *SwitchNow) GetStrategy() SwitchNow_SwitchStrategy {
 	return SwitchNow_SWITCH_STRATEGY_UNSPECIFIED
 }
 
-func (x *SwitchNow) GetAssignmentId() string {
-	if x != nil {
-		return x.AssignmentId
-	}
-	return ""
-}
-
 type isSwitchNow_Target interface {
 	isSwitchNow_Target()
 }
 
 type SwitchNow_Account struct {
 	// Switch to this specific account: `tsamx switch <email>`.
-	Account *AccountRef `protobuf:"bytes,1,opt,name=account,proto3,oneof"`
+	Account *AccountRef `protobuf:"bytes,4,opt,name=account,proto3,oneof"`
 }
 
 type SwitchNow_Strategy struct {
 	// Let tsamx rank candidates: `tsamx switch --strategy best`.
-	Strategy SwitchNow_SwitchStrategy `protobuf:"varint,2,opt,name=strategy,proto3,enum=amx.v1.SwitchNow_SwitchStrategy,oneof"`
+	Strategy SwitchNow_SwitchStrategy `protobuf:"varint,5,opt,name=strategy,proto3,enum=amx.v1.SwitchNow_SwitchStrategy,oneof"`
 }
 
 func (*SwitchNow_Account) isSwitchNow_Target() {}
@@ -2897,16 +2897,16 @@ const file_amx_proto_rawDesc = "" +
 	"\x06active\x18\x03 \x01(\bR\x06active\x12)\n" +
 	"\x10clear_quarantine\x18\x04 \x01(\bR\x0fclearQuarantine\"7\n" +
 	"\rSetSwitchMode\x12&\n" +
-	"\x04mode\x18\x01 \x01(\x0e2\x12.amx.v1.SwitchModeR\x04mode\"\x9b\x02\n" +
-	"\tSwitchNow\x12.\n" +
-	"\aaccount\x18\x01 \x01(\v2\x12.amx.v1.AccountRefH\x00R\aaccount\x12>\n" +
-	"\bstrategy\x18\x02 \x01(\x0e2 .amx.v1.SwitchNow.SwitchStrategyH\x00R\bstrategy\x12#\n" +
-	"\rassignment_id\x18\x03 \x01(\tR\fassignmentId\"o\n" +
+	"\x04mode\x18\x01 \x01(\x0e2\x12.amx.v1.SwitchModeR\x04mode\"\xa7\x02\n" +
+	"\tSwitchNow\x12#\n" +
+	"\rassignment_id\x18\x03 \x01(\tR\fassignmentId\x12.\n" +
+	"\aaccount\x18\x04 \x01(\v2\x12.amx.v1.AccountRefH\x00R\aaccount\x12>\n" +
+	"\bstrategy\x18\x05 \x01(\x0e2 .amx.v1.SwitchNow.SwitchStrategyH\x00R\bstrategy\"o\n" +
 	"\x0eSwitchStrategy\x12\x1f\n" +
 	"\x1bSWITCH_STRATEGY_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14SWITCH_STRATEGY_BEST\x10\x01\x12\"\n" +
 	"\x1eSWITCH_STRATEGY_NEXT_AVAILABLE\x10\x02B\b\n" +
-	"\x06target\"\xcf\x01\n" +
+	"\x06targetJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03\"\xcf\x01\n" +
 	"\tSetPolicy\x12#\n" +
 	"\rthreshold_pct\x18\x01 \x01(\x01R\fthresholdPct\x12K\n" +
 	"\x10default_strategy\x18\x02 \x01(\x0e2 .amx.v1.SwitchNow.SwitchStrategyR\x0fdefaultStrategy\x12)\n" +
