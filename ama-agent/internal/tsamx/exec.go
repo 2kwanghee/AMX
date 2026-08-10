@@ -174,11 +174,34 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 	identity.OAuthAccount.EmailAddress = req.Email
 	identity.OAuthAccount.AccountUUID = req.AccountUUID
 	identity.OAuthAccount.OrganizationName = req.OrganizationName
-	blob, err := json.Marshal(identity)
+
+	// Merge into the existing .claude.json rather than replacing it: the runner
+	// (Claude Code) keeps its own state there (machineID, firstStartTime, …), and
+	// `hasCompletedOnboarding` + `theme` are load-bearing — claude shows the
+	// onboarding/login screen when `!config.theme || !config.hasCompletedOnboarding`,
+	// so a staged home without them demands a browser login even though the
+	// credential file is complete (2026-08-10 실측; tsamx session.py seeds the
+	// same two keys on its own capture path).
+	configPath := filepath.Join(configDir, ".claude.json")
+	config := map[string]json.RawMessage{}
+	if raw, rerr := os.ReadFile(configPath); rerr == nil {
+		// A corrupt file degrades to a fresh map — same failure mode as before.
+		_ = json.Unmarshal(raw, &config)
+	}
+	oauthBlob, err := json.Marshal(identity.OAuthAccount)
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(filepath.Join(configDir, ".claude.json"), blob, 0o600); err != nil {
+	config["oauthAccount"] = oauthBlob
+	config["hasCompletedOnboarding"] = json.RawMessage("true")
+	if _, ok := config["theme"]; !ok {
+		config["theme"] = json.RawMessage(`"dark"`)
+	}
+	blob, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(configPath, blob, 0o600); err != nil {
 		return err
 	}
 
