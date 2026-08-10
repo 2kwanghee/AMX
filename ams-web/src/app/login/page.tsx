@@ -23,21 +23,33 @@ export default function LoginPage() {
         window.location.href = '/dashboard';
         return;
       }
-      setErr(res.status === 401 ? 'Invalid credentials.' : 'Login failed.');
+      setErr(res.status === 401 ? '이메일 또는 비밀번호가 올바르지 않습니다.' : '로그인에 실패했습니다.');
     } catch {
-      setErr('Network error.');
+      setErr('네트워크 오류가 발생했습니다.');
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="container" style={{ maxWidth: 380, marginTop: '12vh' }}>
-      <div className="panel">
-        <h1>AMX Console</h1>
-        <p className="muted">Sign in with your administrator email and password.</p>
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+        background: 'linear-gradient(180deg, var(--accent-soft) 0%, var(--bg) 260px)',
+      }}
+    >
+      <div className="panel" style={{ width: 380, maxWidth: '100%', marginBottom: 0 }}>
+        <div className="brand" style={{ padding: 0, marginBottom: 4 }}>
+          <span className="brand-dot" />
+          AMX 관제 콘솔
+        </div>
+        <p className="muted">관리자 이메일과 비밀번호로 로그인하세요.</p>
         <form onSubmit={submit}>
-          <label htmlFor="email">Email</label>
+          <label htmlFor="email">이메일</label>
           <input
             id="email"
             type="email"
@@ -46,7 +58,7 @@ export default function LoginPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-          <label htmlFor="pw">Password</label>
+          <label htmlFor="pw">비밀번호</label>
           <input
             id="pw"
             type="password"
@@ -55,8 +67,8 @@ export default function LoginPage() {
             onChange={(e) => setPassword(e.target.value)}
           />
           {err && <p className="err">{err}</p>}
-          <button className="primary" style={{ marginTop: 14, width: '100%' }} disabled={busy}>
-            {busy ? 'Signing in…' : 'Sign in'}
+          <button className="primary" style={{ marginTop: 16, width: '100%' }} disabled={busy}>
+            {busy ? '로그인 중…' : '로그인'}
           </button>
         </form>
       </div>
