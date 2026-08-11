@@ -74,6 +74,9 @@ button {
   border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px;
   font-family: inherit; transition: background 0.12s, border-color 0.12s;
 }
+/* ⚠ 이 전역 hover(특이도 0,2,1)는 클래스 단독 hover(0,2,0)를 이긴다. 다크 배경 위
+   button에 커스텀 hover를 줄 때는 반드시 부모 클래스 접두로 특이도를 올리고
+   background를 명시할 것 — .nav-item(1회)·.topo-node(1회) 흰 배경 회귀의 원인. */
 button:hover:not(:disabled) { background: var(--surface-2); }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -564,4 +567,227 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 }
 @media (max-width: 560px) {
   .srv-tiles { grid-template-columns: 1fr; }
+}
+
+/* -- 홈 토폴로지 캔버스 (다크 관제 패널) -----------------------------------
+   본문은 라이트를 유지하고 이 캔버스만 다크. --side-* 다크 톤 계열을 확장한
+   --canvas-* 토큰을 :root에 추가한다(사이드바 토큰은 건드리지 않음). */
+:root {
+  --canvas-bg: #0C1420;          /* 딥 잉크 (사이드바보다 어둡게) */
+  --canvas-bg-2: #131F32;        /* 노드 카드 배경 */
+  --canvas-bg-3: #0F1826;        /* 대기 풀·게이지 트랙 바닥 */
+  --canvas-border: #223049;
+  --canvas-ink: #C3CEDD;
+  --canvas-ink-strong: #FFFFFF;
+  --canvas-muted: #708096;
+  --canvas-accent: #2DD4BF;      /* 밝은 틸 */
+  --canvas-accent-soft: rgba(45, 212, 191, 0.14);
+  --canvas-ok: #34D399;
+  --canvas-warn: #FBBF24;
+  --canvas-crit: #F87171;
+  --canvas-edge: #35507A;        /* 정적 엣지 */
+}
+
+.topo-canvas {
+  position: relative;
+  margin-top: 14px;
+  padding: 16px 18px 20px;
+  background: var(--canvas-bg);
+  border: 1px solid var(--canvas-border);
+  border-radius: 16px;
+  color: var(--canvas-ink);
+  overflow: hidden;
+}
+.topo-empty { color: var(--canvas-muted); font-size: 13px; padding: 28px 4px; text-align: center; }
+
+/* 상단 스탯 바 */
+.topo-statbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.topo-stats { display: flex; gap: 10px; flex-wrap: wrap; }
+.topo-stat {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 9px 14px; border-radius: 11px;
+  background: var(--canvas-bg-2); border: 1px solid var(--canvas-border);
+  color: var(--canvas-ink); cursor: pointer; transition: border-color .12s, transform .12s;
+}
+.topo-canvas .topo-stat:hover { background: var(--canvas-bg-2); border-color: var(--canvas-accent); color: var(--canvas-ink); transform: translateY(-1px); }
+.topo-stat:focus-visible { outline: 2px solid var(--canvas-accent); outline-offset: 1px; }
+.topo-stat.warn { border-color: color-mix(in srgb, var(--canvas-warn) 55%, var(--canvas-border)); }
+.topo-stat.crit { border-color: color-mix(in srgb, var(--canvas-crit) 60%, var(--canvas-border)); }
+.topo-stat-icon { color: var(--canvas-accent); display: inline-flex; flex: 0 0 auto; }
+.topo-stat.warn .topo-stat-icon { color: var(--canvas-warn); }
+.topo-stat.crit .topo-stat-icon { color: var(--canvas-crit); }
+.topo-stat-body { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; text-align: left; }
+.topo-stat-label { font-size: 11px; color: var(--canvas-muted); }
+.topo-stat-value { font-size: 17px; font-weight: 700; color: var(--canvas-ink-strong); font-variant-numeric: tabular-nums; }
+
+.topo-live { display: inline-flex; align-items: center; gap: 12px; }
+.topo-live-updated { font-size: 12px; color: var(--canvas-muted); }
+.topo-live-updated .mono, .topo-live-clock { font-family: var(--mono); }
+.topo-live-clock { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--canvas-ink); font-variant-numeric: tabular-nums; }
+
+/* 2열 이분 배치 + 엣지 레이어 */
+.topo-grid {
+  position: relative;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 90px; align-items: start;
+}
+.topo-edges { position: absolute; inset: 0; pointer-events: none; z-index: 0; overflow: visible; }
+.topo-edge { fill: none; stroke: var(--canvas-edge); stroke-width: 1.5; stroke-dasharray: 4 4; }
+.topo-edge.active { stroke: var(--canvas-accent); stroke-dasharray: none; opacity: .55; }
+.topo-edge.pending { stroke: var(--canvas-warn); stroke-dasharray: 5 4; animation: topo-blink 1s ease-in-out infinite; }
+.topo-edge.error { stroke: var(--canvas-crit); stroke-dasharray: 5 3; }
+.topo-flow {
+  fill: none; stroke: var(--canvas-accent); stroke-width: 2.2; stroke-linecap: round;
+  stroke-dasharray: 2 10; animation: topo-flow 1.1s linear infinite;
+}
+@keyframes topo-flow { to { stroke-dashoffset: -24; } }
+@keyframes topo-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+.topo-accounts, .topo-servers { position: relative; z-index: 1; min-width: 0; }
+.topo-col-head {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--canvas-muted); margin-bottom: 10px; padding-left: 2px;
+}
+.topo-col-count {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 18px;
+  padding: 0 6px; border-radius: 999px; background: var(--canvas-bg-2);
+  border: 1px solid var(--canvas-border); font-size: 11px; color: var(--canvas-ink);
+}
+.topo-acc-grid { display: grid; grid-template-columns: 1fr; gap: 9px; }
+.topo-acc-grid.two { grid-template-columns: 1fr 1fr; }
+.topo-srv-grid { display: grid; grid-template-columns: 1fr; gap: 13px; }
+
+/* 노드 카드 공통 */
+.topo-node {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: var(--canvas-bg-2); border: 1px solid var(--canvas-border);
+  border-radius: 11px; padding: 11px 12px; color: var(--canvas-ink);
+  transition: border-color .12s, box-shadow .12s, transform .12s;
+}
+.topo-canvas .topo-node:hover { background: var(--canvas-bg-2); border-color: var(--canvas-accent); color: var(--canvas-ink); box-shadow: 0 4px 16px rgb(0 0 0 / 0.28); transform: translateY(-1px); }
+.topo-node:focus-visible { outline: 2px solid var(--canvas-accent); outline-offset: 1px; }
+/* 다크 캔버스 위 EmailChip 텍스트를 밝게 */
+.topo-node .email-text { color: var(--canvas-ink); }
+.topo-node .email-sub { color: var(--canvas-muted); }
+
+.topo-acc { }
+
+/* 서버 노드 */
+.topo-srv { display: flex; flex-direction: column; gap: 10px; }
+.topo-srv.offline { border-color: color-mix(in srgb, var(--canvas-crit) 40%, var(--canvas-border)); }
+.topo-srv-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.topo-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--canvas-muted); flex: 0 0 auto; }
+.topo-dot.online { background: var(--canvas-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-ok) 22%, transparent); }
+.topo-dot.degraded { background: var(--canvas-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-warn) 22%, transparent); }
+.topo-dot.offline { background: var(--canvas-crit); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-crit) 22%, transparent); }
+.topo-srv-name { font-weight: 700; font-size: 14px; color: var(--canvas-ink-strong); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-srv-head .mode-pill { flex: 0 0 auto; }
+
+.topo-gauges { display: flex; flex-direction: column; gap: 6px; }
+.gauge-row { display: grid; grid-template-columns: 42px 1fr 40px; align-items: center; gap: 8px; height: 18px; }
+.gauge-label { font-size: 10px; letter-spacing: .04em; color: var(--canvas-muted); }
+.gauge-track { height: 5px; border-radius: 999px; background: var(--canvas-bg-3); overflow: hidden; box-shadow: inset 0 0 0 1px var(--canvas-border); }
+.gauge-fill { height: 100%; border-radius: 999px; background: var(--canvas-accent); transition: width .3s ease; }
+.gauge-fill.warn { background: var(--canvas-warn); }
+.gauge-fill.crit { background: var(--canvas-crit); }
+.gauge-val { font-size: 11px; font-family: var(--mono); color: var(--canvas-ink); text-align: right; font-variant-numeric: tabular-nums; }
+.gauge-missing { grid-column: 2 / -1; font-size: 11px; color: var(--canvas-muted); }
+
+.topo-srv-active { border-top: 1px solid var(--canvas-border); padding-top: 9px; min-height: 20px; }
+.topo-srv-idle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--canvas-muted); }
+
+/* 대기 풀 */
+.topo-pool {
+  margin-top: 18px; padding: 14px 14px 15px;
+  background: var(--canvas-bg-3); border: 1px dashed var(--canvas-border); border-radius: 13px;
+}
+.topo-pool-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 11px;
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--canvas-muted);
+}
+.topo-pool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 9px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .topo-flow { animation: none; opacity: 0; }
+  .topo-edge.pending { animation: none; }
+  .topo-canvas .topo-stat:hover, .topo-canvas .topo-node:hover { transform: none; }
+}
+@media (max-width: 720px) {
+  .topo-grid { gap: 48px; }
+  .topo-acc-grid.two { grid-template-columns: 1fr; }
+}
+
+/* -- 마스터 콘솔 2차: 3열 연결 편집기 --------------------------------------
+   좌 테넌트 · 중 서버 · 우 계정. 테넌트→서버 정적 소속선, 서버↔계정 편집 할당선. */
+.topo-grid3 {
+  position: relative;
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 72px; align-items: stretch;
+}
+.topo-col { position: relative; z-index: 1; min-width: 0; }
+.topo-col-empty { color: var(--canvas-muted); font-size: 12px; padding: 8px 2px; }
+.topo-canvas .topo-node { position: relative; overflow: visible; }
+
+/* 테넌트 노드 (세로 사각) */
+.topo-tenants { display: flex; flex-direction: column; }
+.topo-tenant {
+  flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 9px; min-height: 130px; padding: 18px 10px; text-align: center;
+  background: var(--canvas-bg-2); border: 1px solid var(--canvas-border); border-radius: 12px;
+}
+.topo-tenant-icon { color: var(--canvas-accent); display: inline-flex; }
+.topo-tenant-name { font-weight: 700; font-size: 14px; color: var(--canvas-ink-strong); word-break: break-all; }
+.topo-tenant-sub { font-size: 11px; color: var(--canvas-muted); }
+
+/* 연결점(port) */
+.topo-port {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; border-radius: 999px; z-index: 3; touch-action: none; cursor: grab;
+  background: var(--canvas-bg-3); border: 2px solid var(--canvas-accent);
+  transition: background .12s, box-shadow .12s;
+}
+.topo-port.right { right: -8px; }
+.topo-port.left { left: -8px; }
+.topo-port:hover { background: var(--canvas-accent); box-shadow: 0 0 0 4px var(--canvas-accent-soft); }
+.topo-port:active { cursor: grabbing; }
+
+/* 드래그 중 유효 대상 강조 */
+.topo-grid3.drag-from-server .topo-acc, .topo-grid3.drag-from-account .topo-srv {
+  border-color: var(--canvas-accent); box-shadow: 0 0 0 2px var(--canvas-accent-soft);
+}
+.topo-grid3.drag-from-server .topo-acc .topo-port,
+.topo-grid3.drag-from-account .topo-srv .topo-port { background: var(--canvas-accent); }
+
+/* 소속선(정적) + 고스트선(드래그) + 할당선 히트/hover/선택 */
+.topo-medge { fill: none; stroke: var(--canvas-edge); stroke-width: 1.6; opacity: .7; }
+.topo-ghost { fill: none; stroke: var(--canvas-accent); stroke-width: 2; stroke-dasharray: 6 5; opacity: .85; pointer-events: none; }
+.topo-hit { fill: none; stroke: transparent; stroke-width: 16; pointer-events: stroke; cursor: pointer; }
+.topo-aedge:hover .topo-edge { stroke-width: 3.4; }
+.topo-aedge.sel .topo-edge { stroke-width: 3.4; stroke: var(--canvas-accent); stroke-dasharray: none; }
+
+/* 선 액션 팝오버 */
+.topo-popover {
+  position: absolute; transform: translate(-50%, -50%); z-index: 6; min-width: 148px;
+  padding: 8px; background: var(--canvas-bg-2); border: 1px solid var(--canvas-accent);
+  border-radius: 10px; box-shadow: 0 10px 28px rgb(0 0 0 / .45);
+}
+.topo-popover-head { font-size: 11px; color: var(--canvas-muted); margin-bottom: 7px; white-space: nowrap; }
+.topo-popover-head .mono { color: var(--canvas-ink); font-family: var(--mono); }
+.topo-popover-err { color: var(--canvas-crit); font-size: 11px; margin-bottom: 6px; }
+.topo-popover-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.topo-popover-none { font-size: 12px; color: var(--canvas-muted); }
+
+/* 이동 경고(라이트 모달 내부) */
+.topo-move-note { color: var(--warn); font-size: 13px; background: var(--warn-soft); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .topo-ghost { animation: none; }
+}
+@media (max-width: 860px) {
+  .topo-grid3 { grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr); gap: 40px; }
 }
