@@ -2252,6 +2252,13 @@ type Heartbeat struct {
 	SwitchMode    SwitchMode             `protobuf:"varint,4,opt,name=switch_mode,json=switchMode,proto3,enum=amx.v1.SwitchMode" json:"switch_mode,omitempty"`
 	TsamxHealthy  bool                   `protobuf:"varint,5,opt,name=tsamx_healthy,json=tsamxHealthy,proto3" json:"tsamx_healthy,omitempty"`
 	OutboxDepth   uint32                 `protobuf:"varint,6,opt,name=outbox_depth,json=outboxDepth,proto3" json:"outbox_depth,omitempty"` // queued events pending flush (§6.3 offline outbox)
+	// Best-effort host resource sample (§8 liveness), read locally from /proc and
+	// statfs. Heartbeat is an unsigned upstream message, so a new field is free to
+	// add (the oneof numbering rule applies only to signed messages). The field is
+	// a submessage so it carries presence: an old agent, a non-Linux host, or a
+	// failed sample simply omits it, and AMS keeps the previous columns rather than
+	// recording 0% (checked via HasField, never overwritten from an absent sample).
+	Metrics       *Heartbeat_SystemMetrics `protobuf:"bytes,7,opt,name=metrics,proto3" json:"metrics,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2326,6 +2333,13 @@ func (x *Heartbeat) GetOutboxDepth() uint32 {
 		return x.OutboxDepth
 	}
 	return 0
+}
+
+func (x *Heartbeat) GetMetrics() *Heartbeat_SystemMetrics {
+	if x != nil {
+		return x.Metrics
+	}
+	return nil
 }
 
 // §6.5 usage report — schedule (5 min), ams_query (RequestReport), or switch.
@@ -2803,6 +2817,67 @@ func (x *SessionSetup_WrappedKey) GetNotAfter() *timestamppb.Timestamp {
 	return nil
 }
 
+// Host utilization percentages, each 0.0–100.0.
+type Heartbeat_SystemMetrics struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CpuPct        float64                `protobuf:"fixed64,1,opt,name=cpu_pct,json=cpuPct,proto3" json:"cpu_pct,omitempty"`    // busy fraction over the interval between two /proc/stat samples
+	MemPct        float64                `protobuf:"fixed64,2,opt,name=mem_pct,json=memPct,proto3" json:"mem_pct,omitempty"`    // (MemTotal - MemAvailable) / MemTotal from /proc/meminfo
+	DiskPct       float64                `protobuf:"fixed64,3,opt,name=disk_pct,json=diskPct,proto3" json:"disk_pct,omitempty"` // used / (used + available) for the "/" filesystem (statfs)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Heartbeat_SystemMetrics) Reset() {
+	*x = Heartbeat_SystemMetrics{}
+	mi := &file_amx_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Heartbeat_SystemMetrics) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Heartbeat_SystemMetrics) ProtoMessage() {}
+
+func (x *Heartbeat_SystemMetrics) ProtoReflect() protoreflect.Message {
+	mi := &file_amx_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Heartbeat_SystemMetrics.ProtoReflect.Descriptor instead.
+func (*Heartbeat_SystemMetrics) Descriptor() ([]byte, []int) {
+	return file_amx_proto_rawDescGZIP(), []int{18, 0}
+}
+
+func (x *Heartbeat_SystemMetrics) GetCpuPct() float64 {
+	if x != nil {
+		return x.CpuPct
+	}
+	return 0
+}
+
+func (x *Heartbeat_SystemMetrics) GetMemPct() float64 {
+	if x != nil {
+		return x.MemPct
+	}
+	return 0
+}
+
+func (x *Heartbeat_SystemMetrics) GetDiskPct() float64 {
+	if x != nil {
+		return x.DiskPct
+	}
+	return 0
+}
+
 var File_amx_proto protoreflect.FileDescriptor
 
 const file_amx_proto_rawDesc = "" +
@@ -2951,7 +3026,7 @@ const file_amx_proto_rawDesc = "" +
 	"\x13applied_command_ids\x18\n" +
 	" \x03(\tR\x11appliedCommandIds\x12(\n" +
 	"\x10agent_public_key\x18\v \x01(\fR\x0eagentPublicKeyB\x06\n" +
-	"\x04auth\"\x93\x02\n" +
+	"\x04auth\"\xac\x03\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x123\n" +
 	"\asent_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x06sentAt\x129\n" +
@@ -2959,7 +3034,12 @@ const file_amx_proto_rawDesc = "" +
 	"\vswitch_mode\x18\x04 \x01(\x0e2\x12.amx.v1.SwitchModeR\n" +
 	"switchMode\x12#\n" +
 	"\rtsamx_healthy\x18\x05 \x01(\bR\ftsamxHealthy\x12!\n" +
-	"\foutbox_depth\x18\x06 \x01(\rR\voutboxDepth\"\x8f\x04\n" +
+	"\foutbox_depth\x18\x06 \x01(\rR\voutboxDepth\x129\n" +
+	"\ametrics\x18\a \x01(\v2\x1f.amx.v1.Heartbeat.SystemMetricsR\ametrics\x1a\\\n" +
+	"\rSystemMetrics\x12\x17\n" +
+	"\acpu_pct\x18\x01 \x01(\x01R\x06cpuPct\x12\x17\n" +
+	"\amem_pct\x18\x02 \x01(\x01R\x06memPct\x12\x19\n" +
+	"\bdisk_pct\x18\x03 \x01(\x01R\adiskPct\"\x8f\x04\n" +
 	"\vUsageReport\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12\x19\n" +
 	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12=\n" +
@@ -3060,7 +3140,7 @@ func file_amx_proto_rawDescGZIP() []byte {
 }
 
 var file_amx_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
-var file_amx_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_amx_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_amx_proto_goTypes = []any{
 	(CredentialType)(0),             // 0: amx.v1.CredentialType
 	(AllocationStatus)(0),           // 1: amx.v1.AllocationStatus
@@ -3096,18 +3176,19 @@ var file_amx_proto_goTypes = []any{
 	(*CommandAck)(nil),              // 31: amx.v1.CommandAck
 	(*AccountEvent)(nil),            // 32: amx.v1.AccountEvent
 	(*SessionSetup_WrappedKey)(nil), // 33: amx.v1.SessionSetup.WrappedKey
-	(*timestamppb.Timestamp)(nil),   // 34: google.protobuf.Timestamp
+	(*Heartbeat_SystemMetrics)(nil), // 34: amx.v1.Heartbeat.SystemMetrics
+	(*timestamppb.Timestamp)(nil),   // 35: google.protobuf.Timestamp
 }
 var file_amx_proto_depIdxs = []int32{
 	3,  // 0: amx.v1.EncryptedCredential.algorithm:type_name -> amx.v1.EncryptionAlgorithm
-	34, // 1: amx.v1.UsageWindow.resets_at:type_name -> google.protobuf.Timestamp
+	35, // 1: amx.v1.UsageWindow.resets_at:type_name -> google.protobuf.Timestamp
 	10, // 2: amx.v1.AccountUsage.account:type_name -> amx.v1.AccountRef
 	1,  // 3: amx.v1.AccountUsage.allocation_status:type_name -> amx.v1.AllocationStatus
 	12, // 4: amx.v1.AccountUsage.five_hour:type_name -> amx.v1.UsageWindow
 	12, // 5: amx.v1.AccountUsage.seven_day:type_name -> amx.v1.UsageWindow
-	34, // 6: amx.v1.AccountUsage.usage_fetched_at:type_name -> google.protobuf.Timestamp
-	34, // 7: amx.v1.Ack.received_at:type_name -> google.protobuf.Timestamp
-	34, // 8: amx.v1.AmsCommand.issued_at:type_name -> google.protobuf.Timestamp
+	35, // 6: amx.v1.AccountUsage.usage_fetched_at:type_name -> google.protobuf.Timestamp
+	35, // 7: amx.v1.Ack.received_at:type_name -> google.protobuf.Timestamp
+	35, // 8: amx.v1.AmsCommand.issued_at:type_name -> google.protobuf.Timestamp
 	18, // 9: amx.v1.AmsCommand.deliver:type_name -> amx.v1.DeliverAccount
 	19, // 10: amx.v1.AmsCommand.recall:type_name -> amx.v1.RecallAccount
 	20, // 11: amx.v1.AmsCommand.set_active:type_name -> amx.v1.SetAccountActive
@@ -3121,7 +3202,7 @@ var file_amx_proto_depIdxs = []int32{
 	0,  // 19: amx.v1.DeliverAccount.credential_type:type_name -> amx.v1.CredentialType
 	11, // 20: amx.v1.DeliverAccount.encrypted_credential:type_name -> amx.v1.EncryptedCredential
 	1,  // 21: amx.v1.DeliverAccount.desired_status:type_name -> amx.v1.AllocationStatus
-	34, // 22: amx.v1.DeliverAccount.credential_expires_at:type_name -> google.protobuf.Timestamp
+	35, // 22: amx.v1.DeliverAccount.credential_expires_at:type_name -> google.protobuf.Timestamp
 	10, // 23: amx.v1.RecallAccount.account:type_name -> amx.v1.AccountRef
 	10, // 24: amx.v1.SetAccountActive.account:type_name -> amx.v1.AccountRef
 	2,  // 25: amx.v1.SetSwitchMode.mode:type_name -> amx.v1.SwitchMode
@@ -3137,40 +3218,41 @@ var file_amx_proto_depIdxs = []int32{
 	26, // 35: amx.v1.AmaMessage.cred_update:type_name -> amx.v1.CredentialUpdate
 	10, // 36: amx.v1.CredentialUpdate.account:type_name -> amx.v1.AccountRef
 	11, // 37: amx.v1.CredentialUpdate.encrypted_credential:type_name -> amx.v1.EncryptedCredential
-	34, // 38: amx.v1.CredentialUpdate.observed_at:type_name -> google.protobuf.Timestamp
+	35, // 38: amx.v1.CredentialUpdate.observed_at:type_name -> google.protobuf.Timestamp
 	2,  // 39: amx.v1.Register.switch_mode:type_name -> amx.v1.SwitchMode
 	13, // 40: amx.v1.Register.accounts:type_name -> amx.v1.AccountUsage
-	34, // 41: amx.v1.Heartbeat.sent_at:type_name -> google.protobuf.Timestamp
+	35, // 41: amx.v1.Heartbeat.sent_at:type_name -> google.protobuf.Timestamp
 	10, // 42: amx.v1.Heartbeat.active_account:type_name -> amx.v1.AccountRef
 	2,  // 43: amx.v1.Heartbeat.switch_mode:type_name -> amx.v1.SwitchMode
-	34, // 44: amx.v1.UsageReport.generated_at:type_name -> google.protobuf.Timestamp
-	6,  // 45: amx.v1.UsageReport.trigger:type_name -> amx.v1.UsageReport.Trigger
-	10, // 46: amx.v1.UsageReport.active_account:type_name -> amx.v1.AccountRef
-	14, // 47: amx.v1.UsageReport.pool_summary:type_name -> amx.v1.PoolSummary
-	13, // 48: amx.v1.UsageReport.accounts:type_name -> amx.v1.AccountUsage
-	29, // 49: amx.v1.ReportEnvelope.report:type_name -> amx.v1.UsageReport
-	34, // 50: amx.v1.CommandAck.observed_at:type_name -> google.protobuf.Timestamp
-	7,  // 51: amx.v1.CommandAck.convergence:type_name -> amx.v1.CommandAck.Convergence
-	13, // 52: amx.v1.CommandAck.account_state:type_name -> amx.v1.AccountUsage
-	2,  // 53: amx.v1.CommandAck.switch_mode:type_name -> amx.v1.SwitchMode
-	14, // 54: amx.v1.CommandAck.pool_summary:type_name -> amx.v1.PoolSummary
-	34, // 55: amx.v1.AccountEvent.occurred_at:type_name -> google.protobuf.Timestamp
-	8,  // 56: amx.v1.AccountEvent.kind:type_name -> amx.v1.AccountEvent.Kind
-	9,  // 57: amx.v1.AccountEvent.trigger:type_name -> amx.v1.AccountEvent.Trigger
-	10, // 58: amx.v1.AccountEvent.from:type_name -> amx.v1.AccountRef
-	10, // 59: amx.v1.AccountEvent.to:type_name -> amx.v1.AccountRef
-	14, // 60: amx.v1.AccountEvent.pool_summary:type_name -> amx.v1.PoolSummary
-	3,  // 61: amx.v1.SessionSetup.WrappedKey.algorithm:type_name -> amx.v1.EncryptionAlgorithm
-	34, // 62: amx.v1.SessionSetup.WrappedKey.not_after:type_name -> google.protobuf.Timestamp
-	25, // 63: amx.v1.AmxControlPlane.Session:input_type -> amx.v1.AmaMessage
-	30, // 64: amx.v1.AmxControlPlane.ReportUsage:input_type -> amx.v1.ReportEnvelope
-	16, // 65: amx.v1.AmxControlPlane.Session:output_type -> amx.v1.AmsCommand
-	15, // 66: amx.v1.AmxControlPlane.ReportUsage:output_type -> amx.v1.Ack
-	65, // [65:67] is the sub-list for method output_type
-	63, // [63:65] is the sub-list for method input_type
-	63, // [63:63] is the sub-list for extension type_name
-	63, // [63:63] is the sub-list for extension extendee
-	0,  // [0:63] is the sub-list for field type_name
+	34, // 44: amx.v1.Heartbeat.metrics:type_name -> amx.v1.Heartbeat.SystemMetrics
+	35, // 45: amx.v1.UsageReport.generated_at:type_name -> google.protobuf.Timestamp
+	6,  // 46: amx.v1.UsageReport.trigger:type_name -> amx.v1.UsageReport.Trigger
+	10, // 47: amx.v1.UsageReport.active_account:type_name -> amx.v1.AccountRef
+	14, // 48: amx.v1.UsageReport.pool_summary:type_name -> amx.v1.PoolSummary
+	13, // 49: amx.v1.UsageReport.accounts:type_name -> amx.v1.AccountUsage
+	29, // 50: amx.v1.ReportEnvelope.report:type_name -> amx.v1.UsageReport
+	35, // 51: amx.v1.CommandAck.observed_at:type_name -> google.protobuf.Timestamp
+	7,  // 52: amx.v1.CommandAck.convergence:type_name -> amx.v1.CommandAck.Convergence
+	13, // 53: amx.v1.CommandAck.account_state:type_name -> amx.v1.AccountUsage
+	2,  // 54: amx.v1.CommandAck.switch_mode:type_name -> amx.v1.SwitchMode
+	14, // 55: amx.v1.CommandAck.pool_summary:type_name -> amx.v1.PoolSummary
+	35, // 56: amx.v1.AccountEvent.occurred_at:type_name -> google.protobuf.Timestamp
+	8,  // 57: amx.v1.AccountEvent.kind:type_name -> amx.v1.AccountEvent.Kind
+	9,  // 58: amx.v1.AccountEvent.trigger:type_name -> amx.v1.AccountEvent.Trigger
+	10, // 59: amx.v1.AccountEvent.from:type_name -> amx.v1.AccountRef
+	10, // 60: amx.v1.AccountEvent.to:type_name -> amx.v1.AccountRef
+	14, // 61: amx.v1.AccountEvent.pool_summary:type_name -> amx.v1.PoolSummary
+	3,  // 62: amx.v1.SessionSetup.WrappedKey.algorithm:type_name -> amx.v1.EncryptionAlgorithm
+	35, // 63: amx.v1.SessionSetup.WrappedKey.not_after:type_name -> google.protobuf.Timestamp
+	25, // 64: amx.v1.AmxControlPlane.Session:input_type -> amx.v1.AmaMessage
+	30, // 65: amx.v1.AmxControlPlane.ReportUsage:input_type -> amx.v1.ReportEnvelope
+	16, // 66: amx.v1.AmxControlPlane.Session:output_type -> amx.v1.AmsCommand
+	15, // 67: amx.v1.AmxControlPlane.ReportUsage:output_type -> amx.v1.Ack
+	66, // [66:68] is the sub-list for method output_type
+	64, // [64:66] is the sub-list for method input_type
+	64, // [64:64] is the sub-list for extension type_name
+	64, // [64:64] is the sub-list for extension extendee
+	0,  // [0:64] is the sub-list for field type_name
 }
 
 func init() { file_amx_proto_init() }
@@ -3210,7 +3292,7 @@ func file_amx_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_amx_proto_rawDesc), len(file_amx_proto_rawDesc)),
 			NumEnums:      10,
-			NumMessages:   24,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -235,6 +235,8 @@ servers (
   switch_mode TEXT,                    -- auto | manual  (서버 단위 — tsamx auto가 풀 단위이므로)
   status TEXT,                         -- online | offline | degraded
   last_seen_at TIMESTAMPTZ,
+  cpu_pct, mem_pct, disk_pct DOUBLE PRECISION,  -- 최근 하트비트 호스트 사용률(§5.4 호스트 메트릭), 0..100, NULL=미보고
+  metrics_reported_at TIMESTAMPTZ,     -- 위 3값의 신선도 스탬프
   UNIQUE (id, tenant_id)               -- ★ 격리 앵커
 )
 
@@ -454,6 +456,19 @@ CONVERGED로 acked되면 auto-resolve. **서버-scoped 명령**(set_mode/set_pol
   이므로 `server_offline`과 스코프가 달라 이중 개방이 아니다.
 - **갭4 flapping 창**: 타임아웃(90s)×cap(5) 누적으로 최악 ~12분 동안 경보 미개방/지연 창이 존재할 수
   있으나, 멱등 재큐잉이 그 사이 대부분을 흡수하므로 수용한다.
+
+**호스트 메트릭 (하트비트 편승)**: 하트비트(`Heartbeat`, 30초 주기)에 선택적 `SystemMetrics`를 실어
+`cpu_pct`/`mem_pct`/`disk_pct`(각 0..100)를 상향한다. AMA가 `/proc/stat`(두 샘플 델타)·`/proc/meminfo`·
+`statfs`로 외부 의존성 없이 수집하며, AMS는 값이 실제로 실린 하트비트에서만 `servers`의 3컬럼과
+`metrics_reported_at`를 갱신한다. 서브메시지 presence(`HasField`)로 판별하므로, 필드를 보내지 않는 구
+에이전트·비Linux 호스트·수집 실패는 컬럼을 건드리지 않는다 — NULL은 "미보고"이지 "0%"가 아니다.
+- **신선도**: 값의 최신성은 `metrics_reported_at`로 판정한다. 서버 `status != online`이면 콘솔은 그 값을
+  stale로 취급한다(마지막 갱신 이후 하트비트가 끊긴 것이므로).
+- **폴백 전용 서버**: unary `ReportUsage`로만 생존하는 서버는 하트비트 스트림이 없어 메트릭이 갱신되지
+  않는다(의도). 그런 서버의 3컬럼은 마지막 스트림 세션 값에 머물거나 계속 NULL이다.
+- **측정 전제**: WSL·컨테이너에서는 CPU·MEM이 게스트 VM 기준, DISK는 마운트에 따라 호스트/게스트가
+  섞여 실호스트 자원과 어긋난다. 값은 tsamx가 실제로 도는 서버에 에이전트를 **직접 설치**했을 때만
+  의미가 있다. 데이터 볼륨이 루트와 다르면 `AMX_METRICS_DISK_PATH`로 statfs 대상을 지정한다(기본 `/`).
 
 ### 5.5 어카운트 등록 — AMS 중앙 OAuth 플로우
 

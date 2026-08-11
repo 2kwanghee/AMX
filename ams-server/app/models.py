@@ -280,6 +280,17 @@ class Server(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Latest host utilization from the heartbeat's SystemMetrics (proto §8), each
+    # 0..100. NULL until a metrics-bearing heartbeat arrives; a heartbeat without
+    # the field (old agent / non-Linux / failed sample) leaves these untouched, so
+    # NULL means "never reported", never "reported 0%". metrics_reported_at is the
+    # freshness stamp for the trio.
+    cpu_pct: Mapped[float | None] = mapped_column(nullable=True)
+    mem_pct: Mapped[float | None] = mapped_column(nullable=True)
+    disk_pct: Mapped[float | None] = mapped_column(nullable=True)
+    metrics_reported_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

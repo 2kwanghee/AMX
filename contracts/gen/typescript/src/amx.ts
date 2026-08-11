@@ -699,6 +699,25 @@ export interface Heartbeat {
   tsamxHealthy: boolean;
   /** queued events pending flush (§6.3 offline outbox) */
   outboxDepth: number;
+  /**
+   * Best-effort host resource sample (§8 liveness), read locally from /proc and
+   * statfs. Heartbeat is an unsigned upstream message, so a new field is free to
+   * add (the oneof numbering rule applies only to signed messages). The field is
+   * a submessage so it carries presence: an old agent, a non-Linux host, or a
+   * failed sample simply omits it, and AMS keeps the previous columns rather than
+   * recording 0% (checked via HasField, never overwritten from an absent sample).
+   */
+  metrics: Heartbeat_SystemMetrics | undefined;
+}
+
+/** Host utilization percentages, each 0.0–100.0. */
+export interface Heartbeat_SystemMetrics {
+  /** busy fraction over the interval between two /proc/stat samples */
+  cpuPct: number;
+  /** (MemTotal - MemAvailable) / MemTotal from /proc/meminfo */
+  memPct: number;
+  /** used / (used + available) for the "/" filesystem (statfs) */
+  diskPct: number;
 }
 
 /**
@@ -3632,6 +3651,7 @@ function createBaseHeartbeat(): Heartbeat {
     switchMode: 0,
     tsamxHealthy: false,
     outboxDepth: 0,
+    metrics: undefined,
   };
 }
 
@@ -3654,6 +3674,9 @@ export const Heartbeat: MessageFns<Heartbeat> = {
     }
     if (message.outboxDepth !== 0) {
       writer.uint32(48).uint32(message.outboxDepth);
+    }
+    if (message.metrics !== undefined) {
+      Heartbeat_SystemMetrics.encode(message.metrics, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -3713,6 +3736,14 @@ export const Heartbeat: MessageFns<Heartbeat> = {
           message.outboxDepth = reader.uint32();
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.metrics = Heartbeat_SystemMetrics.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3754,6 +3785,7 @@ export const Heartbeat: MessageFns<Heartbeat> = {
         : isSet(object.outbox_depth)
         ? globalThis.Number(object.outbox_depth)
         : 0,
+      metrics: isSet(object.metrics) ? Heartbeat_SystemMetrics.fromJSON(object.metrics) : undefined,
     };
   },
 
@@ -3777,6 +3809,9 @@ export const Heartbeat: MessageFns<Heartbeat> = {
     if (message.outboxDepth !== 0) {
       obj.outboxDepth = Math.round(message.outboxDepth);
     }
+    if (message.metrics !== undefined) {
+      obj.metrics = Heartbeat_SystemMetrics.toJSON(message.metrics);
+    }
     return obj;
   },
 
@@ -3793,6 +3828,113 @@ export const Heartbeat: MessageFns<Heartbeat> = {
     message.switchMode = object.switchMode ?? 0;
     message.tsamxHealthy = object.tsamxHealthy ?? false;
     message.outboxDepth = object.outboxDepth ?? 0;
+    message.metrics = (object.metrics !== undefined && object.metrics !== null)
+      ? Heartbeat_SystemMetrics.fromPartial(object.metrics)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseHeartbeat_SystemMetrics(): Heartbeat_SystemMetrics {
+  return { cpuPct: 0, memPct: 0, diskPct: 0 };
+}
+
+export const Heartbeat_SystemMetrics: MessageFns<Heartbeat_SystemMetrics> = {
+  encode(message: Heartbeat_SystemMetrics, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.cpuPct !== 0) {
+      writer.uint32(9).double(message.cpuPct);
+    }
+    if (message.memPct !== 0) {
+      writer.uint32(17).double(message.memPct);
+    }
+    if (message.diskPct !== 0) {
+      writer.uint32(25).double(message.diskPct);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Heartbeat_SystemMetrics {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseHeartbeat_SystemMetrics();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.cpuPct = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.memPct = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.diskPct = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Heartbeat_SystemMetrics {
+    return {
+      cpuPct: isSet(object.cpuPct)
+        ? globalThis.Number(object.cpuPct)
+        : isSet(object.cpu_pct)
+        ? globalThis.Number(object.cpu_pct)
+        : 0,
+      memPct: isSet(object.memPct)
+        ? globalThis.Number(object.memPct)
+        : isSet(object.mem_pct)
+        ? globalThis.Number(object.mem_pct)
+        : 0,
+      diskPct: isSet(object.diskPct)
+        ? globalThis.Number(object.diskPct)
+        : isSet(object.disk_pct)
+        ? globalThis.Number(object.disk_pct)
+        : 0,
+    };
+  },
+
+  toJSON(message: Heartbeat_SystemMetrics): unknown {
+    const obj: any = {};
+    if (message.cpuPct !== 0) {
+      obj.cpuPct = message.cpuPct;
+    }
+    if (message.memPct !== 0) {
+      obj.memPct = message.memPct;
+    }
+    if (message.diskPct !== 0) {
+      obj.diskPct = message.diskPct;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<Heartbeat_SystemMetrics>): Heartbeat_SystemMetrics {
+    return Heartbeat_SystemMetrics.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<Heartbeat_SystemMetrics>): Heartbeat_SystemMetrics {
+    const message = createBaseHeartbeat_SystemMetrics();
+    message.cpuPct = object.cpuPct ?? 0;
+    message.memPct = object.memPct ?? 0;
+    message.diskPct = object.diskPct ?? 0;
     return message;
   },
 };
