@@ -3,7 +3,7 @@
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import type { AlertPage } from '@/lib/api-client/types';
-import { Badge, fmtTime, useAction } from './common';
+import { Badge, LiveDot, TimeCell, useAction, useMarkOnData } from './common';
 
 const POLL = 7000;
 
@@ -25,11 +25,12 @@ export function AlertsPanel({ tenantId }: { tenantId: string }) {
     { refreshInterval: POLL },
   );
   const act = useAction();
+  useMarkOnData(data);
   const items = data?.items ?? [];
 
   return (
     <div className="panel">
-      <h2>알림</h2>
+      <h2>알림<LiveDot /></h2>
       {error && (
         <p className="err">
           알림을 불러오지 못했습니다: {error instanceof Error ? error.message : '요청 실패'}.
@@ -56,7 +57,7 @@ export function AlertsPanel({ tenantId }: { tenantId: string }) {
                   <td><Badge value={a.severity} /></td>
                   <td>{a.kind}</td>
                   <td><Badge value={a.status} /></td>
-                  <td className="muted">{fmtTime(a.createdAt)}</td>
+                  <td><TimeCell iso={a.createdAt} /></td>
                   <td>
                     <button
                       disabled={a.status !== 'open' || act.busy}

@@ -4,7 +4,7 @@ import { useState } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import type { AccountPage, OauthStartResponse } from '@/lib/api-client/types';
-import { Badge, CopyButton, Modal, fmtTime, krLabel, useAction } from './common';
+import { Badge, CopyButton, EmailChip, LiveDot, Modal, TimeCell, fmtTime, krLabel, useAction, useMarkOnData } from './common';
 
 const POLL = 8000;
 
@@ -17,12 +17,13 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
   const [wizard, setWizard] = useState(false);
   const [direct, setDirect] = useState(false);
   const act = useAction();
+  useMarkOnData(data);
   const accounts = data?.items ?? [];
 
   return (
     <div className="panel">
       <div className="panel-head">
-        <h2>계정</h2>
+        <h2>계정<LiveDot /></h2>
         <div className="actions">
           <button className="primary" onClick={() => setWizard(true)}>OAuth 계정 등록</button>
           <button onClick={() => setDirect(true)}>API 키 가져오기</button>
@@ -35,11 +36,11 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
           <tbody>
             {accounts.map((a) => (
               <tr key={a.id}>
-                <td>{a.email}<div className="muted">{a.organizationName}</div></td>
+                <td><EmailChip email={a.email} sub={a.organizationName} /></td>
                 <td>{krLabel(a.credentialType)}</td>
                 <td><Badge value={a.status} /></td>
                 <td><code>{a.secretMasked}</code></td>
-                <td className="muted">{fmtTime(a.credentialExpiresAt)}</td>
+                <td><TimeCell iso={a.credentialExpiresAt} /></td>
                 <td>
                   <button
                     className="danger"

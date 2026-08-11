@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { MeshBackdrop } from '@/components/common';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -39,10 +40,16 @@ export default function LoginPage() {
         alignItems: 'center',
         justifyContent: 'center',
         padding: 16,
-        background: 'linear-gradient(180deg, var(--accent-soft) 0%, var(--bg) 260px)',
+        position: 'relative',
+        // 반투명 글로우 — 전역 배경 레이어(도트 그리드·글로우)와 메시가 비쳐
+        // 보이도록 불투명 채움 대신 rgba 라디얼을 겹친다.
+        background:
+          'radial-gradient(1100px 620px at 50% -12%, rgba(15,118,110,0.12), transparent 68%),' +
+          ' radial-gradient(900px 520px at 88% 108%, rgba(79,70,229,0.08), transparent 66%)',
       }}
     >
-      <div className="panel" style={{ width: 380, maxWidth: '100%', marginBottom: 0 }}>
+      <MeshBackdrop variant="login" />
+      <div className="panel" style={{ width: 380, maxWidth: '100%', marginBottom: 0, position: 'relative' }}>
         <div className="brand" style={{ padding: 0, marginBottom: 4 }}>
           <span className="brand-dot" />
           AMX 관제 콘솔
