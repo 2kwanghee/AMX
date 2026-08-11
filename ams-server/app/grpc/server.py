@@ -625,7 +625,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
     ) -> None:
         kind = msg.WhichOneof("msg")
         if kind == "hb":
-            self._touch_last_seen(server_id)
+            self._touch_last_seen(server_id, msg.hb)
         elif kind == "ack":
             ack = msg.ack
             reconcile_convergence = _CONVERGENCE.get(ack.convergence, reconcile.PENDING)
@@ -647,13 +647,25 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 msg.cred_update, server_id, tenant_id, agent_id, kek, key_id
             )
 
-    def _touch_last_seen(self, server_id: uuid.UUID) -> None:
+    def _touch_last_seen(self, server_id: uuid.UUID, hb: pb.Heartbeat | None = None) -> None:
         with self._sm() as db:
             server = db.get(Server, server_id)
             if server is not None:
-                server.last_seen_at = _now()
+                now = _now()
+                server.last_seen_at = now
                 server.status = "online"
-                server.updated_at = _now()
+                server.updated_at = now
+                # Host metrics are optional on the beat (proto §8). Overwrite the
+                # columns only when the sample is actually present — an old agent,
+                # a non-Linux host, or a failed sample omits the submessage, and
+                # HasField is False, so the previous values (or NULL) are kept
+                # rather than clobbered with 0%.
+                if hb is not None and hb.HasField("metrics"):
+                    m = hb.metrics
+                    server.cpu_pct = m.cpu_pct
+                    server.mem_pct = m.mem_pct
+                    server.disk_pct = m.disk_pct
+                    server.metrics_reported_at = now
                 # A live heartbeat clears any standing offline alert (auto-resolve
                 # on reconnect / recovery from a sweeper false-positive).
                 alerts.resolve(db, server_id=server_id, kind="server_offline")

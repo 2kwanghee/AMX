@@ -149,6 +149,11 @@ class Server(Wire):
     tsamx_version: str | None = None
     enrolled: bool = False
     last_seen_at: datetime | None = None
+    # Latest host utilization from the heartbeat (proto §8); NULL until reported.
+    cpu_pct: float | None = None
+    mem_pct: float | None = None
+    disk_pct: float | None = None
+    metrics_reported_at: datetime | None = None
     assigned_account_count: int | None = None
     created_at: datetime
 

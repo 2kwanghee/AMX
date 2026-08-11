@@ -17,6 +17,7 @@ import (
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/command"
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/metrics"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/resync"
 	"github.com/2kwanghee/AMX/ama-agent/internal/scheduler"
@@ -263,6 +264,12 @@ func run() error {
 			log.Printf("AMX_HEARTBEAT_INTERVAL %q: invalid (using default)", v)
 		}
 	}
+	// Host-metrics sampler for the heartbeat (§8): stateful for the CPU delta,
+	// so one instance is shared across beats. Collection is best-effort — a
+	// sample failure (or a non-Linux host) leaves Metrics nil and the beat still
+	// carries liveness; AMS then keeps its previous columns rather than seeing 0%.
+	// AMX_METRICS_DISK_PATH points DISK% at a specific volume (default "/").
+	sampler := metrics.NewSampler(os.Getenv("AMX_METRICS_DISK_PATH"))
 	go func() {
 		t := time.NewTicker(hbInterval)
 		defer t.Stop()
@@ -271,11 +278,19 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Hb{Hb: &amxv1.Heartbeat{
+				hb := &amxv1.Heartbeat{
 					AgentId:     agentID,
 					SwitchMode:  handler.SwitchMode(),
 					OutboxDepth: uint32(outbox.Depth()),
-				}}})
+				}
+				if s, serr := sampler.Sample(); serr == nil {
+					hb.Metrics = &amxv1.Heartbeat_SystemMetrics{
+						CpuPct:  s.CPUPct,
+						MemPct:  s.MemPct,
+						DiskPct: s.DiskPct,
+					}
+				}
+				client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Hb{Hb: hb}})
 			}
 		}
 	}()

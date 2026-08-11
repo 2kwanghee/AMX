@@ -324,20 +324,31 @@ class Register(_message.Message):
     def __init__(self, agent_id: _Optional[str] = ..., server_id: _Optional[str] = ..., enroll_token: _Optional[str] = ..., server_credential: _Optional[str] = ..., hostname: _Optional[str] = ..., agent_version: _Optional[str] = ..., tsamx_version: _Optional[str] = ..., switch_mode: _Optional[_Union[SwitchMode, str]] = ..., accounts: _Optional[_Iterable[_Union[AccountUsage, _Mapping]]] = ..., applied_command_ids: _Optional[_Iterable[str]] = ..., agent_public_key: _Optional[bytes] = ...) -> None: ...
 
 class Heartbeat(_message.Message):
-    __slots__ = ("agent_id", "sent_at", "active_account", "switch_mode", "tsamx_healthy", "outbox_depth")
+    __slots__ = ("agent_id", "sent_at", "active_account", "switch_mode", "tsamx_healthy", "outbox_depth", "metrics")
+    class SystemMetrics(_message.Message):
+        __slots__ = ("cpu_pct", "mem_pct", "disk_pct")
+        CPU_PCT_FIELD_NUMBER: _ClassVar[int]
+        MEM_PCT_FIELD_NUMBER: _ClassVar[int]
+        DISK_PCT_FIELD_NUMBER: _ClassVar[int]
+        cpu_pct: float
+        mem_pct: float
+        disk_pct: float
+        def __init__(self, cpu_pct: _Optional[float] = ..., mem_pct: _Optional[float] = ..., disk_pct: _Optional[float] = ...) -> None: ...
     AGENT_ID_FIELD_NUMBER: _ClassVar[int]
     SENT_AT_FIELD_NUMBER: _ClassVar[int]
     ACTIVE_ACCOUNT_FIELD_NUMBER: _ClassVar[int]
     SWITCH_MODE_FIELD_NUMBER: _ClassVar[int]
     TSAMX_HEALTHY_FIELD_NUMBER: _ClassVar[int]
     OUTBOX_DEPTH_FIELD_NUMBER: _ClassVar[int]
+    METRICS_FIELD_NUMBER: _ClassVar[int]
     agent_id: str
     sent_at: _timestamp_pb2.Timestamp
     active_account: AccountRef
     switch_mode: SwitchMode
     tsamx_healthy: bool
     outbox_depth: int
-    def __init__(self, agent_id: _Optional[str] = ..., sent_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., active_account: _Optional[_Union[AccountRef, _Mapping]] = ..., switch_mode: _Optional[_Union[SwitchMode, str]] = ..., tsamx_healthy: _Optional[bool] = ..., outbox_depth: _Optional[int] = ...) -> None: ...
+    metrics: Heartbeat.SystemMetrics
+    def __init__(self, agent_id: _Optional[str] = ..., sent_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., active_account: _Optional[_Union[AccountRef, _Mapping]] = ..., switch_mode: _Optional[_Union[SwitchMode, str]] = ..., tsamx_healthy: _Optional[bool] = ..., outbox_depth: _Optional[int] = ..., metrics: _Optional[_Union[Heartbeat.SystemMetrics, _Mapping]] = ...) -> None: ...
 
 class UsageReport(_message.Message):
     __slots__ = ("schema_version", "agent_id", "generated_at", "trigger", "active_account", "pool_summary", "accounts", "in_response_to_command_id")

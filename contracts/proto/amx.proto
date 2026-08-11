@@ -447,6 +447,21 @@ message Heartbeat {
   SwitchMode switch_mode = 4;
   bool tsamx_healthy = 5;
   uint32 outbox_depth = 6;  // queued events pending flush (§6.3 offline outbox)
+
+  // Best-effort host resource sample (§8 liveness), read locally from /proc and
+  // statfs. Heartbeat is an unsigned upstream message, so a new field is free to
+  // add (the oneof numbering rule applies only to signed messages). The field is
+  // a submessage so it carries presence: an old agent, a non-Linux host, or a
+  // failed sample simply omits it, and AMS keeps the previous columns rather than
+  // recording 0% (checked via HasField, never overwritten from an absent sample).
+  SystemMetrics metrics = 7;
+
+  // Host utilization percentages, each 0.0–100.0.
+  message SystemMetrics {
+    double cpu_pct = 1;   // busy fraction over the interval between two /proc/stat samples
+    double mem_pct = 2;   // (MemTotal - MemAvailable) / MemTotal from /proc/meminfo
+    double disk_pct = 3;  // used / (used + available) for the "/" filesystem (statfs)
+  }
 }
 
 // §6.5 usage report — schedule (5 min), ams_query (RequestReport), or switch.
