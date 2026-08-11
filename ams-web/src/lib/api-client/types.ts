@@ -96,6 +96,12 @@ export interface Server {
   enrolled?: boolean;
   lastSeenAt?: string;
   assignedAccountCount?: number;
+  // Host telemetry (metrics track, parallel dev). Absent until the agent
+  // reports; the topology canvas renders a "미보고" fallback when undefined.
+  cpuPct?: number;
+  memPct?: number;
+  diskPct?: number;
+  metricsReportedAt?: string;
   createdAt?: string;
 }
 export interface ServerCreate {

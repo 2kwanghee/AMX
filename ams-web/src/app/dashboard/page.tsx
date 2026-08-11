@@ -16,6 +16,7 @@ import { AccountsPanel } from '@/components/AccountsPanel';
 import { AlertsBadge, AlertsPanel } from '@/components/AlertsPanel';
 import { AssignmentsPanel, currentActiveByServer } from '@/components/AssignmentsPanel';
 import { ServersPanel } from '@/components/ServersPanel';
+import { TopologyView } from '@/components/topology/TopologyView';
 import {
   ConsoleHeader,
   Icon,
@@ -30,10 +31,11 @@ import {
   type IconName,
 } from '@/components/common';
 
-type Tab = 'home' | 'servers' | 'accounts' | 'assignments' | 'alerts';
+type Tab = 'home' | 'console' | 'servers' | 'accounts' | 'assignments' | 'alerts';
 
 const MENU: { id: Tab; label: string; icon: IconName }[] = [
   { id: 'home', label: '대시보드', icon: 'grid' },
+  { id: 'console', label: '마스터 콘솔', icon: 'zap' },
   { id: 'servers', label: '서버', icon: 'server' },
   { id: 'accounts', label: '계정', icon: 'user' },
   { id: 'assignments', label: '할당', icon: 'link' },
@@ -42,6 +44,7 @@ const MENU: { id: Tab; label: string; icon: IconName }[] = [
 
 const TITLES: Record<Tab, string> = {
   home: '대시보드',
+  console: '마스터 콘솔',
   servers: '서버',
   accounts: '계정',
   assignments: '할당',
@@ -130,6 +133,7 @@ export default function Dashboard() {
             <ActivityFeed tenantId={active} />
           </>
         )}
+        {active && tab === 'console' && <TopologyView tenantId={active} onGo={setTab} />}
         {active && tab === 'servers' && <ServersPanel tenantId={active} />}
         {active && tab === 'accounts' && <AccountsPanel tenantId={active} />}
         {active && tab === 'assignments' && <AssignmentsPanel tenantId={active} />}

@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMX 제품 소개</title>
+<style>
+/* ================================================================
+   AMX 소개 모션 프레젠테이션 — 단일 다크 테마(관제실 컨셉).
+   조작: Space 재생/일시정지 · ←/→ 장면 이동 · 0~9 장면 점프
+         F 전체화면 · N 발표 메모
+   ================================================================ */
+:root {
+  --bg: #0A1120;
+  --bg-2: #101B30;
+  --bg-3: #16233C;
+  --line: #223350;
+  --ink: #E6EEF9;
+  --dim: #8FA3BF;
+  --faint: #5B6E8C;
+  --teal: #2DD4BF;
+  --teal-soft: rgba(45, 212, 191, 0.13);
+  --amber: #F5B04B;
+  --rose: #F0647E;
+  --indigo: #7C93F5;
+  --mono: ui-monospace, "Cascadia Mono", "D2Coding", Consolas, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+  overflow: hidden;
+  height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ── 배경 앰비언트: 도트 그리드 + 느린 글로우 ─────────────────── */
+.ambient {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image: radial-gradient(rgba(143,163,191,0.13) 1px, transparent 1.4px);
+  background-size: 26px 26px;
+}
+.ambient::before, .ambient::after {
+  content: ""; position: absolute; border-radius: 50%; filter: blur(90px);
+  animation: drift 26s ease-in-out infinite alternate;
+}
+.ambient::before {
+  width: 54vw; height: 54vw; left: -14vw; top: -22vw;
+  background: rgba(45, 212, 191, 0.10);
+}
+.ambient::after {
+  width: 46vw; height: 46vw; right: -12vw; bottom: -20vw;
+  background: rgba(124, 147, 245, 0.09);
+  animation-delay: -13s;
+}
+@keyframes drift {
+  from { transform: translate(0, 0); }
+  to   { transform: translate(5vw, 4vw); }
+}
+
+/* ── 스테이지 / 장면 공통 ─────────────────────────────────────── */
+.stage { position: fixed; inset: 0 0 56px 0; z-index: 1; }
+.scene {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 4vh 6vw 6vh;
+  opacity: 0; visibility: hidden;
+  transform: translateY(14px);
+  transition: opacity 0.7s ease, transform 0.7s ease, visibility 0.7s;
+}
+.scene.cur { opacity: 1; visibility: visible; transform: none; }
+
+/* 빌드 스텝: data-step 요소는 .on이 붙을 때 나타난다 */
+[data-step] {
+  opacity: 0; transform: translateY(16px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+[data-step].on { opacity: 1; transform: none; }
+
+.eyebrow {
+  font-family: var(--mono); font-size: clamp(11px, 1.1vw, 14px);
+  letter-spacing: 0.28em; color: var(--teal); text-transform: uppercase;
+  margin-bottom: 2.2vh;
+}
+h1 {
+  font-size: clamp(38px, 5.6vw, 84px); font-weight: 800;
+  letter-spacing: -0.02em; line-height: 1.16; text-align: center;
+  text-wrap: balance;
+}
+h2 {
+  font-size: clamp(26px, 3.4vw, 50px); font-weight: 800;
+  letter-spacing: -0.015em; line-height: 1.25; text-align: center;
+  text-wrap: balance; margin-bottom: 3.5vh;
+}
+.sub {
+  font-size: clamp(15px, 1.6vw, 22px); color: var(--dim);
+  text-align: center; line-height: 1.7; max-width: 34em;
+}
+.accent { color: var(--teal); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ── S1 타이틀 ────────────────────────────────────────────────── */
+.mark {
+  display: flex; align-items: center; gap: 1.6vw; margin-bottom: 3vh;
+}
+.mark-dot {
+  width: clamp(14px, 1.6vw, 22px); height: clamp(14px, 1.6vw, 22px);
+  border-radius: 50%; background: var(--teal);
+  box-shadow: 0 0 0 0 rgba(45,212,191,0.5);
+  animation: pulse 2.4s ease-out infinite;
+}
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(45,212,191,0.45); }
+  70%  { box-shadow: 0 0 0 clamp(14px,1.8vw,26px) rgba(45,212,191,0); }
+  100% { box-shadow: 0 0 0 0 rgba(45,212,191,0); }
+}
+.wordmark {
+  font-size: clamp(64px, 11vw, 168px); font-weight: 800;
+  letter-spacing: 0.04em; line-height: 1;
+  background: linear-gradient(135deg, #E6EEF9 30%, #2DD4BF 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* ── S2 문제 ──────────────────────────────────────────────────── */
+.chaos {
+  display: flex; gap: clamp(20px, 4vw, 64px); align-items: flex-start;
+  margin: 2vh 0 4vh;
+}
+.srv-col { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.srv-box {
+  width: clamp(90px, 10vw, 150px); padding: clamp(10px, 1.2vw, 18px);
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px;
+  text-align: center; font-size: clamp(12px, 1.2vw, 16px); font-weight: 600;
+}
+.srv-box .glyph { font-size: clamp(20px, 2.2vw, 32px); display: block; margin-bottom: 6px; }
+.acct-stack { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.acct {
+  padding: 5px 10px; border-radius: 8px; font-family: var(--mono);
+  font-size: clamp(10px, 1vw, 13px); background: var(--bg-3);
+  border: 1px solid var(--line); color: var(--dim); text-align: center;
+}
+.gauge { height: 6px; border-radius: 4px; background: var(--bg-3); overflow: hidden; margin-top: 3px; }
+.gauge i { display: block; height: 100%; width: 0; border-radius: 4px; background: var(--teal); }
+.on .gauge i { transition: width 2.6s ease 0.3s; }
+.on .gauge.full i { width: 96%; background: var(--rose); }
+.on .gauge.mid i { width: 62%; background: var(--amber); }
+.on .gauge.low i { width: 28%; }
+.pains { display: flex; flex-direction: column; gap: 1.6vh; max-width: 30em; }
+.pain {
+  display: flex; gap: 14px; align-items: baseline;
+  font-size: clamp(15px, 1.7vw, 23px); line-height: 1.55;
+}
+.pain b { color: var(--amber); font-family: var(--mono); font-weight: 600; flex: none; }
+
+/* ── S3 정의 ──────────────────────────────────────────────────── */
+.chips { display: flex; gap: 1.2vw; margin-top: 4.5vh; flex-wrap: wrap; justify-content: center; }
+.chip {
+  padding: clamp(8px,1vw,14px) clamp(16px,2vw,28px); border-radius: 999px;
+  border: 1px solid var(--teal); color: var(--teal); background: var(--teal-soft);
+  font-size: clamp(14px, 1.6vw, 22px); font-weight: 700;
+}
+
+/* ── S4 아키텍처 / S5 흐름 다이어그램 ─────────────────────────── */
+.board {
+  position: relative; width: min(1180px, 92vw);
+  display: grid; grid-template-columns: 1fr auto 1.15fr auto 1fr;
+  align-items: center; gap: 0; margin: 1vh 0 3vh;
+}
+.node {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px;
+  padding: clamp(12px, 1.4vw, 22px); text-align: center; position: relative;
+  transition: border-color 0.5s, box-shadow 0.5s;
+}
+.node .t { font-weight: 800; font-size: clamp(14px, 1.5vw, 21px); }
+.node .d { color: var(--dim); font-size: clamp(11px, 1.1vw, 14px); margin-top: 5px; line-height: 1.5; }
+.node .tag {
+  position: absolute; top: -10px; left: 14px; padding: 1px 9px;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 999px;
+  font-family: var(--mono); font-size: clamp(9px, 0.85vw, 11px); color: var(--faint);
+  letter-spacing: 0.08em;
+}
+.node.hot { border-color: var(--teal); box-shadow: 0 0 24px rgba(45,212,191,0.18); }
+.node.hot .t { color: var(--teal); }
+.stackcol { display: flex; flex-direction: column; gap: 2.6vh; }
+.pipe {
+  position: relative; height: 2px; width: clamp(36px, 4.5vw, 80px);
+  background: var(--line); margin: 0 4px; overflow: visible;
+}
+.pipe .lbl {
+  position: absolute; left: 50%; top: -22px; transform: translateX(-50%);
+  font-family: var(--mono); font-size: clamp(9px, 0.85vw, 11px);
+  color: var(--faint); white-space: nowrap; letter-spacing: 0.05em;
+}
+.pipe i {
+  position: absolute; top: -3px; left: 0; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--teal);
+  box-shadow: 0 0 8px var(--teal); opacity: 0;
+}
+.pipe.flow i { animation: flowdot 1.6s linear infinite; }
+.pipe.flow.back i { animation-name: flowback; }
+@keyframes flowdot {
+  0% { left: -4px; opacity: 0; } 12% { opacity: 1; }
+  88% { opacity: 1; } 100% { left: calc(100% - 4px); opacity: 0; }
+}
+@keyframes flowback {
+  0% { left: calc(100% - 4px); opacity: 0; } 12% { opacity: 1; }
+  88% { opacity: 1; } 100% { left: -4px; opacity: 0; }
+}
+.caption {
+  min-height: 3.2em; display: flex; align-items: center; gap: 14px;
+  font-size: clamp(15px, 1.7vw, 23px); line-height: 1.55; max-width: 40em; text-align: left;
+}
+.caption .step-no {
+  flex: none; width: 2em; height: 2em; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--teal-soft); color: var(--teal);
+  font-family: var(--mono); font-weight: 700; font-size: 0.8em;
+}
+
+/* ── S6 보안 카드 ─────────────────────────────────────────────── */
+.cards {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(14px, 1.8vw, 26px); width: min(1050px, 90vw); margin-top: 1vh;
+}
+.card {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 16px;
+  padding: clamp(18px, 2.2vw, 32px); text-align: left;
+}
+.card .k {
+  font-family: var(--mono); font-size: clamp(10px, 1vw, 13px);
+  letter-spacing: 0.18em; color: var(--teal); margin-bottom: 10px;
+}
+.card .t { font-size: clamp(17px, 1.9vw, 26px); font-weight: 800; margin-bottom: 8px; }
+.card .d { color: var(--dim); font-size: clamp(13px, 1.35vw, 17px); line-height: 1.65; }
+
+/* ── S7 콘솔 목업 ─────────────────────────────────────────────── */
+.mock {
+  width: min(1050px, 90vw); background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: 18px; overflow: hidden;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.45); text-align: left;
+}
+.mock-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: clamp(10px,1.2vw,16px) clamp(14px,1.8vw,24px);
+  border-bottom: 1px solid var(--line); font-size: clamp(12px,1.2vw,15px);
+}
+.live { display: inline-flex; align-items: center; gap: 7px; color: var(--teal); font-family: var(--mono); font-size: 0.9em; }
+.live i { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); animation: pulse 2s ease-out infinite; }
+.mock-body { padding: clamp(14px,1.8vw,24px); display: flex; flex-direction: column; gap: clamp(12px,1.4vw,20px); }
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: clamp(10px,1.2vw,18px); }
+.kpi {
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 12px;
+  padding: clamp(10px,1.3vw,18px); border-top: 3px solid var(--kc, var(--teal));
+}
+.kpi .lab { font-size: clamp(10px,1vw,13px); color: var(--dim); }
+.kpi .val { font-family: var(--mono); font-size: clamp(22px,2.8vw,40px); font-weight: 700; margin-top: 4px; }
+.rows { display: flex; flex-direction: column; gap: 8px; }
+.rowline {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 10px;
+  padding: clamp(8px,1vw,13px) clamp(10px,1.3vw,18px);
+  font-size: clamp(11px,1.15vw,15px); font-family: var(--mono);
+}
+.rowline .who { color: var(--indigo); }
+.rowline .arrow { color: var(--faint); }
+.rowline .badge {
+  margin-left: auto; padding: 2px 10px; border-radius: 999px;
+  font-size: 0.85em; background: var(--teal-soft); color: var(--teal);
+}
+.rowline .badge.idle { background: rgba(143,163,191,0.12); color: var(--dim); }
+.mock-note { color: var(--dim); font-size: clamp(13px,1.35vw,17px); margin-top: 2.4vh; text-align: center; line-height: 1.6; }
+
+/* ── S8 기대 효과 ─────────────────────────────────────────────── */
+.effects { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: clamp(14px,1.8vw,26px); width: min(1050px, 90vw); }
+.effect {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 16px;
+  padding: clamp(18px,2.2vw,32px); text-align: left;
+}
+.effect .big {
+  font-family: var(--mono); font-weight: 700;
+  font-size: clamp(30px, 3.6vw, 54px); color: var(--teal); line-height: 1.1;
+}
+.effect .big small { font-size: 0.42em; color: var(--dim); font-weight: 400; margin-left: 6px; }
+.effect .t { font-size: clamp(15px,1.6vw,21px); font-weight: 700; margin-top: 10px; }
+.effect .d { color: var(--dim); font-size: clamp(12px,1.25vw,16px); line-height: 1.6; margin-top: 6px; }
+
+/* ── S9 로드맵 ────────────────────────────────────────────────── */
+.timeline { display: flex; align-items: flex-start; gap: 0; margin: 2vh 0 4vh; }
+.tl-item { display: flex; flex-direction: column; align-items: center; width: clamp(90px, 10vw, 150px); }
+.tl-dot {
+  width: 16px; height: 16px; border-radius: 50%; background: var(--teal);
+  border: 3px solid var(--bg); box-shadow: 0 0 0 1px var(--teal);
+}
+.tl-item.next .tl-dot { background: var(--bg-3); box-shadow: 0 0 0 1px var(--faint); }
+.tl-bar { height: 2px; background: var(--teal); flex: 1; margin-top: 7px; min-width: clamp(16px,2vw,40px); }
+.tl-bar.togo { background: var(--line); }
+.tl-name { font-weight: 700; font-size: clamp(12px,1.25vw,16px); margin-top: 10px; }
+.tl-desc { color: var(--dim); font-size: clamp(10px,1vw,13px); margin-top: 4px; text-align: center; line-height: 1.5; }
+
+/* ── 시작 오버레이 / 일시정지 표시 ────────────────────────────── */
+.gate {
+  position: fixed; inset: 0; z-index: 20; background: var(--bg);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3.5vh; cursor: pointer; transition: opacity 0.6s ease, visibility 0.6s;
+}
+.gate.off { opacity: 0; visibility: hidden; }
+.gate .hint { color: var(--dim); font-size: clamp(13px,1.4vw,18px); line-height: 2; text-align: center; }
+.gate kbd {
+  font-family: var(--mono); background: var(--bg-3); border: 1px solid var(--line);
+  border-radius: 6px; padding: 2px 9px; font-size: 0.9em; color: var(--ink);
+}
+.gate .go {
+  padding: 14px 44px; border-radius: 999px; border: 1px solid var(--teal);
+  background: var(--teal-soft); color: var(--teal);
+  font-size: clamp(16px,1.8vw,24px); font-weight: 800;
+}
+.paused-flag {
+  position: fixed; top: 22px; right: 26px; z-index: 15;
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.2em;
+  color: var(--amber); border: 1px solid var(--amber); border-radius: 999px;
+  padding: 5px 16px; opacity: 0; transition: opacity 0.3s; pointer-events: none;
+}
+body.paused .paused-flag { opacity: 1; }
+
+/* ── 하단 컨트롤 바 ───────────────────────────────────────────── */
+.bar {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 56px; z-index: 10;
+  display: flex; align-items: center; gap: 18px; padding: 0 22px;
+  background: rgba(10, 17, 32, 0.86); border-top: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+.bar .clock { font-family: var(--mono); font-size: 13px; color: var(--dim); white-space: nowrap; }
+.track { position: relative; flex: 1; height: 5px; border-radius: 3px; background: var(--bg-3); cursor: pointer; }
+.track .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 3px; background: var(--teal); }
+.track .tick { position: absolute; top: -3px; width: 2px; height: 11px; background: var(--line); }
+.scene-name { font-size: 13px; color: var(--dim); white-space: nowrap; min-width: 9em; text-align: right; }
+
+/* ── 발표 메모 오버레이 ───────────────────────────────────────── */
+.notes {
+  position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
+  z-index: 12; width: min(860px, 90vw);
+  background: rgba(16, 27, 48, 0.96); border: 1px solid var(--line);
+  border-radius: 14px; padding: 18px 24px;
+  font-size: 15px; line-height: 1.75; color: var(--ink);
+  display: none; text-align: left;
+}
+.notes.show { display: block; }
+.notes .nlab { font-family: var(--mono); font-size: 11px; letter-spacing: 0.2em; color: var(--teal); margin-bottom: 6px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001s !important; transition-duration: 0.15s !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="ambient"></div>
+
+<div class="stage" id="stage">
+
+  <!-- S1 타이틀 · 30s -->
+  <section class="scene" data-dur="30" data-name="타이틀"
+    data-notes="인사. 오늘은 슬라이드 대신 짧은 영상 형식으로 AMX를 소개한다. 10분 남짓이며 중간에 질문은 멈추고 받을 수 있다.">
+    <div class="mark" data-step data-at="0.5">
+      <span class="mark-dot"></span>
+      <span class="wordmark">AMX</span>
+    </div>
+    <h1 data-step data-at="1.6" style="font-size:clamp(24px,3vw,44px)">Claude 계정 통합 관제 시스템</h1>
+    <p class="sub" data-step data-at="3" style="margin-top:2.5vh">
+      여러 대의 서버, 여러 개의 계정.<br>배정부터 회수까지 한 화면에서.
+    </p>
+  </section>
+
+  <!-- S2 문제 · 100s -->
+  <section class="scene" data-dur="90" data-name="왜 필요한가"
+    data-notes="출발점이 된 실제 상황을 설명. 유료 계정 여러 개를 서버 여러 대에서 돌리면 한도 관리가 사람 일이 된다. 각 항목(배정·하달·전환·회수)이 전부 수작업이었고 실수가 요금·중단으로 이어진다는 점 강조.">
+    <div class="eyebrow" data-step data-at="0.3">Problem</div>
+    <h2 data-step data-at="0.6">계정 10개 × 서버 3대,<br>지금은 전부 사람 손으로 돌아갑니다</h2>
+    <div class="chaos">
+      <div class="srv-col" data-step data-at="3">
+        <div class="srv-box"><span class="glyph">🖥</span>서버 1
+          <div class="acct-stack">
+            <div class="acct">acct-a <div class="gauge full"><i></i></div></div>
+            <div class="acct">acct-b <div class="gauge mid"><i></i></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="srv-col" data-step data-at="4.2">
+        <div class="srv-box"><span class="glyph">🖥</span>서버 2
+          <div class="acct-stack">
+            <div class="acct">acct-c <div class="gauge full"><i></i></div></div>
+            <div class="acct">acct-d <div class="gauge low"><i></i></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="srv-col" data-step data-at="5.4">
+        <div class="srv-box"><span class="glyph">🖥</span>서버 3
+          <div class="acct-stack">
+            <div class="acct">acct-e <div class="gauge mid"><i></i></div></div>
+            <div class="acct">acct-f <div class="gauge low"><i></i></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="pains">
+      <div class="pain" data-step data-at="14"><b>배정</b>어느 서버에 어느 계정을 줄지, 표를 따로 만들어 관리</div>
+      <div class="pain" data-step data-at="26"><b>하달</b>로그인 정보를 서버마다 접속해 복사·붙여넣기</div>
+      <div class="pain" data-step data-at="40"><b>전환</b>한도가 차면 작업이 멈추고, 사람이 알아채야 갈아탐</div>
+      <div class="pain" data-step data-at="54"><b>회수</b>다 쓴 계정을 다른 서버로 옮기는 일도 결국 수작업</div>
+    </div>
+  </section>
+
+  <!-- S3 정의 · 50s -->
+  <section class="scene" data-dur="50" data-name="AMX란"
+    data-notes="한 문장 정의를 읽어주고, 네 동작이 곧 제품의 뼈대라는 점을 말한다. 이 넷을 다음 장면들에서 아키텍처와 시나리오로 풀겠다고 예고.">
+    <div class="eyebrow" data-step data-at="0.3">What is AMX</div>
+    <h1 data-step data-at="0.8" style="font-size:clamp(28px,3.8vw,58px)">
+      흩어진 Claude 계정을 한 곳에서<br>
+      <span class="accent">배정하고, 내려보내고, 전환하고, 회수합니다</span>
+    </h1>
+    <div class="chips">
+      <span class="chip" data-step data-at="6">배정</span>
+      <span class="chip" data-step data-at="8">하달</span>
+      <span class="chip" data-step data-at="10">자동 전환</span>
+      <span class="chip" data-step data-at="12">회수</span>
+    </div>
+    <p class="sub" data-step data-at="20" style="margin-top:4vh">
+      중앙 서버 하나와 각 서버에 상주하는 작은 에이전트가<br>이 네 가지를 전부 자동으로 처리합니다.
+    </p>
+  </section>
+
+  <!-- S4 아키텍처 · 160s -->
+  <section class="scene" data-dur="140" data-name="아키텍처"
+    data-notes="구성요소 4개를 순서대로. ams-web(관제 화면) → ams-server(중앙 두뇌, DB) → 상시 보안 채널(gRPC) → ama-agent(서버마다 1개) → tsamx(계정 전환기) → Claude Code. 언어가 달라도 contracts(proto)로 메시지 형식을 먼저 못박았다는 점을 언급.">
+    <div class="eyebrow" data-step data-at="0.3">Architecture</div>
+    <h2 data-step data-at="0.6">구성요소 넷, 역할은 분명하게</h2>
+    <div class="board">
+      <div class="stackcol">
+        <div class="node" data-step data-at="4" id="n-web">
+          <span class="tag">Next.js</span>
+          <div class="t">ams-web</div>
+          <div class="d">관리자 콘솔.<br>등록·배정·상태·경보</div>
+        </div>
+      </div>
+      <div class="pipe" data-step data-at="16" id="p-web"><span class="lbl">REST</span><i></i></div>
+      <div class="stackcol">
+        <div class="node" data-step data-at="18" id="n-server">
+          <span class="tag">Python</span>
+          <div class="t">ams-server</div>
+          <div class="d">중앙 두뇌. 장부(DB)를 지키고<br>명령을 내리고 보고를 받는다</div>
+        </div>
+        <div class="node" data-step data-at="30" style="padding:10px">
+          <div class="t" style="font-size:clamp(12px,1.2vw,16px)">PostgreSQL</div>
+          <div class="d">계정 · 서버 · 배정 · 경보 · 청구</div>
+        </div>
+      </div>
+      <div class="pipe" data-step data-at="44" id="p-grpc"><span class="lbl">gRPC·서명</span><i></i></div>
+      <div class="stackcol">
+        <div class="node" data-step data-at="46" id="n-agent">
+          <span class="tag">Go</span>
+          <div class="t">ama-agent</div>
+          <div class="d">서버마다 1개 상주.<br>명령 실행 · 사용량 보고</div>
+        </div>
+        <div class="node" data-step data-at="60" id="n-tsamx">
+          <span class="tag">Python</span>
+          <div class="t">tsamx</div>
+          <div class="d">계정 전환기.<br>한도가 차면 다음 계정으로</div>
+        </div>
+        <div class="node" data-step data-at="74" id="n-claude">
+          <span class="tag">runner</span>
+          <div class="t">Claude Code</div>
+          <div class="d">실제 작업 수행</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption">
+      <span data-step data-at="90" style="display:flex;gap:14px;align-items:baseline">
+        구성요소는 언어가 제각각이지만(<span class="num">Python·Go·TypeScript</span>),
+        메시지 형식을 <b class="accent">contracts</b>로 먼저 약속해 두어 서로 어긋날 수 없습니다.
+      </span>
+    </div>
+  </section>
+
+  <!-- S5 동작 흐름 · 160s -->
+  <section class="scene" data-dur="140" data-name="동작 흐름"
+    data-notes="배정 클릭 한 번이 어디까지 이어지는지 시나리오로. ①웹에서 배정 ②암호화 하달 ③서버에서 즉시 사용 가능 ④한도 도달 시 자동 전환 ⑤결과가 중앙에 보고되어 화면 갱신. 사람이 개입하는 지점은 ①의 클릭 한 번뿐이라는 게 핵심 메시지.">
+    <div class="eyebrow" data-step data-at="0.3">How it works</div>
+    <h2 data-step data-at="0.6">클릭 한 번 뒤에 일어나는 일</h2>
+    <div class="board" style="grid-template-columns: 1fr auto 1fr auto 1fr;">
+      <div class="node" data-step data-at="3" id="f-web"><div class="t">관리자</div><div class="d">"계정 A를 서버 1에 배정"</div></div>
+      <div class="pipe" data-step data-at="3" id="f-p1"><i></i></div>
+      <div class="node" data-step data-at="3" id="f-server"><div class="t">ams-server</div><div class="d">장부 기록 · 명령 서명</div></div>
+      <div class="pipe" data-step data-at="3" id="f-p2"><i></i></div>
+      <div class="node" data-step data-at="3" id="f-agent"><div class="t">서버 1</div><div class="d">에이전트 + tsamx</div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.5vh;min-height:12em">
+      <div class="caption" data-step data-at="8"><span class="step-no">1</span>웹에서 배정을 클릭하면, 중앙 장부에 기록되고 명령이 만들어집니다.</div>
+      <div class="caption" data-step data-at="34"><span class="step-no">2</span>로그인 정보는 <b class="accent">암호화된 채로</b> 보안 채널을 타고 서버 1로 내려갑니다.</div>
+      <div class="caption" data-step data-at="60"><span class="step-no">3</span>에이전트가 tsamx에 등록하면, 그 서버의 Claude Code가 곧바로 계정 A로 동작합니다.</div>
+      <div class="caption" data-step data-at="86"><span class="step-no">4</span>계정 A의 한도가 <span class="num accent">95%</span>에 닿으면 tsamx가 <b class="accent">자동으로 계정 B로 전환</b>합니다.</div>
+      <div class="caption" data-step data-at="112"><span class="step-no">5</span>전환 사실이 중앙에 보고되고, 관제 화면이 갱신됩니다. 사람이 한 일은 처음의 클릭 한 번입니다.</div>
+    </div>
+  </section>
+
+  <!-- S6 보안 · 110s -->
+  <section class="scene" data-dur="110" data-name="보안 설계"
+    data-notes="계정 로그인 정보를 다루는 시스템이라 보안을 처음부터 설계에 넣었다. 카드 4장: 이중 암호화 / 명령 서명(위조 명령이 끼어들 수 없음) / BFF(브라우저에 토큰·서버 주소 미노출) / 요금 보호(계정 교체 순간 실행을 막아 오청구 방지). 권한 구분(전체/고객사별 관리자)도 한 줄로.">
+    <div class="eyebrow" data-step data-at="0.3">Security</div>
+    <h2 data-step data-at="0.6">로그인 정보를 다루는 시스템의 기본기</h2>
+    <div class="cards">
+      <div class="card" data-step data-at="4">
+        <div class="k">ENVELOPE ENCRYPTION</div>
+        <div class="t">저장은 이중 암호화</div>
+        <div class="d">계정 로그인 정보는 중앙 DB에도, 각 서버 디스크에도 암호화된 상태로만 존재합니다.</div>
+      </div>
+      <div class="card" data-step data-at="26">
+        <div class="k">ED25519 SIGNING</div>
+        <div class="t">모든 명령에 서명</div>
+        <div class="d">에이전트는 중앙 서버의 서명이 검증된 명령만 실행합니다. 위조 명령이 끼어들 자리가 없습니다.</div>
+      </div>
+      <div class="card" data-step data-at="48">
+        <div class="k">BFF LAYER</div>
+        <div class="t">브라우저에는 아무것도</div>
+        <div class="d">관리 화면은 중계층을 거쳐 통신합니다. 서버 주소도 토큰도 브라우저에 노출되지 않습니다.</div>
+      </div>
+      <div class="card" data-step data-at="70">
+        <div class="k">RUNNER GUARD</div>
+        <div class="t">요금이 엉키지 않게</div>
+        <div class="d">계정을 교체하는 순간의 실행을 막아, 사용량이 엉뚱한 계정에 찍히는 사고를 차단합니다.</div>
+      </div>
+    </div>
+    <p class="sub" data-step data-at="92" style="margin-top:3vh">관리자 권한도 전체 관리자와 그룹별 관리자로 나뉩니다.</p>
+  </section>
+
+  <!-- S7 관제 콘솔 · 110s -->
+  <section class="scene" data-dur="110" data-name="관제 콘솔"
+    data-notes="실물 콘솔과 같은 구성의 목업. 서버 생존 신호는 30초 주기, 사용량 보고는 5분 주기. 어떤 서버가 어떤 계정으로 돌고 있는지, 전환·소진·끊김은 경보로 뜬다. 시간 되면 실물 데모로 전환해도 좋음.">
+    <div class="eyebrow" data-step data-at="0.3">Console</div>
+    <h2 data-step data-at="0.6">전부 한 화면에서 보입니다</h2>
+    <div class="mock" data-step data-at="3">
+      <div class="mock-head">
+        <span class="live"><i></i>LIVE</span>
+        <span style="color:var(--dim)">AMX 관제 콘솔 — TScorp</span>
+        <span class="num" style="margin-left:auto;color:var(--faint)" id="mock-clock">14:02:11</span>
+      </div>
+      <div class="mock-body">
+        <div class="kpis">
+          <div class="kpi" style="--kc:var(--teal)" data-step data-at="5"><div class="lab">온라인 서버</div><div class="val num" data-count="3">0</div></div>
+          <div class="kpi" style="--kc:var(--indigo)" data-step data-at="6"><div class="lab">등록 계정</div><div class="val num" data-count="10">0</div></div>
+          <div class="kpi" style="--kc:var(--amber)" data-step data-at="7"><div class="lab">활성 할당</div><div class="val num" data-count="6">0</div></div>
+          <div class="kpi" style="--kc:var(--rose)" data-step data-at="8"><div class="lab">미확인 알림</div><div class="val num" data-count="1">0</div></div>
+        </div>
+        <div class="rows">
+          <div class="rowline" data-step data-at="24"><span class="who">acct-a@team</span><span class="arrow">━━●━━▶</span><span>서버 1</span><span class="badge">● 현재 활성</span></div>
+          <div class="rowline" data-step data-at="27"><span class="who">acct-c@team</span><span class="arrow">━━━━━▶</span><span>서버 2</span><span class="badge idle">대기</span></div>
+          <div class="rowline" data-step data-at="30"><span class="who">acct-e@team</span><span class="arrow">━━●━━▶</span><span>서버 3</span><span class="badge">● 현재 활성</span></div>
+        </div>
+      </div>
+    </div>
+    <p class="mock-note" data-step data-at="55">
+      서버 생존 신호는 <span class="num accent">30초</span>, 사용량 보고는 <span class="num accent">5분</span> 주기.<br>
+      계정 소진·서버 끊김·회수 실패는 조용히 묻히지 않고 <b>경보</b>로 올라옵니다.
+    </p>
+  </section>
+
+  <!-- S8 기대 효과 · 110s -->
+  <section class="scene" data-dur="110" data-name="기대 효과"
+    data-notes="정량 수치는 시스템 파라미터(전환 임계 95%, 신호 주기)만 사실로 말하고, 나머지는 정성 효과로. 핵심: 관리 지점이 1곳으로 줄고, 전환이 사람 개입 없이 일어나 작업 중단이 사라지고, 로그인 정보 수동 복사가 0회가 되며, 모든 이력이 감사 가능하게 남는다.">
+    <div class="eyebrow" data-step data-at="0.3">Impact</div>
+    <h2 data-step data-at="0.6">무엇이 달라지는가</h2>
+    <div class="effects">
+      <div class="effect" data-step data-at="4">
+        <div class="big">N대 <small>→</small> <span class="num">1곳</span></div>
+        <div class="t">관리 지점의 통합</div>
+        <div class="d">서버마다 접속하던 일이 관제 화면 하나로 끝납니다. 표 관리도, 접속 순회도 사라집니다.</div>
+      </div>
+      <div class="effect" data-step data-at="24">
+        <div class="big">자동 전환</div>
+        <div class="t">한도 도달 = 작업 중단, 이 공식이 깨집니다</div>
+        <div class="d">한도 95% 도달 시 다음 계정으로 스스로 갈아탑니다. 사람이 알아챌 때까지 멈춰 있던 시간이 없어집니다.</div>
+      </div>
+      <div class="effect" data-step data-at="44">
+        <div class="big"><span class="num">0</span>회</div>
+        <div class="t">로그인 정보 수동 취급</div>
+        <div class="d">복사·붙여넣기가 사라지니 유출 경로와 휴먼 에러도 함께 사라집니다. 정보는 암호화 채널로만 이동합니다.</div>
+      </div>
+      <div class="effect" data-step data-at="64">
+        <div class="big">전 이력</div>
+        <div class="t">감사 가능한 운영</div>
+        <div class="d">누가 언제 어떤 계정을 어느 서버에 배정·전환·회수했는지 전부 기록으로 남습니다. 사용량 집계·청구 데이터도 함께.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- S9 현황과 다음 · 60s -->
+  <section class="scene" data-dur="60" data-name="현황과 다음"
+    data-notes="P0~P5 여섯 단계 전부 구현 완료, 이후 배포 안전장치·복구·경보 가시화 등 안정화까지 진행됨. 당장은 사내 내재화에 집중하고, 여러 고객사가 쓰는 서비스로의 확장은 설계만 준비된 상태(보류)라고 솔직하게.">
+    <div class="eyebrow" data-step data-at="0.3">Status</div>
+    <h2 data-step data-at="0.6">어디까지 왔나</h2>
+    <div class="timeline" data-step data-at="3">
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P0–P1</div><div class="tl-desc">통신 규약<br>중앙 장부</div></div>
+      <div class="tl-bar"></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P2–P3</div><div class="tl-desc">보안 채널<br>자동 전환</div></div>
+      <div class="tl-bar"></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P4–P5</div><div class="tl-desc">관제 콘솔<br>다중 그룹</div></div>
+      <div class="tl-bar"></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">안정화</div><div class="tl-desc">복구 · 경보<br>배포 안전장치</div></div>
+      <div class="tl-bar togo"></div>
+      <div class="tl-item next"><div class="tl-dot"></div><div class="tl-name">다음</div><div class="tl-desc">사내 내재화<br>(SaaS 확장은 대기)</div></div>
+    </div>
+    <p class="sub" data-step data-at="18">
+      계획한 여섯 단계는 전부 구현이 끝났고,<br>실사용 환경에서 등록부터 자동 전환까지 전 구간 검증을 마쳤습니다.
+    </p>
+  </section>
+
+  <!-- S10 마무리 · 30s -->
+  <section class="scene" data-dur="30" data-name="마무리"
+    data-notes="닫는 멘트: 계정 운영은 시스템에 맡기고 사람은 개발에 집중하자. Q&A로 전환. N키로 메모 끄는 것 잊지 말 것.">
+    <div class="mark" data-step data-at="0.5">
+      <span class="mark-dot"></span>
+      <span class="wordmark" style="font-size:clamp(48px,8vw,120px)">AMX</span>
+    </div>
+    <h2 data-step data-at="1.6" style="font-weight:600;color:var(--dim)">
+      계정 운영은 시스템에게,<br><span class="accent" style="font-weight:800">사람은 개발에 집중합니다</span>
+    </h2>
+    <p class="sub" data-step data-at="4">질문을 받겠습니다.</p>
+  </section>
+
+</div>
+
+<div class="paused-flag">PAUSED</div>
+
+<div class="notes" id="notes">
+  <div class="nlab">SPEAKER NOTES</div>
+  <div id="notes-body"></div>
+</div>
+
+<div class="bar">
+  <span class="clock num" id="clock">00:00 / 00:00</span>
+  <div class="track" id="track"><div class="fill" id="fill"></div></div>
+  <span class="scene-name" id="scene-name"></span>
+</div>
+
+<div class="gate" id="gate">
+  <div class="mark"><span class="mark-dot"></span><span class="wordmark" style="font-size:clamp(56px,9vw,140px)">AMX</span></div>
+  <div class="go">클릭하거나 Space를 눌러 시작</div>
+  <div class="hint">
+    <kbd>Space</kbd> 재생/일시정지 · <kbd>←</kbd><kbd>→</kbd> 장면 이동 · <kbd>1</kbd>–<kbd>9</kbd> 장면 점프<br>
+    <kbd>F</kbd> 전체화면 · <kbd>N</kbd> 발표 메모 · 총 <span class="num" id="gate-total">—</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var scenes = Array.prototype.slice.call(document.querySelectorAll('.scene'));
+  var durs = scenes.map(function (s) { return parseFloat(s.dataset.dur) || 30; });
+  var total = durs.reduce(function (a, b) { return a + b; }, 0);
+  var starts = [];
+  durs.reduce(function (acc, d, i) { starts[i] = acc; return acc + d; }, 0);
+
+  var cur = -1;          // 현재 장면 인덱스
+  var t = 0;             // 전체 경과(초)
+  var playing = false;
+  var started = false;
+  var lastTs = null;
+
+  var fill = document.getElementById('fill');
+  var clock = document.getElementById('clock');
+  var sceneName = document.getElementById('scene-name');
+  var notes = document.getElementById('notes');
+  var notesBody = document.getElementById('notes-body');
+  var gate = document.getElementById('gate');
+  var track = document.getElementById('track');
+
+  function fmt(sec) {
+    sec = Math.max(0, Math.round(sec));
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+  document.getElementById('gate-total').textContent = fmt(total);
+
+  // 진행 바에 장면 경계 눈금
+  starts.slice(1).forEach(function (st) {
+    var tick = document.createElement('div');
+    tick.className = 'tick';
+    tick.style.left = (st / total * 100) + '%';
+    track.appendChild(tick);
+  });
+
+  function sceneAt(time) {
+    for (var i = scenes.length - 1; i >= 0; i--) if (time >= starts[i]) return i;
+    return 0;
+  }
+
+  // KPI 카운트업 — .on이 붙는 순간 1회 실행
+  function countUp(el) {
+    var target = parseInt(el.dataset.count, 10);
+    var began = performance.now();
+    (function step(now) {
+      var p = Math.min(1, (now - began) / 1200);
+      el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) requestAnimationFrame(step);
+    })(began);
+  }
+
+  function applySteps(scene, local, animate) {
+    var steps = scene.querySelectorAll('[data-step]');
+    steps.forEach(function (el) {
+      var at = parseFloat(el.dataset.at) || 0;
+      var want = local >= at;
+      var had = el.classList.contains('on');
+      el.classList.toggle('on', want);
+      if (want && !had) {
+        el.querySelectorAll('[data-count]').forEach(function (c) {
+          if (animate) countUp(c); else c.textContent = c.dataset.count;
+        });
+        if (el.dataset.count) { if (animate) countUp(el); else el.textContent = el.dataset.count; }
+        // 파이프 흐름 점: 스텝이 켜질 때 함께 흐르게
+        if (el.classList.contains('pipe')) el.classList.add('flow');
+      }
+      if (!want && el.classList.contains('pipe')) el.classList.remove('flow');
+    });
+  }
+
+  function setScene(i, keepLocal) {
+    i = Math.max(0, Math.min(scenes.length - 1, i));
+    if (cur !== i) {
+      scenes.forEach(function (s, k) { s.classList.toggle('cur', k === i); });
+      cur = i;
+      sceneName.textContent = '[' + (i + 1) + '/' + scenes.length + '] ' + scenes[i].dataset.name;
+      notesBody.textContent = scenes[i].dataset.notes || '';
+    }
+    if (!keepLocal) t = starts[i];
+    applySteps(scenes[i], t - starts[i], true);
+  }
+
+  function render() {
+    fill.style.width = (t / total * 100) + '%';
+    clock.textContent = fmt(t) + ' / ' + fmt(total);
+  }
+
+  function tick(ts) {
+    if (playing) {
+      if (lastTs !== null) t += (ts - lastTs) / 1000;
+      lastTs = ts;
+      if (t >= total) { t = total; playing = false; document.body.classList.add('paused'); }
+      var i = sceneAt(t);
+      if (i !== cur) setScene(i, true);
+      else applySteps(scenes[cur], t - starts[cur], true);
+      render();
+    } else {
+      lastTs = ts;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    gate.classList.add('off');
+    playing = true;
+    setScene(0);
+    render();
+  }
+
+  function togglePlay() {
+    if (!started) { start(); return; }
+    playing = !playing;
+    document.body.classList.toggle('paused', !playing);
+  }
+
+  function jump(i) {
+    if (!started) start();
+    setScene(i);
+    render();
+  }
+
+  gate.addEventListener('click', start);
+  track.addEventListener('click', function (e) {
+    if (!started) start();
+    var r = track.getBoundingClientRect();
+    t = Math.max(0, Math.min(total, (e.clientX - r.left) / r.width * total));
+    setScene(sceneAt(t), true);
+    render();
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+    else if (e.key === 'ArrowRight') jump(cur + 1);
+    else if (e.key === 'ArrowLeft') jump(cur - 1);
+    else if (e.key >= '1' && e.key <= '9') jump(parseInt(e.key, 10) - 1);
+    else if (e.key === '0') jump(9);
+    else if (e.key === 'f' || e.key === 'F') {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen();
+    }
+    else if (e.key === 'n' || e.key === 'N') notes.classList.toggle('show');
+  });
+
+  // 목업 시계는 실제 시각으로
+  setInterval(function () {
+    var el = document.getElementById('mock-clock');
+    if (el) el.textContent = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+  }, 1000);
+
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
