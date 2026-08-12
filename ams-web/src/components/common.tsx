@@ -2,6 +2,7 @@
 
 import type { ReactNode, SVGProps } from 'react';
 import { useEffect, useRef, useState } from 'react';
+import { krApiError } from '@/lib/api-client/client';
 
 // 상태·유형 값의 한글 표시 매핑. className은 원래 영문 값을 유지하고 표시만
 // 한글로 바꾼다. 매핑에 없는 값은 원문 그대로 반환한다.
@@ -379,7 +380,7 @@ export function useAction() {
       await fn();
       onDone?.();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(krApiError(e));
     } finally {
       setBusy(false);
     }

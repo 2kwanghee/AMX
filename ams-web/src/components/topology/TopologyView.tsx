@@ -3,7 +3,7 @@
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
-import { allowedAssignmentActions, api } from '@/lib/api-client/client';
+import { allowedAssignmentActions, api, krApiError } from '@/lib/api-client/client';
 import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
 import type {
   AccountPage,
@@ -61,6 +61,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const serverIndex = new Map(orderedServers.map((s, i) => [s.id, i]));
   const serverName = new Map(servers.map((s) => [s.id, s.name]));
   const emailOf = new Map(accounts.map((a) => [a.id, a.email]));
+  const providerOf = new Map(accounts.map((a) => [a.id, a.provider]));
   const activeByServer = currentActiveByServer(assignments, accounts);
 
   const minServerIdx = new Map<string, number>();
@@ -300,6 +301,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                   id={a.id}
                   email={a.email}
                   status={a.status}
+                  provider={a.provider}
                   nodeRef={setNode(`acc:${a.id}`)}
                   onClick={() => onGo('accounts')}
                   onPortDown={startDrag('account', a.id)}
@@ -334,6 +336,21 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
           blocking={assignments.find(
             (a) => a.accountId === connect.accountId && a.state !== 'detached' && a.serverId !== connect.serverId,
           )}
+          // 서버당 Codex 1계정(assignment.server_codex_capacity). 최종 판정은
+          // 서버가 하지만, 확실히 막힐 연결은 눌러보기 전에 알려준다.
+          codexBlockerEmail={
+            providerOf.get(connect.accountId) === 'codex'
+              ? emailOf.get(
+                  assignments.find(
+                    (a) =>
+                      a.serverId === connect.serverId &&
+                      a.state !== 'detached' &&
+                      a.accountId !== connect.accountId &&
+                      providerOf.get(a.accountId) === 'codex',
+                  )?.accountId ?? '',
+                )
+              : undefined
+          }
           srvNameOf={serverName}
           onClose={() => setConnect(null)}
         />
@@ -424,6 +441,7 @@ function ConnectModal({
   email,
   srvName,
   blocking,
+  codexBlockerEmail,
   srvNameOf,
   onClose,
 }: {
@@ -433,6 +451,7 @@ function ConnectModal({
   email: string;
   srvName: string;
   blocking?: Assignment;
+  codexBlockerEmail?: string;
   srvNameOf: Map<string, string>;
   onClose: () => void;
 }) {
@@ -454,7 +473,7 @@ function ConnectModal({
     try {
       created = await api.createAssignment(tenantId, { accountId, serverId });
     } catch (e) {
-      setError(`할당 생성 실패: ${e instanceof Error ? e.message : String(e)}`);
+      setError(`할당 생성 실패: ${krApiError(e)}`);
       setBusy(false);
       return;
     }
@@ -462,7 +481,7 @@ function ConnectModal({
       await api.assignmentAction(tenantId, created.id, 'deliver');
     } catch (e) {
       await revalidate();
-      setError(`할당은 생성됨, 전달 실패: ${e instanceof Error ? e.message : String(e)}`);
+      setError(`할당은 생성됨, 전달 실패: ${krApiError(e)}`);
       setBusy(false);
       return;
     }
@@ -483,6 +502,13 @@ function ConnectModal({
         </p>
       ) : (
         <>
+          {codexBlockerEmail && (
+            <p className="topo-move-note">
+              이 서버에는 이미 Codex 계정 <span className="mono">{codexBlockerEmail}</span>이(가) 연결돼
+              있습니다. Codex는 호스트당 자격증명을 하나만 두므로 이대로 진행하면 서버가 거부합니다.
+              기존 연결을 먼저 회수하세요.
+            </p>
+          )}
           {error && <p className="err">{error}</p>}
           <button className="primary" style={{ marginTop: 14 }} disabled={busy} onClick={confirm}>
             연결 생성
