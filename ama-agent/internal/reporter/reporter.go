@@ -182,26 +182,27 @@ func accountUsage(row provider.AccountRow) *amxv1.AccountUsage {
 		au.AllocationStatus = amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE
 	}
 	if row.Usage != nil {
-		// Dual-record: keep the legacy positional windows (five_hour/seven_day)
-		// and mirror them into the generalized windows[] list (P2b), ordered by
-		// window_minutes ascending. A nil source window is omitted from both.
-		if w := row.Usage.FiveHour; w != nil {
-			au.FiveHour = &amxv1.UsageWindow{Pct: w.Pct, ResetsAt: parseTime(w.ResetsAt)}
+		// The vendor-neutral Usage.Windows list is the single source: every
+		// provider's bridge fills it (claude dual-records five_hour/seven_day into
+		// it, codex fills primary/secondary). Each window is mirrored into proto
+		// windows[]; the legacy positional five_hour/seven_day fields are re-derived
+		// ONLY for windows carrying those ids, so a codex account (which has neither)
+		// leaves them nil. For a claude account this reproduces the pre-P3 output
+		// byte-for-byte — the windows arrive already ordered five_hour then seven_day.
+		for i := range row.Usage.Windows {
+			w := row.Usage.Windows[i]
 			au.Windows = append(au.Windows, &amxv1.QuotaWindow{
-				Id:            "five_hour",
+				Id:            w.Id,
 				Pct:           w.Pct,
 				ResetsAt:      parseTime(w.ResetsAt),
-				WindowMinutes: 300,
+				WindowMinutes: int32(w.WindowMinutes),
 			})
-		}
-		if w := row.Usage.SevenDay; w != nil {
-			au.SevenDay = &amxv1.UsageWindow{Pct: w.Pct, ResetsAt: parseTime(w.ResetsAt)}
-			au.Windows = append(au.Windows, &amxv1.QuotaWindow{
-				Id:            "seven_day",
-				Pct:           w.Pct,
-				ResetsAt:      parseTime(w.ResetsAt),
-				WindowMinutes: 10080,
-			})
+			switch w.Id {
+			case "five_hour":
+				au.FiveHour = &amxv1.UsageWindow{Pct: w.Pct, ResetsAt: parseTime(w.ResetsAt)}
+			case "seven_day":
+				au.SevenDay = &amxv1.UsageWindow{Pct: w.Pct, ResetsAt: parseTime(w.ResetsAt)}
+			}
 		}
 	}
 	return au

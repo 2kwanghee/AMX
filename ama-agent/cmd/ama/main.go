@@ -21,6 +21,7 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/metrics"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider/codex"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/resync"
 	"github.com/2kwanghee/AMX/ama-agent/internal/scheduler"
@@ -136,6 +137,16 @@ func run() error {
 	// to a bridge).
 	bridges := map[string]provider.Bridge{
 		drv.Name(): claudeBridge,
+	}
+	// Codex is wired only when its config home (AMX_CODEX_HOME) is set. Unset
+	// leaves it completely inactive — no bridge registered, no resyncer started —
+	// so the claude-only behavior is unchanged. Codex does not rotate; it stays out
+	// of PoolSummary/ActiveAccount (reporter summaryScope), contributing only its
+	// accounts[] usage.
+	codexDrv := codex.New()
+	codexBridge := maybeRegisterCodex(bridges, codexDrv)
+	if codexBridge != nil {
+		log.Printf("codex provider enabled (config home %s)", codexDrv.ConfigHome())
 	}
 	bridgeFor := func(providerKey string) provider.Bridge {
 		return bridges[provider.Normalize(providerKey)]
@@ -276,6 +287,33 @@ func run() error {
 		Now:  time.Now,
 		Logf: log.Printf,
 	})
+	// One resyncer per rotating/credential-bearing provider; each watches its own
+	// live credential file for a local rotation and pushes the refreshed set back
+	// up, scoped to its provider. Codex is appended only when its bridge is wired
+	// (AMX_CODEX_HOME set); unset leaves this a claude-only list, unchanged.
+	resyncers := []*resync.Resyncer{resyncer}
+	if codexBridge != nil {
+		var codexCred string
+		if cfgDir := codexDrv.ConfigHome(); cfgDir != "" {
+			codexCred = codexDrv.CredentialPath(cfgDir)
+		}
+		resyncers = append(resyncers, resync.New(resync.Config{
+			AgentID:          agentID,
+			Store:            st,
+			KEKs:             keks,
+			Bridge:           codexBridge,
+			Provider:         codexDrv.Name(),
+			Engine:           engine,
+			CredentialsPath:  codexCred,
+			Fingerprint:      codexDrv.Fingerprint,
+			ServerCredential: handler.ServerCredential,
+			Send: func(u *amxv1.CredentialUpdate) bool {
+				return client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_CredUpdate{CredUpdate: u}})
+			},
+			Now:  time.Now,
+			Logf: log.Printf,
+		}))
+	}
 
 	// On (re)connect, send Register first (SSOT §5.4). The auth is the enroll
 	// token on first contact, else the server credential from a prior SessionSetup.
@@ -347,7 +385,9 @@ func run() error {
 				// Credential re-sync detection shares this cadence (§5.7): rotation is
 				// rare and cross-server re-assignment is not latency-critical, so a
 				// 5-minute detection window is ample and adds no extra goroutine.
-				resyncer.Tick(ctx)
+				for _, rs := range resyncers {
+					rs.Tick(ctx)
+				}
 				r, rerr := rep.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
 				if rerr != nil {
 					log.Printf("usage report: %v", rerr)
@@ -464,4 +504,18 @@ func env(key, def string) string {
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+// maybeRegisterCodex wires the codex provider into the bridge registry only when
+// its config home is set (driver.ConfigHome, from AMX_CODEX_HOME). It returns the
+// registered bridge, or nil when codex is unconfigured — in which case the map is
+// left untouched, so the agent stays claude-only exactly as before. Split out so
+// the env gate is unit-testable without standing up the whole daemon.
+func maybeRegisterCodex(bridges map[string]provider.Bridge, drv provider.Driver) provider.Bridge {
+	if drv.ConfigHome() == "" {
+		return nil
+	}
+	b := codex.NewBridge(drv)
+	bridges[drv.Name()] = b
+	return b
 }

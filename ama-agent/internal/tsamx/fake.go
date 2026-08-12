@@ -156,6 +156,18 @@ func (f *Fake) List(_ context.Context) (*provider.ListResult, error) {
 	for i, e := range f.order {
 		acc := f.accounts[e]
 		num := i + 1
+		// Mirror the real ExecBridge.List: dual-record the Claude-shaped
+		// five_hour/seven_day into the vendor-neutral Windows list so the reporter
+		// (which now consumes Windows exclusively) sees what production emits. Only
+		// project when a test seeded the positional fields without Windows; a test
+		// that seeds Windows directly (e.g. a codex-shaped pool) is left untouched.
+		// A fresh copy keeps the projection idempotent across repeated List calls.
+		usage := acc.usage
+		if usage != nil && usage.Windows == nil {
+			u := *usage
+			u.Windows = claudeWindows(&u)
+			usage = &u
+		}
 		row := provider.AccountRow{
 			Number:           num,
 			Email:            acc.email,
@@ -163,7 +175,7 @@ func (f *Fake) List(_ context.Context) (*provider.ListResult, error) {
 			Active:           f.active == e,
 			Disabled:         acc.disabled,
 			UsageStatus:      "ok",
-			Usage:            acc.usage,
+			Usage:            usage,
 		}
 		if f.active == e {
 			n := num
