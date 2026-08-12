@@ -227,6 +227,18 @@ export interface AccountRef {
   email: string;
   /** Claude account UUID from the credential metadata (optional) */
   accountUuid: string;
+  /**
+   * Account provider ("claude", later "codex"). An empty value MUST be read as
+   * "claude" for backward compatibility with agents that predate this field.
+   * AccountRef has no oneof (all regular fields), so a new trailing regular
+   * field serializes deterministically in field-number order on both Go and
+   * Python — the signing rule for oneof members (see SwitchNow) does not apply.
+   * ⚠ 서명 하위호환 불변식: 이 메시지가 서명 대상에 포함될 수 있으므로 새 필드는
+   * 반드시 "기존 최대 번호보다 큰 번호로 append"만 한다. 구버전이 unknown 필드를
+   * 말미에 재직렬화하기 때문에 최대 번호 append일 때만 바이트가 일치한다 —
+   * 낮은 번호를 끼워 넣으면 구에이전트의 서명 검증이 깨진다(P2a 리뷰 M2).
+   */
+  provider: string;
 }
 
 /**
@@ -1043,7 +1055,7 @@ export function accountEvent_TriggerToJSON(object: AccountEvent_Trigger): string
 }
 
 function createBaseAccountRef(): AccountRef {
-  return { amsAccountId: "", email: "", accountUuid: "" };
+  return { amsAccountId: "", email: "", accountUuid: "", provider: "" };
 }
 
 export const AccountRef: MessageFns<AccountRef> = {
@@ -1056,6 +1068,9 @@ export const AccountRef: MessageFns<AccountRef> = {
     }
     if (message.accountUuid !== "") {
       writer.uint32(26).string(message.accountUuid);
+    }
+    if (message.provider !== "") {
+      writer.uint32(34).string(message.provider);
     }
     return writer;
   },
@@ -1091,6 +1106,14 @@ export const AccountRef: MessageFns<AccountRef> = {
           message.accountUuid = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.provider = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1113,6 +1136,7 @@ export const AccountRef: MessageFns<AccountRef> = {
         : isSet(object.account_uuid)
         ? globalThis.String(object.account_uuid)
         : "",
+      provider: isSet(object.provider) ? globalThis.String(object.provider) : "",
     };
   },
 
@@ -1127,6 +1151,9 @@ export const AccountRef: MessageFns<AccountRef> = {
     if (message.accountUuid !== "") {
       obj.accountUuid = message.accountUuid;
     }
+    if (message.provider !== "") {
+      obj.provider = message.provider;
+    }
     return obj;
   },
 
@@ -1138,6 +1165,7 @@ export const AccountRef: MessageFns<AccountRef> = {
     message.amsAccountId = object.amsAccountId ?? "";
     message.email = object.email ?? "";
     message.accountUuid = object.accountUuid ?? "";
+    message.provider = object.provider ?? "";
     return message;
   },
 };

@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
-import type { AccountPage, OauthStartResponse } from '@/lib/api-client/types';
+import type { AccountPage, OauthStartResponse, Provider } from '@/lib/api-client/types';
 import { Badge, CopyButton, EmailChip, LiveDot, Modal, TimeCell, fmtTime, krLabel, useAction, useMarkOnData } from './common';
 
 const POLL = 8000;
@@ -32,11 +32,12 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
       {act.error && <p className="err">{act.error}</p>}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>이메일</th><th>유형</th><th>상태</th><th>시크릿</th><th>만료</th><th></th></tr></thead>
+          <thead><tr><th>이메일</th><th>프로바이더</th><th>유형</th><th>상태</th><th>시크릿</th><th>만료</th><th></th></tr></thead>
           <tbody>
             {accounts.map((a) => (
               <tr key={a.id}>
                 <td><EmailChip email={a.email} sub={a.organizationName} /></td>
+                <td><Badge value={a.provider} /></td>
                 <td>{krLabel(a.credentialType)}</td>
                 <td><Badge value={a.status} /></td>
                 <td><code>{a.secretMasked}</code></td>
@@ -53,7 +54,7 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
               </tr>
             ))}
             {accounts.length === 0 && (
-              <tr><td colSpan={6} className="muted">등록된 계정이 없습니다. 'OAuth 계정 등록'으로 Claude 계정을 연결하세요.</td></tr>
+              <tr><td colSpan={7} className="muted">등록된 계정이 없습니다. 'OAuth 계정 등록'으로 Claude 계정을 연결하세요.</td></tr>
             )}
           </tbody>
         </table>
@@ -82,12 +83,20 @@ function OauthWizard({
   const [code, setCode] = useState('');
   const [email, setEmail] = useState('');
   const act = useAction();
+  // Only "claude" is selectable today; the driver for other providers lands in
+  // a later step. Kept as a variable so the copy below derives from it.
+  const provider: Provider = 'claude';
 
   return (
     <Modal title="OAuth 계정 등록" onClose={onClose}>
       {step === 1 && (
         <>
-          <p className="muted">라벨(선택)을 입력하고 시작을 누르세요.</p>
+          <p className="muted">{krLabel(provider)} 계정을 연결합니다. 라벨(선택)을 입력하고 시작을 누르세요.</p>
+          <label>프로바이더</label>
+          <select value={provider} disabled>
+            <option value="claude">{krLabel('claude')}</option>
+            <option value="codex" disabled>Codex — 준비 중</option>
+          </select>
           <label>라벨 (선택)</label>
           <input value={label} onChange={(e) => setLabel(e.target.value)} />
           {act.error && <p className="err">{act.error}</p>}
@@ -97,7 +106,7 @@ function OauthWizard({
             disabled={act.busy}
             onClick={() =>
               act.run(async () => {
-                const f = await api.oauthStart(tenantId, { label: label || undefined });
+                const f = await api.oauthStart(tenantId, { label: label || undefined, provider });
                 setFlow(f);
                 setStep(2);
               })

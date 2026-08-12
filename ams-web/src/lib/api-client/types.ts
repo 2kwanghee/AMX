@@ -6,6 +6,7 @@
 export type TenantStatus = 'active' | 'suspended';
 export type AccountStatus = 'available' | 'assigned' | 'disabled' | 'quarantined';
 export type CredentialType = 'oauth' | 'api_key';
+export type Provider = 'claude';
 export type ServerStatus = 'online' | 'offline' | 'degraded';
 export type SwitchMode = 'auto' | 'manual';
 export type SwitchStrategy = 'best' | 'next_available';
@@ -41,6 +42,7 @@ export interface TenantUpdate {
 export interface Account {
   id: string;
   tenantId: string;
+  provider: Provider;
   email: string;
   credentialType: CredentialType;
   status: AccountStatus;
@@ -54,6 +56,7 @@ export interface Account {
 }
 export interface AccountCreate {
   email: string;
+  provider?: Provider;
   credentialType: CredentialType;
   secret: string;
 }
@@ -65,6 +68,7 @@ export interface AccountUpdate {
 
 export interface OauthStartRequest {
   label?: string;
+  provider?: Provider;
 }
 export interface OauthStartResponse {
   flowId: string;

@@ -199,18 +199,24 @@ class AdminSession(Base):
     )
 
 
+# Known account providers. "claude" is the only one enrolled today; "codex"
+# is planned (P2b driver + enrollment) and will be appended here then.
+PROVIDERS = ("claude",)
+
+
 class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         # ★ isolation anchor referenced by assignments' composite FK.
         UniqueConstraint("id", "tenant_id", name="uq_accounts_id_tenant"),
-        UniqueConstraint("tenant_id", "email", name="uq_accounts_tenant_email"),
+        UniqueConstraint("tenant_id", "provider", "email", name="uq_accounts_tenant_email"),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False
     )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, server_default="claude")
     email: Mapped[str] = mapped_column(Text, nullable=False)
     credential_type: Mapped[str] = mapped_column(String(32), nullable=False)
     # Fernet ciphertext of the complete credential-set JSON (§5.5). Never

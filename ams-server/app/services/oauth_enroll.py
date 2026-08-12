@@ -33,19 +33,49 @@ import httpx
 
 from app.core.errors import ApiError, bad_request
 
-OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-OAUTH_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
-OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-# Claude Code 2.1.226 바이너리의 기본 로그인 scope 집합(`JKi = xo([...Qag,...LUe])`,
-# xo=Set 중복 제거)과 정확히 일치시킨다. 개인(Pro/Max)·조직 계정 모두 이 집합으로
-# 승인된다(2026-08-10 실측). 순서·구성은 바이너리와 맞춘 값이므로 임의 변경 금지.
-# 주의: 과거 "Invalid request format"의 원인은 scope가 아니라 state 길이였다
-# (PkceFlowStore.create 참고).
-OAUTH_SCOPES = (
-    "org:create_api_key user:profile user:inference "
-    "user:sessions:claude_code user:mcp_servers user:file_upload"
-)
+@dataclass(frozen=True)
+class OauthProfile:
+    """Per-provider OAuth endpoint set. Values are public, not secrets."""
+
+    token_url: str
+    authorize_url: str
+    redirect_uri: str
+    client_id: str
+    scopes: str
+
+
+# One profile per account provider. Today only "claude"; "codex" arrives with
+# its driver (P2b). Callers reach these values through profile_for() rather than
+# referencing a provider's constants directly.
+OAUTH_PROFILES: dict[str, OauthProfile] = {
+    "claude": OauthProfile(
+        token_url="https://platform.claude.com/v1/oauth/token",
+        authorize_url="https://claude.com/cai/oauth/authorize",
+        redirect_uri="https://platform.claude.com/oauth/code/callback",
+        client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        # Claude Code 2.1.226 바이너리의 기본 로그인 scope 집합(`JKi = xo([...Qag,...LUe])`,
+        # xo=Set 중복 제거)과 정확히 일치시킨다. 개인(Pro/Max)·조직 계정 모두 이 집합으로
+        # 승인된다(2026-08-10 실측). 순서·구성은 바이너리와 맞춘 값이므로 임의 변경 금지.
+        # 주의: 과거 "Invalid request format"의 원인은 scope가 아니라 state 길이였다
+        # (PkceFlowStore.create 참고).
+        scopes=(
+            "org:create_api_key user:profile user:inference "
+            "user:sessions:claude_code user:mcp_servers user:file_upload"
+        ),
+    ),
+}
+
+
+def profile_for(provider: str) -> OauthProfile:
+    profile = OAUTH_PROFILES.get(provider)
+    if profile is None:
+        raise bad_request(
+            "oauth.provider_unsupported",
+            f"No OAuth profile for provider '{provider}'. Supported: "
+            f"{', '.join(OAUTH_PROFILES)}.",
+        )
+    return profile
+
 
 _logger = logging.getLogger("ams.oauth")
 
@@ -62,6 +92,9 @@ class PkceFlow:
     state: str
     expires_at: datetime
     label: str | None = None
+    # 시작 시점에 검증된 provider를 complete까지 운반한다 — 여기 없으면
+    # complete가 무조건 claude 계정을 만드는 불일치가 생긴다(P2a 리뷰 H1).
+    provider: str = "claude"
 
 
 class PkceFlowStore:
@@ -77,12 +110,15 @@ class PkceFlowStore:
         self._flows: dict[str, PkceFlow] = {}
         self._lock = threading.Lock()
 
-    def create(self, tenant_id: uuid.UUID, ttl_seconds: int, label: str | None) -> PkceFlow:
+    def create(
+        self, tenant_id: uuid.UUID, ttl_seconds: int, label: str | None, provider: str = "claude"
+    ) -> PkceFlow:
         verifier = _b64url(secrets.token_bytes(32))
         flow = PkceFlow(
             flow_id="flow_" + secrets.token_urlsafe(16),
             tenant_id=tenant_id,
             verifier=verifier,
+            provider=provider,
             # 32바이트 필수: claude.ai 승인 API는 16바이트(22자) state를
             # "Invalid request format"으로 거부한다. Claude Code CLI와 동일하게
             # 32바이트(43자 base64url)를 쓴다 (2026-08-10 브라우저 이분법으로 실측).
@@ -129,17 +165,18 @@ def challenge_for(verifier: str) -> str:
 
 
 def authorize_url(flow: PkceFlow) -> str:
+    profile = profile_for(flow.provider)
     params = {
         "code": "true",
-        "client_id": OAUTH_CLIENT_ID,
+        "client_id": profile.client_id,
         "response_type": "code",
-        "redirect_uri": OAUTH_REDIRECT_URI,
-        "scope": OAUTH_SCOPES,
+        "redirect_uri": profile.redirect_uri,
+        "scope": profile.scopes,
         "code_challenge": challenge_for(flow.verifier),
         "code_challenge_method": "S256",
         "state": flow.state,
     }
-    return f"{OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
+    return f"{profile.authorize_url}?{urlencode(params)}"
 
 
 def split_pasted_code(pasted: str) -> tuple[str, str | None]:
@@ -153,7 +190,11 @@ def split_pasted_code(pasted: str) -> tuple[str, str | None]:
 
 
 def exchange_code(
-    flow: PkceFlow, pasted_code: str, *, timeout_s: float, client: httpx.Client | None = None
+    flow: PkceFlow,
+    pasted_code: str,
+    *,
+    timeout_s: float,
+    client: httpx.Client | None = None,
 ) -> dict:
     """Trade an authorization code for the complete credential set.
 
@@ -162,6 +203,7 @@ def exchange_code(
     cannot tell the credential from a local login (§5.5), and why the retired
     setup-token path failed (§2.4-5).
     """
+    profile = profile_for(flow.provider)
     code, state = split_pasted_code(pasted_code)
     if not code:
         raise bad_request("oauth.missing_code", "No authorization code supplied.")
@@ -169,8 +211,8 @@ def exchange_code(
     payload = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": OAUTH_REDIRECT_URI,
-        "client_id": OAUTH_CLIENT_ID,
+        "redirect_uri": profile.redirect_uri,
+        "client_id": profile.client_id,
         "code_verifier": flow.verifier,
         "state": state or flow.state,
     }
@@ -179,7 +221,7 @@ def exchange_code(
     client = client or httpx.Client(timeout=timeout_s)
     try:
         response = client.post(
-            OAUTH_TOKEN_URL,
+            profile.token_url,
             json=payload,
             headers={"Content-Type": "application/json", "User-Agent": "ams-server/0.1"},
         )

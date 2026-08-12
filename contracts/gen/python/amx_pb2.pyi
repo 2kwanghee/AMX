@@ -53,14 +53,16 @@ ENCRYPTION_ALGORITHM_UNSPECIFIED: EncryptionAlgorithm
 ENCRYPTION_ALGORITHM_AES_256_GCM: EncryptionAlgorithm
 
 class AccountRef(_message.Message):
-    __slots__ = ("ams_account_id", "email", "account_uuid")
+    __slots__ = ("ams_account_id", "email", "account_uuid", "provider")
     AMS_ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
     EMAIL_FIELD_NUMBER: _ClassVar[int]
     ACCOUNT_UUID_FIELD_NUMBER: _ClassVar[int]
+    PROVIDER_FIELD_NUMBER: _ClassVar[int]
     ams_account_id: str
     email: str
     account_uuid: str
-    def __init__(self, ams_account_id: _Optional[str] = ..., email: _Optional[str] = ..., account_uuid: _Optional[str] = ...) -> None: ...
+    provider: str
+    def __init__(self, ams_account_id: _Optional[str] = ..., email: _Optional[str] = ..., account_uuid: _Optional[str] = ..., provider: _Optional[str] = ...) -> None: ...
 
 class EncryptedCredential(_message.Message):
     __slots__ = ("algorithm", "ciphertext", "nonce", "key_id", "aad_ams_account_id", "aad_agent_id")
