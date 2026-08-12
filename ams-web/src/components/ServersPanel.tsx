@@ -8,6 +8,7 @@ import type {
   AssignmentPage,
   EnrollTokenResponse,
   EventPage,
+  SelfUpdateStatus,
   Server,
   ServerPage,
   ServerUpdate,
@@ -186,8 +187,10 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
                 <td className="num mono">{fmtPct(s.diskPct)}</td>
                 <td><TimeCell iso={s.lastSeenAt} /></td>
                 <td>
-                  <div className="actions">
+                  <div className="actions row-actions">
                     <button
+                      className="tile-btn"
+                      title={s.switchMode === 'auto' ? '수동 전환으로' : '자동 전환으로'}
                       disabled={act.busy}
                       onClick={() =>
                         act.run(
@@ -196,15 +199,28 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
                         )
                       }
                     >
-                      {s.switchMode === 'auto' ? '수동 전환으로' : '자동 전환으로'}
+                      <Icon name={s.switchMode === 'auto' ? 'hand' : 'zap'} size={15} />
                     </button>
-                    <button disabled={act.busy} onClick={() => act.run(() => api.refreshUsage(tenantId, s.id))}>
-                      사용량 갱신
-                    </button>
-                    <button onClick={() => setUsageOf(s)}>사용량</button>
-                    <button onClick={() => setEventsOf(s)}>이벤트</button>
-                    <button onClick={() => setPolicyOf(s)}>정책</button>
                     <button
+                      className="tile-btn"
+                      title="사용량 갱신"
+                      disabled={act.busy}
+                      onClick={() => act.run(() => api.refreshUsage(tenantId, s.id))}
+                    >
+                      <Icon name="refresh" size={15} />
+                    </button>
+                    <button className="tile-btn" title="사용량" onClick={() => setUsageOf(s)}>
+                      <Icon name="gauge" size={15} />
+                    </button>
+                    <button className="tile-btn" title="이벤트" onClick={() => setEventsOf(s)}>
+                      <Icon name="activity" size={15} />
+                    </button>
+                    <button className="tile-btn" title="정책" onClick={() => setPolicyOf(s)}>
+                      <Icon name="sliders" size={15} />
+                    </button>
+                    <button
+                      className="tile-btn"
+                      title="등록 토큰"
                       disabled={act.busy}
                       onClick={() =>
                         act.run(async () => {
@@ -213,17 +229,18 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
                         })
                       }
                     >
-                      등록 토큰
+                      <Icon name="key" size={15} />
                     </button>
-                    <button disabled={act.busy} onClick={() => setUpdateOf(s)}>
-                      에이전트 업데이트
+                    <button className="tile-btn" title="에이전트 업데이트" disabled={act.busy} onClick={() => setUpdateOf(s)}>
+                      <Icon name="rotate" size={15} />
                     </button>
                     <button
-                      className="danger"
+                      className="tile-btn danger"
+                      title="삭제"
                       disabled={act.busy}
                       onClick={() => act.run(() => api.deleteServer(tenantId, s.id), () => mutate())}
                     >
-                      삭제
+                      <Icon name="trash" size={15} />
                     </button>
                   </div>
                 </td>
@@ -250,7 +267,13 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
           onDone={() => { setPolicyOf(null); mutate(); }}
         />
       )}
-      {updateOf && <SelfUpdateModal tenantId={tenantId} server={updateOf} onClose={() => setUpdateOf(null)} />}
+      {updateOf && (
+        <SelfUpdateModal
+          tenantId={tenantId}
+          server={servers.find((x) => x.id === updateOf.id) ?? updateOf}
+          onClose={() => setUpdateOf(null)}
+        />
+      )}
       {tokenOf && (
         <Modal title="등록 토큰 (한 번만 표시)" onClose={() => setTokenOf(null)}>
           <p className="muted">지금 복사하세요 — 다시 조회할 수 없습니다.</p>
@@ -265,10 +288,21 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
   );
 }
 
-// SelfUpdate 2단계 — 에이전트를 최신 코드로 자체 업데이트하도록 명령한다. 진행
-// 상태는 별도 추적하지 않고, 명령 전송 후에는 기존 servers 폴링이 status(잠깐
-// offline→online)와 agentVersion(커밋 해시 변경)으로 결과를 드러낸다. 실패 시
-// self_update_failed 경보가 AlertsPanel에 뜬다.
+// SelfUpdate 2단계 — 에이전트를 최신 코드로 자체 업데이트하도록 명령한다. 에이전트는
+// % 진행률을 보고하지 않으므로 단계는 명령 상태(queued→sent→acked/failed)와 servers
+// 폴링에서 파생한다: 실행 직후 self-update-status를 2초 주기로 폴링(모달 로컬 SWR 키)
+// 하고, acked 이후 servers 폴링에서 lastSeenAt/agentVersion이 바뀌면 완료로 본다. 진행
+// 바는 단계 기반(20/40/60/80/100%)이며 연속 %는 만들지 않는다. 실패 시 detail의
+// error_code를 노출하고 self_update_failed 경보가 AlertsPanel에 뜬다. 모달을 닫아도
+// 무해하다 — 상태는 서버에서 재파생되고, 다시 열면 실행 버튼부터 시작한다.
+const SU_STAGES = ['명령 전송됨', '에이전트 수신', '적용 중 · pull·빌드·교체', '적용 완료 · 재시작 중', '완료'];
+const SU_DELAY_MS = 10 * 60 * 1000;
+
+function fmtElapsed(ms: number) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}초` : `${Math.floor(s / 60)}분 ${s % 60}초`;
+}
+
 function SelfUpdateModal({
   tenantId,
   server,
@@ -280,6 +314,44 @@ function SelfUpdateModal({
 }) {
   const act = useAction();
   const [sent, setSent] = useState(false);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const now = useNow(1000);
+
+  const { data: st } = useSWR<SelfUpdateStatus>(
+    sent ? ['self-update-status', tenantId, server.id] : null,
+    () => api.getSelfUpdateStatus(tenantId, server.id),
+    { refreshInterval: 2000 },
+  );
+
+  const status = st?.status ?? null;
+  const failed = status === 'failed';
+  // Stage 5 (완료): ack 이후의 하트비트(lastSeenAt > ackedAt)만이 exec 재시작 후
+  // 재접속을 증명한다. lastSeenAt은 평상시에도 매 하트비트마다 갱신되므로
+  // "전송 시점과 다르다" 비교로는 재시작을 판정할 수 없다.
+  const completed =
+    status === 'acked' &&
+    !!st?.ackedAt &&
+    !!server.lastSeenAt &&
+    Date.parse(server.lastSeenAt) > Date.parse(st.ackedAt);
+
+  // Current 0-based stage. sent covers both "수신" and "적용 중"; the applying
+  // step is highlighted since the agent reports no distinct received signal.
+  let stage = 0;
+  if (status === 'sent') stage = 2;
+  if (status === 'acked') stage = 3;
+  if (completed) stage = 4;
+  const pct = sent ? [20, 40, 60, 80, 100][stage] : 0;
+
+  const sentAtMs = st?.sentAt ? Date.parse(st.sentAt) : null;
+  const applyElapsed = status === 'sent' && sentAtMs ? now - sentAtMs : null;
+  const delayed =
+    sent && !completed && !failed && startedAt !== null && now - startedAt > SU_DELAY_MS;
+
+  function start() {
+    setStartedAt(Date.now());
+    act.run(() => api.serverSelfUpdate(tenantId, server.id), () => setSent(true));
+  }
+
   return (
     <Modal title={`에이전트 업데이트 — ${server.name}`} onClose={onClose}>
       <p>
@@ -289,17 +361,47 @@ function SelfUpdateModal({
         현재 버전 <span className="mono">{server.agentVersion || '알 수 없음'}</span>
       </p>
       {act.error && <p className="err">{act.error}</p>}
-      {sent ? (
-        <p style={{ marginTop: 14 }}>업데이트 명령 전송됨 — 폴링으로 상태·버전이 곧 갱신됩니다.</p>
-      ) : (
-        <button
-          className="primary"
-          style={{ marginTop: 14 }}
-          disabled={act.busy}
-          onClick={() => act.run(() => api.serverSelfUpdate(tenantId, server.id), () => setSent(true))}
-        >
+      {!sent ? (
+        <button className="primary" style={{ marginTop: 14 }} disabled={act.busy} onClick={start}>
           업데이트 실행
         </button>
+      ) : (
+        <div className="su-progress">
+          <div className="su-bar">
+            <div className={`su-bar-fill ${failed ? 'failed' : ''}`} style={{ width: `${failed ? 100 : pct}%` }} />
+          </div>
+          <ol className="su-steps">
+            {SU_STAGES.map((label, i) => {
+              const cls = completed || i < stage ? 'done' : i === stage && !failed ? 'active' : '';
+              return (
+                <li key={i} className={`su-step ${cls}`}>
+                  <span className="su-dot" aria-hidden="true" />
+                  <span>
+                    {label}
+                    {i === 2 && applyElapsed !== null && (
+                      <span className="muted mono"> · {fmtElapsed(applyElapsed)} 경과</span>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+          {failed && (
+            <p className="err" style={{ marginTop: 10 }}>
+              업데이트 실패{st?.detail ? ` — ${st.detail}` : ''}. 알림 패널을 확인하세요.
+            </p>
+          )}
+          {completed && (
+            <p style={{ marginTop: 10 }}>
+              업데이트 완료 — 현재 버전 <span className="mono">{server.agentVersion || '알 수 없음'}</span>
+            </p>
+          )}
+          {delayed && (
+            <p className="su-warn" style={{ marginTop: 10 }}>
+              지연 — 10분이 지나도 완료되지 않았습니다. 알림 패널을 확인하세요.
+            </p>
+          )}
+        </div>
       )}
     </Modal>
   );

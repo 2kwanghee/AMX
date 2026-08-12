@@ -35,7 +35,7 @@ type Tab = 'home' | 'console' | 'servers' | 'accounts' | 'assignments' | 'alerts
 
 const MENU: { id: Tab; label: string; icon: IconName }[] = [
   { id: 'home', label: '대시보드', icon: 'grid' },
-  { id: 'console', label: '마스터 콘솔', icon: 'zap' },
+  { id: 'console', label: '상황판', icon: 'zap' },
   { id: 'servers', label: '서버', icon: 'server' },
   { id: 'accounts', label: '계정', icon: 'user' },
   { id: 'assignments', label: '할당', icon: 'link' },
@@ -44,7 +44,7 @@ const MENU: { id: Tab; label: string; icon: IconName }[] = [
 
 const TITLES: Record<Tab, string> = {
   home: '대시보드',
-  console: '마스터 콘솔',
+  console: '상황판',
   servers: '서버',
   accounts: '계정',
   assignments: '할당',

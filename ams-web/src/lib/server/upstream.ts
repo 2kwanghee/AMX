@@ -23,7 +23,7 @@ const ALLOWLIST: RegExp[] = [
   new RegExp(`^tenants/${ID}/accounts/${ID}$`),
   new RegExp(`^tenants/${ID}/servers$`),
   new RegExp(`^tenants/${ID}/servers/${ID}$`),
-  new RegExp(`^tenants/${ID}/servers/${ID}/(enroll-token|usage|events)$`),
+  new RegExp(`^tenants/${ID}/servers/${ID}/(enroll-token|usage|events|self-update-status)$`),
   new RegExp(`^tenants/${ID}/servers/${ID}:(refresh-usage|switch-mode|self-update)$`),
   new RegExp(`^tenants/${ID}/assignments$`),
   new RegExp(`^tenants/${ID}/assignments/${ID}$`),

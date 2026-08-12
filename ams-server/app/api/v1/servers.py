@@ -5,10 +5,12 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Query, Response, status
+from sqlalchemy import select
 
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.core.errors import not_found
+from app.models import AgentCommand
 from app.services import commands, inventory
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["servers"], dependencies=[TenantScope])
@@ -165,6 +167,31 @@ def self_update(
     commit = body.expected_commit if body is not None else ""
     commands.request_self_update(db, tenant_id, server_id, expected_commit=commit)
     return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.get("/servers/{server_id}/self-update-status", response_model=schemas.SelfUpdateStatus)
+def get_self_update_status(
+    tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession, principal: AdminPrincipal
+):
+    # Read-only projection of the most recent self_update command so the console
+    # can visualise its progress (queued -> sent -> acked/failed). Resolves the
+    # server first so a cross-tenant id is a 404 before any read; the query is
+    # tenant-scoped on top of that. Returns an all-null 200 when the server has
+    # never been asked to self-update.
+    inventory.get_server(db, tenant_id, server_id)
+    row = db.scalar(
+        select(AgentCommand)
+        .where(
+            AgentCommand.server_id == server_id,
+            AgentCommand.tenant_id == tenant_id,
+            AgentCommand.command_type == "self_update",
+        )
+        .order_by(AgentCommand.created_at.desc(), AgentCommand.id.desc())
+        .limit(1)
+    )
+    if row is None:
+        return schemas.SelfUpdateStatus()
+    return schemas.SelfUpdateStatus.model_validate(row)
 
 
 @router.post("/servers/{server_id}:switch-mode", response_model=schemas.Server)

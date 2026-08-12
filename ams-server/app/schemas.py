@@ -188,6 +188,22 @@ class SelfUpdateRequest(Wire):
     expected_commit: str = Field(default="", pattern=r"^([0-9a-fA-F]{7,40})?$")
 
 
+class SelfUpdateStatus(Wire):
+    """Read model for the latest self_update command of one server.
+
+    Projected from the most recent ``agent_commands`` row (command_type
+    ``self_update``); every field is null when the server has never been asked
+    to self-update. ``status`` follows the outbox lifecycle
+    (queued -> sent -> acked/failed); ``detail`` carries the failure error_code
+    when ``status`` is ``failed``."""
+
+    status: Literal["queued", "sent", "acked", "failed"] | None = None
+    detail: str | None = None
+    created_at: datetime | None = None
+    sent_at: datetime | None = None
+    acked_at: datetime | None = None
+
+
 # -- Assignment ---------------------------------------------------------------
 class AssignmentCreate(Wire):
     account_id: uuid.UUID
@@ -240,7 +256,17 @@ class UsageSnapshot(Wire):
 
 
 # -- Alert --------------------------------------------------------------------
-AlertKind = Literal["all_exhausted", "drift", "server_offline", "quarantine"]
+# models.ALERT_KINDS와 반드시 일치할 것 — 여기만 빠지면 해당 kind 행이 존재하는
+# 순간 알림 목록 전체가 response validation 500으로 죽는다.
+AlertKind = Literal[
+    "all_exhausted",
+    "drift",
+    "server_offline",
+    "quarantine",
+    "recall_failed",
+    "command_send_failed",
+    "self_update_failed",
+]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]
 

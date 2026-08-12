@@ -129,6 +129,17 @@ export interface EnrollTokenResponse {
   amsEndpoint?: string;
 }
 
+// Latest self_update command projection (GET …/servers/{id}/self-update-status).
+// All fields null when the server has never been asked to self-update.
+export type SelfUpdateCommandStatus = 'queued' | 'sent' | 'acked' | 'failed';
+export interface SelfUpdateStatus {
+  status: SelfUpdateCommandStatus | null;
+  detail?: string | null;
+  createdAt?: string | null;
+  sentAt?: string | null;
+  ackedAt?: string | null;
+}
+
 export interface Assignment {
   id: string;
   tenantId: string;
@@ -224,7 +235,14 @@ export interface ServerEvent {
 }
 
 // -- Alerts (design §5.6 / p4-architecture §4). Not yet in openapi; Track A. ---
-export type AlertKind = 'all_exhausted' | 'drift' | 'server_offline' | 'quarantine';
+export type AlertKind =
+  | 'all_exhausted'
+  | 'drift'
+  | 'server_offline'
+  | 'quarantine'
+  | 'recall_failed'
+  | 'command_send_failed'
+  | 'self_update_failed';
 export type AlertSeverity = 'critical' | 'warning';
 export type AlertStatus = 'open' | 'acked' | 'resolved';
 
