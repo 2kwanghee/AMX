@@ -389,7 +389,33 @@ func (b *ExecBridge) List(ctx context.Context) (*provider.ListResult, error) {
 	if err := json.Unmarshal(out, &res); err != nil {
 		return nil, fmt.Errorf("parse tsamx list --json: %w", err)
 	}
+	// Dual-record the two Claude windows into the vendor-neutral Windows list so a
+	// PR3 consumer can read every provider uniformly. The legacy FiveHour/SevenDay
+	// fields stay untouched for the current reporter.
+	for i := range res.Accounts {
+		if u := res.Accounts[i].Usage; u != nil {
+			u.Windows = claudeWindows(u)
+		}
+	}
 	return &res, nil
+}
+
+// claudeWindows projects the legacy FiveHour/SevenDay fields onto the neutral
+// Windows list, tagging each with its id and its window length in minutes
+// (5h=300, 7d=10080). Absent windows are skipped.
+func claudeWindows(u *provider.Usage) []provider.Window {
+	var out []provider.Window
+	if u.FiveHour != nil {
+		w := *u.FiveHour
+		w.Id, w.WindowMinutes = "five_hour", 300
+		out = append(out, w)
+	}
+	if u.SevenDay != nil {
+		w := *u.SevenDay
+		w.Id, w.WindowMinutes = "seven_day", 10080
+		out = append(out, w)
+	}
+	return out
 }
 
 // Status runs `tsamx status --json`. tsamx does not emit a stable top-level
