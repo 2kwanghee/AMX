@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
@@ -55,11 +55,12 @@ type harness struct {
 func newHarness(t *testing.T, kh *store.KEKHolder) *harness {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := store.Open(dir, testAgent, kh)
+	drv := claude.New()
+	st, err := store.Open(dir, testAgent, kh, drv.Fingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	credPath := filepath.Join(dir, ".credentials.json")
+	credPath := drv.CredentialPath(dir)
 	h := &harness{
 		st:       st,
 		bridge:   tsamx.NewFake(),
@@ -75,6 +76,7 @@ func newHarness(t *testing.T, kh *store.KEKHolder) *harness {
 		Bridge:           h.bridge,
 		Engine:           h.engine,
 		CredentialsPath:  credPath,
+		Fingerprint:      drv.Fingerprint,
 		ServerCredential: func() string { return "srv-cred" },
 		Send: func(u *amxv1.CredentialUpdate) bool {
 			h.mu.Lock()
@@ -280,30 +282,4 @@ func TestTickUsesEngineLock(t *testing.T) {
 		t.Fatal("engine lock still held after Tick")
 	}
 	h.engine.Unlock()
-}
-
-// TestFingerprintMirrorsTsamx pins the fingerprint scheme against tsamx
-// oauth.credential_fingerprint: refresh-token hash when present, content hash
-// otherwise, and empty only for empty input.
-func TestFingerprintMirrorsTsamx(t *testing.T) {
-	if store.CredentialFingerprint(nil) != "" {
-		t.Fatal("empty input must be empty fingerprint")
-	}
-	oauth := store.CredentialFingerprint([]byte(credV1))
-	if oauth[:7] != "sha256:" {
-		t.Fatalf("oauth credential must use refresh-token hash: %q", oauth)
-	}
-	// Same refresh token, different access token -> equal fingerprint.
-	if store.CredentialFingerprint([]byte(credV1Acc2)) != oauth {
-		t.Fatal("fingerprint must ignore access-token rotation")
-	}
-	// Different refresh token -> different fingerprint.
-	if store.CredentialFingerprint([]byte(credV2)) == oauth {
-		t.Fatal("fingerprint must change on refresh-token rotation")
-	}
-	// Non-OAuth (API key) -> content hash.
-	full := store.CredentialFingerprint([]byte(`{"apiKey":"sk-xyz"}`))
-	if full[:12] != "sha256-full:" {
-		t.Fatalf("non-oauth credential must use content hash: %q", full)
-	}
 }

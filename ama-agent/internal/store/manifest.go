@@ -52,8 +52,8 @@ type Record struct {
 	Ciphertext       []byte    `json:"ciphertext"` // sealed credential-set JSON — never logged
 	ReceivedAt       time.Time `json:"receivedAt"`
 	// Fingerprint is the stable identity hash of the sealed credential set (the
-	// refresh-token hash when present, else a content hash — CredentialFingerprint,
-	// mirroring tsamx oauth.credential_fingerprint). It is a one-way hash, NOT the
+	// provider driver's credential-identity hash, mirroring tsamx
+	// oauth.credential_fingerprint). It is a one-way hash, NOT the
 	// credential, so it lives in the plaintext metadata: the O9 credential re-sync
 	// (§5.7) compares the live on-disk fingerprint against this baseline to detect
 	// a local refresh-token rotation without decrypting the record every tick.
@@ -67,6 +67,10 @@ type Store struct {
 	path    string
 	keks    *KEKHolder
 	records map[string]*Record // keyed by amsAccountId
+	// fingerprint stamps a record's detection baseline from the plaintext being
+	// sealed. It is the provider driver's credential-identity hash (a one-way hash,
+	// never the credential), injected so the store holds no vendor knowledge.
+	fingerprint func([]byte) string
 }
 
 type manifestFile struct {
@@ -75,22 +79,27 @@ type manifestFile struct {
 }
 
 // Open loads (or initializes) the manifest at dir/manifest.enc. keks supplies
-// the in-memory KEKs; agentID binds the AAD.
-func Open(dir, agentID string, keks *KEKHolder) (*Store, error) {
+// the in-memory KEKs; agentID binds the AAD; fingerprint is the provider driver's
+// credential-identity hash used to stamp detection baselines.
+func Open(dir, agentID string, keks *KEKHolder, fingerprint func([]byte) string) (*Store, error) {
 	if agentID == "" {
 		return nil, errors.New("store: empty agentID")
 	}
 	if keks == nil {
 		return nil, errors.New("store: nil KEK holder")
 	}
+	if fingerprint == nil {
+		return nil, errors.New("store: nil fingerprint func")
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	s := &Store{
-		agentID: agentID,
-		path:    filepath.Join(dir, ManifestFileName),
-		keks:    keks,
-		records: make(map[string]*Record),
+		agentID:     agentID,
+		path:        filepath.Join(dir, ManifestFileName),
+		keks:        keks,
+		records:     make(map[string]*Record),
+		fingerprint: fingerprint,
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -164,7 +173,7 @@ func (s *Store) Upsert(rec Record, plaintextCred []byte) error {
 	rec.Ciphertext = ct
 	// Stamp the identity fingerprint from the plaintext being sealed so every
 	// writer (deliver AND re-sync) leaves a correct detection baseline (§5.7).
-	rec.Fingerprint = CredentialFingerprint(plaintextCred)
+	rec.Fingerprint = s.fingerprint(plaintextCred)
 	if rec.ReceivedAt.IsZero() {
 		rec.ReceivedAt = time.Now().UTC()
 	}
@@ -212,7 +221,7 @@ func (s *Store) UpdateBaseline(amsAccountID string, plaintextCred []byte) error 
 	r.KeyID = keyID
 	r.Nonce = nonce
 	r.Ciphertext = ct
-	r.Fingerprint = CredentialFingerprint(plaintextCred)
+	r.Fingerprint = s.fingerprint(plaintextCred)
 	return s.persist()
 }
 

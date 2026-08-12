@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
@@ -49,7 +50,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	dir := t.TempDir()
 	keks := store.NewKEKHolder()
-	st, err := store.Open(dir, testAgentID, keks)
+	st, err := store.Open(dir, testAgentID, keks, claude.New().Fingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +500,7 @@ func TestServerCredentialPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	build := func() *Handler {
 		keks := store.NewKEKHolder()
-		st, err := store.Open(dir, testAgentID, keks)
+		st, err := store.Open(dir, testAgentID, keks, claude.New().Fingerprint)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -630,7 +631,7 @@ func TestSessionSetupNoSessionKeyRejected(t *testing.T) {
 	}
 	dir := t.TempDir()
 	keks := store.NewKEKHolder()
-	st, err := store.Open(dir, testAgentID, keks)
+	st, err := store.Open(dir, testAgentID, keks, claude.New().Fingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}

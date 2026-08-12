@@ -1,7 +1,8 @@
 // Package tsamx bridges the AMA daemon to the tsamx CLI (design note §6, SSOT
 // §6.3). All effects go through the Bridge interface so tests use a fake and
 // never exec the real CLI. The exec implementation runs against the agent's own
-// CLAUDE_CONFIG_DIR / XDG_DATA_HOME and parses `--json` output.
+// provider config home / XDG_DATA_HOME (the config home is resolved by the
+// injected provider.Driver) and parses `--json` output.
 package tsamx
 
 import "context"
@@ -10,15 +11,15 @@ import "context"
 // is the plaintext OAuth credential set — it MUST NEVER be logged (§7).
 //
 // `tsamx add` takes no account argument: it captures whichever account the
-// Claude config home currently holds. AccountUUID and OrganizationName are the
-// identity tsamx reads out of that home's `.claude.json`, so the bridge has to
-// stage them alongside the credential before invoking the verb.
+// config home currently holds. AccountUUID and OrganizationName are the identity
+// the driver stages into that home before the verb runs, so the bridge passes
+// them through to Driver.StageCredential as neutral AddMeta.
 type AddRequest struct {
 	Email            string
 	AccountUUID      string
 	OrganizationName string
 	CredentialJSON   []byte
-	ConfigDir        string // overrides the bridge's CLAUDE_CONFIG_DIR for this call
+	ConfigDir        string // overrides the bridge's config home for this call
 	DataHome         string // overrides the bridge's XDG_DATA_HOME for this call
 	Enable           bool   // true -> leave enabled (rotation candidate); false -> disable
 }

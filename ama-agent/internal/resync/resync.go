@@ -8,7 +8,7 @@
 // re-encrypt and deliver the current copy.
 //
 // Detection is fingerprint-based: each tick computes the identity fingerprint of
-// the live on-disk credential (refresh-token hash — CredentialFingerprint,
+// the live on-disk credential (the provider driver's credential-identity hash,
 // identical to tsamx oauth.credential_fingerprint) and compares it against the
 // baseline stamped on the manifest record by the last seal. A difference means a
 // rotation; the record's baseline is advanced only after AMS accepts the push,
@@ -45,9 +45,12 @@ type Config struct {
 	// (tsamx add/switch) rewriting it. Never nil in production; a nil falls back to
 	// a private mutex (tests without a scheduler).
 	Engine *sync.Mutex
-	// CredentialsPath is the live active-account credential file
-	// (CLAUDE_CONFIG_DIR/.credentials.json). Empty disables re-sync.
+	// CredentialsPath is the live active-account credential file (the provider
+	// driver's credential path under the config home). Empty disables re-sync.
 	CredentialsPath string
+	// Fingerprint is the provider driver's credential-identity hash, used to detect
+	// a local rotation against the manifest baseline. Never nil.
+	Fingerprint func([]byte) string
 	// ServerCredential returns the long-lived session credential presented on the
 	// wire (CredentialUpdate.server_credential). Never nil.
 	ServerCredential func() string
@@ -62,16 +65,17 @@ type Config struct {
 // Resyncer detects a local refresh-token rotation and pushes the refreshed
 // credential set to AMS.
 type Resyncer struct {
-	agentID    string
-	store      *store.Store
-	keks       *store.KEKHolder
-	bridge     tsamx.Bridge
-	engine     *sync.Mutex
-	credPath   string
-	serverCred func() string
-	send       func(*amxv1.CredentialUpdate) bool
-	now        func() time.Time
-	logf       func(string, ...any)
+	agentID     string
+	store       *store.Store
+	keks        *store.KEKHolder
+	bridge      tsamx.Bridge
+	engine      *sync.Mutex
+	credPath    string
+	fingerprint func([]byte) string
+	serverCred  func() string
+	send        func(*amxv1.CredentialUpdate) bool
+	now         func() time.Time
+	logf        func(string, ...any)
 }
 
 // New validates cfg and returns a Resyncer.
@@ -89,23 +93,24 @@ func New(cfg Config) *Resyncer {
 		logf = func(string, ...any) {}
 	}
 	return &Resyncer{
-		agentID:    cfg.AgentID,
-		store:      cfg.Store,
-		keks:       cfg.KEKs,
-		bridge:     cfg.Bridge,
-		engine:     engine,
-		credPath:   cfg.CredentialsPath,
-		serverCred: cfg.ServerCredential,
-		send:       cfg.Send,
-		now:        now,
-		logf:       logf,
+		agentID:     cfg.AgentID,
+		store:       cfg.Store,
+		keks:        cfg.KEKs,
+		bridge:      cfg.Bridge,
+		engine:      engine,
+		credPath:    cfg.CredentialsPath,
+		fingerprint: cfg.Fingerprint,
+		serverCred:  cfg.ServerCredential,
+		send:        cfg.Send,
+		now:         now,
+		logf:        logf,
 	}
 }
 
 // Tick runs one detect-and-maybe-push cycle. It is safe to call on a ticker; a
 // tick with nothing to do is cheap (a Status read, a file read, one hash).
 func (r *Resyncer) Tick(ctx context.Context) {
-	if r == nil || r.credPath == "" || r.store == nil || r.keks == nil || r.bridge == nil || r.send == nil {
+	if r == nil || r.credPath == "" || r.store == nil || r.keks == nil || r.bridge == nil || r.send == nil || r.fingerprint == nil {
 		return
 	}
 	upd, plaintext, rec, ok := r.detect(ctx)
@@ -167,7 +172,7 @@ func (r *Resyncer) detect(ctx context.Context) (*amxv1.CredentialUpdate, []byte,
 		// change — that would push an empty credential).
 		return nil, nil, store.Record{}, false
 	}
-	if store.CredentialFingerprint(plaintext) == rec.Fingerprint {
+	if r.fingerprint(plaintext) == rec.Fingerprint {
 		wipe(plaintext) // unchanged: no rotation since the last seal
 		return nil, nil, store.Record{}, false
 	}

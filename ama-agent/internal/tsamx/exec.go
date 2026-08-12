@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
 // deliverLockName is the file flock'd for the deliver critical section (B1b). It
@@ -27,24 +29,24 @@ const deliverLockMaxWait = 5 * time.Second
 // deliverLockRetryInterval is the poll gap between non-blocking flock attempts.
 const deliverLockRetryInterval = 50 * time.Millisecond
 
-// EnvBinary names the tsamx executable when it is not on PATH (a venv shim, a
-// uv-managed install). Read once by NewExecBridge.
-const EnvBinary = "AMX_TSAMX_BIN"
-
-// ExecBridge runs the real tsamx CLI against one Claude config home — the
+// ExecBridge runs the real tsamx CLI against one provider config home — the
 // agent's own. Isolation between AMA instances is per *server*, not per account:
-// one tsamx pool per host, so CLAUDE_CONFIG_DIR / XDG_DATA_HOME come from the
-// daemon's environment and every verb sees the same pool.
+// one tsamx pool per host, so the config home / XDG_DATA_HOME come from the
+// daemon's environment and every verb sees the same pool. All vendor-specific
+// knowledge (config-home env, credential staging, pool binary) lives in Driver.
 //
 // Unit tests use Fake instead, so a real tsamx install is not a build- or
 // unit-test dependency; the E2E suite exercises this type (design note §6, §8).
 type ExecBridge struct {
-	// Binary is the tsamx executable (default $AMX_TSAMX_BIN, else "tsamx").
+	// Driver owns the vendor's credential staging, config-home env, and pool
+	// binary. NewExecBridge injects it; the bridge itself is vendor-neutral.
+	Driver provider.Driver
+	// Binary overrides the pool executable (default Driver.BinaryName()).
 	Binary string
 	// BaseEnv is the environment every invocation inherits (default os.Environ()).
 	BaseEnv []string
-	// ConfigDir is the Claude config home tsamx reads and captures from
-	// (default $CLAUDE_CONFIG_DIR). Add stages the credential set here.
+	// ConfigDir is the provider config home tsamx reads and captures from
+	// (default Driver.ConfigHome()). Add stages the credential set here.
 	ConfigDir string
 	// DataHome is the tsamx backup root's XDG base (default $XDG_DATA_HOME).
 	DataHome string
@@ -63,26 +65,27 @@ func (b *ExecBridge) lockMaxWait() time.Duration {
 	return deliverLockMaxWait
 }
 
-// NewExecBridge returns an ExecBridge configured from the daemon's environment.
-func NewExecBridge() *ExecBridge {
-	binary := os.Getenv(EnvBinary)
-	if binary == "" {
-		binary = "tsamx"
-	}
+// NewExecBridge returns an ExecBridge for the given driver, configured from the
+// daemon's environment (config home via the driver, tsamx backup root via
+// XDG_DATA_HOME).
+func NewExecBridge(driver provider.Driver) *ExecBridge {
 	return &ExecBridge{
-		Binary:    binary,
+		Driver:    driver,
 		BaseEnv:   os.Environ(),
-		ConfigDir: os.Getenv("CLAUDE_CONFIG_DIR"),
+		ConfigDir: driver.ConfigHome(),
 		DataHome:  os.Getenv("XDG_DATA_HOME"),
 		Timeout:   30 * time.Second,
 	}
 }
 
 func (b *ExecBridge) binary() string {
-	if b.Binary == "" {
-		return "tsamx"
+	if b.Binary != "" {
+		return b.Binary
 	}
-	return b.Binary
+	if b.Driver != nil {
+		return b.Driver.BinaryName()
+	}
+	return "tsamx"
 }
 
 func (b *ExecBridge) timeout() time.Duration {
@@ -106,8 +109,8 @@ func (b *ExecBridge) env(configDir, dataHome string) []string {
 		dataHome = b.DataHome
 	}
 	env := append([]string(nil), base...)
-	if configDir != "" {
-		env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
+	if configDir != "" && b.Driver != nil {
+		env = append(env, b.Driver.Env(configDir)...)
 	}
 	if dataHome != "" {
 		env = append(env, "XDG_DATA_HOME="+dataHome)
@@ -131,77 +134,29 @@ func (b *ExecBridge) run(ctx context.Context, env []string, args ...string) ([]b
 	return stdout.Bytes(), nil
 }
 
-// claudeIdentity is the subset of Claude's global config that tsamx reads to
-// name the account it is about to capture (`oauthAccount` in `.claude.json`).
-type claudeIdentity struct {
-	OAuthAccount struct {
-		EmailAddress     string `json:"emailAddress"`
-		AccountUUID      string `json:"accountUuid"`
-		OrganizationUUID string `json:"organizationUuid"`
-		OrganizationName string `json:"organizationName"`
-	} `json:"oauthAccount"`
-}
-
 // Add installs one account into the local pool (SSOT §6.3 deliver).
 //
-// `tsamx add` captures whatever account the Claude config home currently holds
-// — it takes no identifier — so the bridge first stages that home: the
-// credential set into `.credentials.json` and the identity into `.claude.json`.
-// The credential travels by file, never as an argument or a log line (§7).
-//
-// AMS carries no organization UUID for an account, so every delivered account is
-// staged as a personal one; tsamx keys slots on (email, organizationUuid) and an
-// empty UUID is its personal-account value.
+// `tsamx add` captures whatever account the config home currently holds — it
+// takes no identifier — so the bridge first has the driver stage that home
+// (credential set + identity). The credential travels by file, never as an
+// argument or a log line (§7).
 func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 	configDir := req.ConfigDir
 	if configDir == "" {
 		configDir = b.ConfigDir
 	}
 	if configDir == "" {
-		return fmt.Errorf("tsamx add %s: no Claude config home configured (set CLAUDE_CONFIG_DIR)", req.Email)
+		return fmt.Errorf("tsamx add %s: no config home configured", req.Email)
 	}
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return err
+	if b.Driver == nil {
+		return fmt.Errorf("tsamx add %s: no provider driver configured", req.Email)
 	}
-	// Write both files atomically (temp in the same dir + rename). The runner
-	// (Claude Code) reads these concurrently; a non-atomic os.WriteFile could be
-	// observed half-written, so an in-flight runner request would read a torn
-	// credential. os.Rename is atomic on the same filesystem.
-	if err := writeFileAtomic(filepath.Join(configDir, ".credentials.json"), req.CredentialJSON, 0o600); err != nil {
-		return err
+	meta := provider.AddMeta{
+		Email:            req.Email,
+		AccountUUID:      req.AccountUUID,
+		OrganizationName: req.OrganizationName,
 	}
-	var identity claudeIdentity
-	identity.OAuthAccount.EmailAddress = req.Email
-	identity.OAuthAccount.AccountUUID = req.AccountUUID
-	identity.OAuthAccount.OrganizationName = req.OrganizationName
-
-	// Merge into the existing .claude.json rather than replacing it: the runner
-	// (Claude Code) keeps its own state there (machineID, firstStartTime, …), and
-	// `hasCompletedOnboarding` + `theme` are load-bearing — claude shows the
-	// onboarding/login screen when `!config.theme || !config.hasCompletedOnboarding`,
-	// so a staged home without them demands a browser login even though the
-	// credential file is complete (2026-08-10 실측; tsamx session.py seeds the
-	// same two keys on its own capture path).
-	configPath := filepath.Join(configDir, ".claude.json")
-	config := map[string]json.RawMessage{}
-	if raw, rerr := os.ReadFile(configPath); rerr == nil {
-		// A corrupt file degrades to a fresh map — same failure mode as before.
-		_ = json.Unmarshal(raw, &config)
-	}
-	oauthBlob, err := json.Marshal(identity.OAuthAccount)
-	if err != nil {
-		return err
-	}
-	config["oauthAccount"] = oauthBlob
-	config["hasCompletedOnboarding"] = json.RawMessage("true")
-	if _, ok := config["theme"]; !ok {
-		config["theme"] = json.RawMessage(`"dark"`)
-	}
-	blob, err := json.Marshal(config)
-	if err != nil {
-		return err
-	}
-	if err := writeFileAtomic(configPath, blob, 0o600); err != nil {
+	if err := b.Driver.StageCredential(configDir, req.CredentialJSON, meta); err != nil {
 		return err
 	}
 
@@ -217,55 +172,17 @@ func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
 	return b.Disable(ctx, req.Email)
 }
 
-// writeFileAtomic writes data to a temp file in the same directory as path and
-// renames it into place, so a concurrent reader (the runner) never observes a
-// partial write. The temp file is created 0o600 and the final file carries perm;
-// on any failure before the rename the temp file is removed. Never logs data.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".amx-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	// Best-effort cleanup unless the rename below claims the temp file.
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	tmpName = "" // renamed into place; skip cleanup
-	return nil
-}
-
 // lockConfigHome resolves the config home the deliver lock lives in. It mirrors
-// the amx-claude wrapper's default (CLAUDE_CONFIG_DIR, else ~/.claude) so both
-// sides flock the SAME file even when the daemon has no explicit ConfigDir —
-// otherwise the flock would be silently ineffective (B1b review item 3).
+// the vendor runner wrapper's default (the bridge's config home, else the
+// driver's conventional home) so both sides flock the SAME file even when the
+// daemon has no explicit ConfigDir — otherwise the flock would be silently
+// ineffective (B1b review item 3).
 func (b *ExecBridge) lockConfigHome() string {
 	if b.ConfigDir != "" {
 		return b.ConfigDir
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".claude")
+	if b.Driver != nil {
+		return b.Driver.DefaultConfigHome()
 	}
 	return ""
 }
