@@ -139,13 +139,31 @@ message UsageWindow {
   google.protobuf.Timestamp resets_at = 2;
 }
 
+// Provider-generalized utilization window (P2b). Unlike UsageWindow, which is
+// positional (five_hour / seven_day), a QuotaWindow is self-describing: `id` is
+// a provider-local key and `window_minutes` gives the span so consumers can
+// label and order windows without hardcoding a provider's window set.
+// claude ids: "five_hour" (window_minutes=300), "seven_day" (=10080).
+message QuotaWindow {
+  string id = 1;                               // provider-local key
+  double pct = 2;                              // 0.0 – 100.0
+  google.protobuf.Timestamp resets_at = 3;
+  int32 window_minutes = 4;                    // window span in minutes
+}
+
 message AccountUsage {
   AccountRef account = 1;
   AllocationStatus allocation_status = 2;
   bool is_current = 3;  // holds ~/.claude/.credentials.json right now (D2 single active)
+  // five_hour/seven_day are the legacy positional windows. During the P2b
+  // migration they are dual-recorded alongside `windows` below; a later PR (PR4)
+  // removes them once all consumers read `windows`. Do not drop them here.
   UsageWindow five_hour = 4;
   UsageWindow seven_day = 5;
   google.protobuf.Timestamp usage_fetched_at = 6;  // freshness of the tsamx cache entry
+  // Generalized window list. For claude this carries the same data as
+  // five_hour/seven_day (dual-recorded), ordered by window_minutes ascending.
+  repeated QuotaWindow windows = 7;
 }
 
 // Aggregate pool health (§6.5 poolSummary).

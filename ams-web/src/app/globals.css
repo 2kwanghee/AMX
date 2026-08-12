@@ -809,3 +809,9 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 @media (max-width: 860px) {
   .topo-grid3 { grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr); gap: 40px; }
 }
+
+/* 사용량 모달 — 계정 행 아래 창별 사용률(P2b QuotaWindow). 소형 인라인 표시. */
+.usage-windows-row td { padding-top: 0; border-top: 0; }
+.usage-windows { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 2px 0 6px 16px; }
+.usage-window { display: inline-flex; align-items: baseline; gap: 6px; font-size: 12px; color: var(--muted); }
+.usage-window .uw-pct { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }

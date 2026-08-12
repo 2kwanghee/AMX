@@ -290,17 +290,48 @@ export interface UsageWindow {
   resetsAt: Date | undefined;
 }
 
+/**
+ * Provider-generalized utilization window (P2b). Unlike UsageWindow, which is
+ * positional (five_hour / seven_day), a QuotaWindow is self-describing: `id` is
+ * a provider-local key and `window_minutes` gives the span so consumers can
+ * label and order windows without hardcoding a provider's window set.
+ * claude ids: "five_hour" (window_minutes=300), "seven_day" (=10080).
+ */
+export interface QuotaWindow {
+  /** provider-local key */
+  id: string;
+  /** 0.0 – 100.0 */
+  pct: number;
+  resetsAt:
+    | Date
+    | undefined;
+  /** window span in minutes */
+  windowMinutes: number;
+}
+
 export interface AccountUsage {
   account: AccountRef | undefined;
   allocationStatus: AllocationStatus;
   /** holds ~/.claude/.credentials.json right now (D2 single active) */
   isCurrent: boolean;
+  /**
+   * five_hour/seven_day are the legacy positional windows. During the P2b
+   * migration they are dual-recorded alongside `windows` below; a later PR (PR4)
+   * removes them once all consumers read `windows`. Do not drop them here.
+   */
   fiveHour: UsageWindow | undefined;
   sevenDay:
     | UsageWindow
     | undefined;
   /** freshness of the tsamx cache entry */
-  usageFetchedAt: Date | undefined;
+  usageFetchedAt:
+    | Date
+    | undefined;
+  /**
+   * Generalized window list. For claude this carries the same data as
+   * five_hour/seven_day (dual-recorded), ordered by window_minutes ascending.
+   */
+  windows: QuotaWindow[];
 }
 
 /** Aggregate pool health (§6.5 poolSummary). */
@@ -1409,6 +1440,122 @@ export const UsageWindow: MessageFns<UsageWindow> = {
   },
 };
 
+function createBaseQuotaWindow(): QuotaWindow {
+  return { id: "", pct: 0, resetsAt: undefined, windowMinutes: 0 };
+}
+
+export const QuotaWindow: MessageFns<QuotaWindow> = {
+  encode(message: QuotaWindow, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.pct !== 0) {
+      writer.uint32(17).double(message.pct);
+    }
+    if (message.resetsAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.resetsAt), writer.uint32(26).fork()).join();
+    }
+    if (message.windowMinutes !== 0) {
+      writer.uint32(32).int32(message.windowMinutes);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): QuotaWindow {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQuotaWindow();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.pct = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.resetsAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.windowMinutes = reader.int32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): QuotaWindow {
+    return {
+      id: isSet(object.id) ? globalThis.String(object.id) : "",
+      pct: isSet(object.pct) ? globalThis.Number(object.pct) : 0,
+      resetsAt: isSet(object.resetsAt)
+        ? fromJsonTimestamp(object.resetsAt)
+        : isSet(object.resets_at)
+        ? fromJsonTimestamp(object.resets_at)
+        : undefined,
+      windowMinutes: isSet(object.windowMinutes)
+        ? globalThis.Number(object.windowMinutes)
+        : isSet(object.window_minutes)
+        ? globalThis.Number(object.window_minutes)
+        : 0,
+    };
+  },
+
+  toJSON(message: QuotaWindow): unknown {
+    const obj: any = {};
+    if (message.id !== "") {
+      obj.id = message.id;
+    }
+    if (message.pct !== 0) {
+      obj.pct = message.pct;
+    }
+    if (message.resetsAt !== undefined) {
+      obj.resetsAt = message.resetsAt.toISOString();
+    }
+    if (message.windowMinutes !== 0) {
+      obj.windowMinutes = Math.round(message.windowMinutes);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<QuotaWindow>): QuotaWindow {
+    return QuotaWindow.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<QuotaWindow>): QuotaWindow {
+    const message = createBaseQuotaWindow();
+    message.id = object.id ?? "";
+    message.pct = object.pct ?? 0;
+    message.resetsAt = object.resetsAt ?? undefined;
+    message.windowMinutes = object.windowMinutes ?? 0;
+    return message;
+  },
+};
+
 function createBaseAccountUsage(): AccountUsage {
   return {
     account: undefined,
@@ -1417,6 +1564,7 @@ function createBaseAccountUsage(): AccountUsage {
     fiveHour: undefined,
     sevenDay: undefined,
     usageFetchedAt: undefined,
+    windows: [],
   };
 }
 
@@ -1439,6 +1587,9 @@ export const AccountUsage: MessageFns<AccountUsage> = {
     }
     if (message.usageFetchedAt !== undefined) {
       Timestamp.encode(toTimestamp(message.usageFetchedAt), writer.uint32(50).fork()).join();
+    }
+    for (const v of message.windows) {
+      QuotaWindow.encode(v!, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -1498,6 +1649,14 @@ export const AccountUsage: MessageFns<AccountUsage> = {
           message.usageFetchedAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.windows.push(QuotaWindow.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1535,6 +1694,9 @@ export const AccountUsage: MessageFns<AccountUsage> = {
         : isSet(object.usage_fetched_at)
         ? fromJsonTimestamp(object.usage_fetched_at)
         : undefined,
+      windows: globalThis.Array.isArray(object?.windows)
+        ? object.windows.map((e: any) => QuotaWindow.fromJSON(e))
+        : [],
     };
   },
 
@@ -1558,6 +1720,9 @@ export const AccountUsage: MessageFns<AccountUsage> = {
     if (message.usageFetchedAt !== undefined) {
       obj.usageFetchedAt = message.usageFetchedAt.toISOString();
     }
+    if (message.windows?.length) {
+      obj.windows = message.windows.map((e) => QuotaWindow.toJSON(e));
+    }
     return obj;
   },
 
@@ -1578,6 +1743,7 @@ export const AccountUsage: MessageFns<AccountUsage> = {
       ? UsageWindow.fromPartial(object.sevenDay)
       : undefined;
     message.usageFetchedAt = object.usageFetchedAt ?? undefined;
+    message.windows = object.windows?.map((e) => QuotaWindow.fromPartial(e)) || [];
     return message;
   },
 };

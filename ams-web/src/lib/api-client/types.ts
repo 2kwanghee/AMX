@@ -203,7 +203,11 @@ export interface UsagePayload {
     allocationStatus: string;
     isCurrent: boolean;
     accountUuid?: string;
-    usage?: { fiveHour?: { pct: number }; sevenDay?: { pct: number } };
+    usage?: {
+      fiveHour?: { pct: number };
+      sevenDay?: { pct: number };
+      windows?: Array<{ id: string; pct: number; windowMinutes?: number; resetsAt?: string }>;
+    };
   }>;
   // Reconcile drift, surfaced by ams-server (design §2, §5.4).
   drift?: Array<{ email?: string; amsAccountId?: string; detail?: string }>;

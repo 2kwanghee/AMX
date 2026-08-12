@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import type {
@@ -567,6 +567,18 @@ function EventsModal({
   );
 }
 
+// Derive a human window label from its span (P2b). claude's canonical windows
+// get fixed labels; anything else falls back to a minutes/hours/days rule, or to
+// the provider-local id when the span is unknown.
+function windowLabel(windowMinutes: number | undefined, id: string): string {
+  if (windowMinutes === undefined) return id;
+  if (windowMinutes === 300) return '5시간';
+  if (windowMinutes === 10080) return '7일';
+  if (windowMinutes >= 1440 && windowMinutes % 1440 === 0) return `${windowMinutes / 1440}일`;
+  if (windowMinutes >= 60 && windowMinutes % 60 === 0) return `${windowMinutes / 60}시간`;
+  return `${windowMinutes}분`;
+}
+
 function UsageModal({
   tenantId,
   server,
@@ -596,13 +608,32 @@ function UsageModal({
             <table>
               <thead><tr><th>이메일</th><th>상태</th><th>현재</th></tr></thead>
               <tbody>
-                {(p.accounts ?? []).map((a) => (
-                  <tr key={a.amsAccountId}>
-                    <td>{a.email}</td>
-                    <td><Badge value={a.allocationStatus} /></td>
-                    <td>{a.isCurrent ? '★' : ''}</td>
-                  </tr>
-                ))}
+                {(p.accounts ?? []).map((a) => {
+                  const windows = a.usage?.windows;
+                  return (
+                    <Fragment key={a.amsAccountId}>
+                      <tr>
+                        <td>{a.email}</td>
+                        <td><Badge value={a.allocationStatus} /></td>
+                        <td>{a.isCurrent ? '★' : ''}</td>
+                      </tr>
+                      {windows && windows.length > 0 && (
+                        <tr className="usage-windows-row">
+                          <td colSpan={3}>
+                            <div className="usage-windows">
+                              {windows.map((w) => (
+                                <div className="usage-window" key={w.id}>
+                                  <span className="uw-label">{windowLabel(w.windowMinutes, w.id)}</span>
+                                  <span className="uw-pct">{w.pct}%</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

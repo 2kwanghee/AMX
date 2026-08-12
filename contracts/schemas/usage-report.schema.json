@@ -102,6 +102,30 @@
         }
       }
     },
+    "quotaWindow": {
+      "description": "Provider-generalized utilization window (P2b). Self-describing via id + windowMinutes so consumers label/order windows without hardcoding a provider's window set. claude ids: five_hour (windowMinutes 300), seven_day (10080).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pct"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "resetsAt": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        "windowMinutes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
     "accountUsage": {
       "type": "object",
       "additionalProperties": false,
@@ -135,6 +159,13 @@
             },
             "sevenDay": {
               "$ref": "#/$defs/usageWindow"
+            },
+            "windows": {
+              "description": "Generalized window list (P2b). Dual-recorded alongside fiveHour/sevenDay during migration; ordered by windowMinutes ascending.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/quotaWindow"
+              }
             }
           }
         },
