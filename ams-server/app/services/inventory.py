@@ -10,6 +10,8 @@ data.
 
 from __future__ import annotations
 
+import base64
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -167,12 +169,21 @@ def create_account(
     credential_type: str,
     secret: str,
     provider: str = "claude",
+    owner: str | None = None,
 ) -> Account:
     get_tenant(db, tenant_id)
+    if provider == "codex":
+        _validate_codex_secret(secret)
+        # A Codex credential set is always the product of a ChatGPT OAuth login
+        # (auth_mode "chatgpt"); the request's credential_type is not trusted to
+        # describe it, so the stored value is fixed here. It also keeps
+        # mask_secret's prefix honest for the console.
+        credential_type = "oauth"
     account = Account(
         tenant_id=tenant_id,
         provider=provider,
         email=email,
+        owner=owner,
         credential_type=credential_type,
         encrypted_secret=crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db),
         secret_masked=crypto.mask_secret(credential_type, secret),
@@ -191,16 +202,163 @@ def create_account(
     return account
 
 
+# A Codex auth.json is a handful of tokens — a few kilobytes at most. The cap is
+# checked before parsing, so an oversized body never reaches the JSON parser or
+# the encryptor.
+_CODEX_SECRET_MAX_BYTES = 64 * 1024
+
+
+def _codex_invalid(detail: str):
+    """400 for a malformed Codex credential.
+
+    `detail` names the offending KEY and nothing else. This text goes back to
+    the caller and into whatever logs the response, while the payload it
+    describes holds a live refresh token — so no value from the credential may
+    appear in it (§7).
+    """
+    return bad_request("account.codex_credential_invalid", detail)
+
+
+def _reject_json_constant(literal: str):
+    """`parse_constant` hook: refuse NaN / Infinity / -Infinity.
+
+    Python's JSON parser accepts these three by extension; Go's encoding/json,
+    which the agent uses to read the staged auth.json, does not. Accepting one
+    here would store a credential that every downstream reader rejects. The
+    literal is named in the message because it can only be one of those three
+    strings — it is never credential content.
+    """
+    raise _codex_invalid(f"The credential contains a non-JSON literal: {literal}.")
+
+
+def _loads_codex_json(secret: str):
+    """`json.loads` with every failure mode turned into a 400.
+
+    Deeply nested input is the reason `RecursionError` is caught: it is not a
+    `ValueError`, it costs nothing to send (a few kilobytes of '[' passes the
+    size cap), and uncaught it is a 500.
+    """
+    try:
+        return json.loads(secret, parse_constant=_reject_json_constant)
+    except (ValueError, TypeError, RecursionError):
+        # `_reject_json_constant` raises ApiError, which is none of these and
+        # so keeps its own more specific message.
+        raise _codex_invalid(
+            "The credential is not valid JSON; supply the contents of Codex's auth.json."
+        ) from None
+
+
+def _validate_codex_secret(secret: str) -> None:
+    """Reject anything that is not a usable Codex `auth.json` before it is stored.
+
+    The agent's CodexBridge stages this blob verbatim as the runner's auth.json,
+    and a Codex session that cannot refresh is indistinguishable from a healthy
+    one until the access token expires hours later. `tokens.refresh_token` is
+    the field that decides that, so it is the one field required here. Anything
+    else in the file (auth_mode, OPENAI_API_KEY, last_refresh) varies by login
+    method and is left alone.
+
+    Everything this function rejects, it rejects BEFORE the value reaches
+    `encrypt_secret`/`mask_secret`, both of which encode strictly and would turn
+    a hostile string into a 500 rather than a 400.
+    """
+    if not isinstance(secret, str):
+        raise _codex_invalid("The credential must be the text of a Codex auth.json.")
+    try:
+        encoded_size = len(secret.encode("utf-8"))
+    except UnicodeEncodeError:
+        # Lone surrogates survive JSON parsing (\ud800 decodes to one) but blow
+        # up the strict .encode() in crypto — a 500 on caller-supplied input.
+        raise _codex_invalid(
+            "The credential contains characters that are not valid UTF-8 "
+            "(unpaired surrogate); re-export the auth.json."
+        ) from None
+    if encoded_size > _CODEX_SECRET_MAX_BYTES:
+        raise _codex_invalid(
+            f"The credential exceeds the {_CODEX_SECRET_MAX_BYTES}-byte limit for a Codex auth.json."
+        )
+    payload = _loads_codex_json(secret)
+    if not isinstance(payload, dict):
+        raise _codex_invalid("The credential must be a JSON object (Codex's auth.json).")
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        raise _codex_invalid("Missing or malformed key: tokens.")
+    refresh_token = tokens.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        raise _codex_invalid("Missing or empty key: tokens.refresh_token.")
+
+
+def _email_from_id_token(id_token: object) -> str | None:
+    """The `email` claim of a Codex id_token, or None. The signature is NOT verified.
+
+    Nothing here holds the issuer's signing key, and it does not need to: the
+    authoritative email is the one the administrator typed. This claim is used
+    for exactly one thing — refusing an auth.json that plainly belongs to some
+    other account — so an unparseable or unsigned token simply yields None and
+    the cross-check is skipped.
+    """
+    if not isinstance(id_token, str):
+        return None
+    parts = id_token.split(".")
+    if len(parts) != 3:
+        return None
+    segment = parts[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    email = claims.get("email")
+    if isinstance(email, str) and email.strip():
+        return email.strip()
+    return None
+
+
+def _apply_codex_metadata(account: Account, secret: str) -> None:
+    """Codex half of `_apply_credential_metadata`.
+
+    Lifts `tokens.account_id` into `account_uuid` (the same column Claude fills
+    from `accountUuid`) and refuses a credential whose id_token names a
+    different mailbox than the one being registered — the cheap guard against
+    pasting the wrong operator's auth.json into an account row.
+    """
+    try:
+        payload = json.loads(secret)
+    except (ValueError, TypeError, RecursionError):
+        return
+    if not isinstance(payload, dict):
+        return
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return
+    account_id = tokens.get("account_id")
+    if isinstance(account_id, str) and account_id:
+        account.account_uuid = account_id
+    claimed_email = _email_from_id_token(tokens.get("id_token"))
+    if claimed_email and account.email:
+        if claimed_email.casefold() != str(account.email).strip().casefold():
+            # Neither address is echoed: one is credential content, and quoting
+            # the other invites a caller to diff them into an oracle.
+            raise bad_request(
+                "account.codex_email_mismatch",
+                "The credential's id_token identifies a different account than "
+                "the email supplied. Check which auth.json belongs to this account.",
+            )
+
+
 def _apply_credential_metadata(account: Account, secret: str) -> None:
     """Lift the non-secret fields of a credential set onto the row.
 
     Best effort by design: an `api_key` secret is an opaque string with no
     metadata to lift, and an OAuth set from an import may be shaped differently
     from the one `:oauth-complete` builds. Failure to parse is not an error —
-    it just leaves the metadata columns empty.
+    it just leaves the metadata columns empty. The Codex branch is the one
+    exception: a parsed-but-contradictory credential is rejected there.
     """
-    import json
-
+    if account.provider == "codex":
+        _apply_codex_metadata(account, secret)
+        return
     try:
         payload = json.loads(secret)
     except (json.JSONDecodeError, TypeError):
@@ -251,13 +409,36 @@ def update_account(
     email: str | None,
     status: str | None,
     secret: str | None,
+    owner: str | None = None,
 ) -> Account:
     account = get_account(db, tenant_id, account_id)
+    if (
+        account.provider == "codex"
+        and email is not None
+        and email != account.email
+        and secret is None
+    ):
+        # Registration cross-checks the email against the id_token's claim. A
+        # bare email edit would walk the row away from the credential it was
+        # checked against, leaving the account:credential pairing unverifiable
+        # for audit. Re-point it and re-prove it in the same request.
+        raise bad_request(
+            "account.codex_email_requires_credential",
+            "Changing a Codex account's email requires the matching auth.json in "
+            "the same request, so the credential's identity can be re-checked.",
+        )
     if email is not None:
         account.email = email
     if status is not None:
         account.status = status
+    if owner is not None:
+        account.owner = owner
     if secret is not None:
+        # A rotated credential re-enters through the same door as the first one,
+        # so it faces the same check — otherwise PATCH would be a way to park an
+        # unusable auth.json on an already-registered Codex account.
+        if account.provider == "codex":
+            _validate_codex_secret(secret)
         account.encrypted_secret = crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db)
         account.secret_masked = crypto.mask_secret(account.credential_type, secret)
         _apply_credential_metadata(account, secret)
@@ -532,6 +713,48 @@ def assigned_account_count(db: Session, server_id: uuid.UUID) -> int:
 
 
 # -- Assignments --------------------------------------------------------------
+def _reject_second_codex_account(db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID) -> None:
+    """One Codex account per server — enforced here because delivery cannot.
+
+    Codex keeps its credential in a single `auth.json` under the runner's config
+    home. Delivering a second Codex account to the same server overwrites the
+    first one's file, silently unseating an account that AMS still believes is
+    delivered. The agent refuses that with `codex_single_account`, but by then
+    the assignment row already exists and the operator is looking at a failed
+    command; the contract is that AMS never creates the assignment at all.
+
+    Claude is unaffected: its accounts live side by side under distinct config
+    entries, and a server holding several of them is the normal case.
+
+    The count below is a plain SELECT, so two simultaneous POSTs would both read
+    zero and both insert. There is no unique index that can express the rule
+    (the deciding column, `provider`, lives on `accounts`, not `assignments`),
+    so the server row is locked FOR UPDATE first and held until commit: the
+    check and the insert become atomic against each other. The lock is taken
+    only on the Codex path and only on the one row, so concurrent Claude
+    assignments — and assignments to any other server — are unaffected.
+    """
+    db.execute(select(Server.id).where(Server.id == server_id).with_for_update())
+    existing = db.scalar(
+        select(func.count())
+        .select_from(Assignment)
+        .join(Account, Account.id == Assignment.account_id)
+        .where(
+            Assignment.tenant_id == tenant_id,
+            Assignment.server_id == server_id,
+            Assignment.state != "detached",
+            Account.provider == "codex",
+        )
+    )
+    if existing:
+        raise conflict(
+            "assignment.server_codex_capacity",
+            "This server already holds a Codex account. Codex stores one "
+            "credential per host, so recall the current one before assigning "
+            "another.",
+        )
+
+
 def create_assignment(
     db: Session,
     tenant_id: uuid.UUID,
@@ -543,8 +766,10 @@ def create_assignment(
     # Service-layer half of the triple defence (§7). The database enforces the
     # same rule structurally; this exists to turn it into a clean 404/409
     # instead of an IntegrityError, and to catch it before the write.
-    get_account(db, tenant_id, account_id)
+    account = get_account(db, tenant_id, account_id)
     get_server(db, tenant_id, server_id)
+    if account.provider == "codex":
+        _reject_second_codex_account(db, tenant_id, server_id)
 
     assignment = Assignment(
         tenant_id=tenant_id,

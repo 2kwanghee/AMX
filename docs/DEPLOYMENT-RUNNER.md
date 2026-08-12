@@ -135,6 +135,10 @@ GUARD_BIN_DIR=/opt/bin bash deploy/install-runner-guard.sh   # 설치 위치 변
 claude보다 앞서지 않음(강제가 무효가 됨), 쓰기 불가 시 비0으로 중단한다. PATH 순서
 경고를 무시해야 할 특수 상황은 `GUARD_ALLOW_UNORDERED=1`로 우회한다.
 
+한 번의 실행이 `claude`와 `codex` 두 진입점을 함께 처리한다. codex는 설치돼 있을
+때만 shim을 깔고, 없으면 `skip codex: not installed on this host`를 찍고 넘어간다.
+codex를 쓰는 호스트인데도 가드를 붙이고 싶지 않다면 `GUARD_SKIP_CODEX=1`을 준다.
+
 ### 검증 (설치 후 1회 + 주기 점검 겸용)
 ```sh
 AMA_USER=ama bash deploy/verify-runner-guard.sh
@@ -147,6 +151,33 @@ AMA_CLAUDE_CONFIG_DIR=/home/ama/.claude bash deploy/verify-runner-guard.sh
 `AMA_USER` 또는 `AMA_CLAUDE_CONFIG_DIR` 중 하나를 반드시 준다. cron/systemd 타이머로
 주기 실행해 드리프트(다른 HOME·컨테이너 마운트·stray `CLAUDE_CONFIG_DIR`, PATH 앞
 다른 claude 재등장)를 감시한다.
+
+### codex 러너
+
+codex도 credential이 config home의 `auth.json` 한 장에 들어가므로 §2의 과금 창이
+똑같이 열린다. 래퍼는 `deploy/amx-codex`, config home은 `CODEX_HOME`(없으면
+`AMX_CODEX_HOME`, 그것도 없으면 `~/.codex`)이고, AMA와 러너가 같은 디렉터리를
+가리켜야 flock이 성립하는 것도 claude와 같다.
+
+판정 기준만 한 가지 다르다. claude는 이 호스트에 반드시 있어야 하지만 codex는
+선택이라, PATH에 codex가 없으면 `[SKIP]`으로 넘기고 종료코드에 반영하지 않는다.
+codex가 설치돼 있는데 AMA 쪽 디렉터리를 알려주지 않은 경우도 `[WARN]`에 그친다 —
+codex 바이너리가 깔려 있다는 사실만으로 그 호스트가 Codex 계정을 받았다고 볼 수는
+없기 때문이다. 반면 codex가 래퍼를 건너뛰어 해석되거나 두 디렉터리가 실제로 어긋나면
+claude와 똑같이 `[FAIL]`이다. Codex 계정을 운영하는 호스트라면 아래처럼 codex 쪽
+경로까지 넘겨 판정을 확정지어야 한다.
+
+```sh
+AMA_USER=ama bash deploy/verify-runner-guard.sh   # ~/.claude, ~/.codex 둘 다 유도
+# 또는 명시 경로:
+AMA_CLAUDE_CONFIG_DIR=/home/ama/.claude \
+AMA_CODEX_CONFIG_DIR=/home/ama/.codex \
+  bash deploy/verify-runner-guard.sh
+```
+
+서버 한 대는 Codex 계정을 하나만 받는다. auth.json이 한 장뿐이라 두 번째 배정은
+첫 계정을 덮어쓰기 때문이고, AMS가 배정 생성 시점에 409
+(`assignment.server_codex_capacity`)로 막는다.
 
 ### 셀프테스트
 ```sh

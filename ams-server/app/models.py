@@ -199,9 +199,11 @@ class AdminSession(Base):
     )
 
 
-# Known account providers. "claude" is the only one enrolled today; "codex"
-# is planned (P2b driver + enrollment) and will be appended here then.
-PROVIDERS = ("claude",)
+# Known account providers. "claude" enrolls either by credential import or by
+# the central OAuth flow; "codex" is import-only (there is no OAuth profile for
+# it — see oauth_enroll.OAUTH_PROFILES) and its credential is a Codex
+# `auth.json`, validated in inventory._validate_codex_secret.
+PROVIDERS = ("claude", "codex")
 
 
 class Account(Base):
@@ -226,6 +228,11 @@ class Account(Base):
     secret_masked: Mapped[str | None] = mapped_column(Text, nullable=True)
     account_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
     organization_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Free-text label for whoever the account belongs to, for the console and
+    # for audit. Deliberately not a foreign key to admins: the owner is often a
+    # person or team with no login here, and an FK would make deleting that
+    # admin either fail or rewrite history.
+    owner: Mapped[str | None] = mapped_column(Text, nullable=True)
     scopes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     credential_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
