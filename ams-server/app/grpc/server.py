@@ -470,6 +470,7 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             ams_account_id=str(account.id),
             email=account.email,
             account_uuid=account.account_uuid or "",
+            provider=account.provider or "",
         )
         if ctype == "deliver":
             cmd.deliver.CopyFrom(
