@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/scheduler"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
@@ -30,7 +31,7 @@ func newHarnessBridge(t *testing.T, bridge tsamx.Bridge, engine *sync.Mutex, ob 
 	}
 	dir := t.TempDir()
 	keks := store.NewKEKHolder()
-	st, err := store.Open(dir, testAgentID, keks)
+	st, err := store.Open(dir, testAgentID, keks, claude.New().Fingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,10 +2,22 @@ package store
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
 )
+
+// testFP is a stand-in for the provider driver's fingerprint: a plain content
+// hash is enough for the store's contract (distinct creds -> distinct baselines).
+func testFP(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 func keksWith(t *testing.T, id string) *KEKHolder {
 	t.Helper()
@@ -20,7 +32,7 @@ func keksWith(t *testing.T, id string) *KEKHolder {
 func TestManifestSealOpen(t *testing.T) {
 	dir := t.TempDir()
 	keks := keksWith(t, "k1")
-	st, err := Open(dir, "ama_dev", keks)
+	st, err := Open(dir, "ama_dev", keks, testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +49,7 @@ func TestManifestSealOpen(t *testing.T) {
 		t.Fatalf("credential roundtrip mismatch")
 	}
 	// Reload from disk with the same agent id and key -> still opens.
-	st2, err := Open(dir, "ama_dev", keks)
+	st2, err := Open(dir, "ama_dev", keks, testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +63,7 @@ func TestManifestSealOpen(t *testing.T) {
 func TestAADOverBinding(t *testing.T) {
 	dir := t.TempDir()
 	keks := keksWith(t, "k1")
-	st, err := Open(dir, "agentA", keks)
+	st, err := Open(dir, "agentA", keks, testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +71,7 @@ func TestAADOverBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Same file + same KEK, but a different agent id -> AAD differs -> open fails.
-	st2, err := Open(dir, "agentB", keks)
+	st2, err := Open(dir, "agentB", keks, testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +82,7 @@ func TestAADOverBinding(t *testing.T) {
 
 func TestUpsertWithoutKEK(t *testing.T) {
 	dir := t.TempDir()
-	st, err := Open(dir, "ama_dev", NewKEKHolder())
+	st, err := Open(dir, "ama_dev", NewKEKHolder(), testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +93,7 @@ func TestUpsertWithoutKEK(t *testing.T) {
 
 func TestSetStatusAndRemove(t *testing.T) {
 	dir := t.TempDir()
-	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"))
+	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"), testFP)
 	_ = st.Upsert(Record{AMSAccountID: "acc-1", Email: "a@x.io", AllocationStatus: 2}, []byte("s"))
 	if err := st.SetStatus("acc-1", 3); err != nil {
 		t.Fatal(err)
@@ -108,7 +120,7 @@ func TestSetStatusAndRemove(t *testing.T) {
 // absent, so reconcile cannot re-inject a recalled credential.
 func TestUpdateBaselineDoesNotResurrect(t *testing.T) {
 	dir := t.TempDir()
-	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"))
+	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"), testFP)
 	if err := st.Upsert(Record{AMSAccountID: "acc-1", Email: "a@x.io", AllocationStatus: 2}, []byte("old")); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +136,7 @@ func TestUpdateBaselineDoesNotResurrect(t *testing.T) {
 		t.Fatal("record resurrected by UpdateBaseline after purge")
 	}
 	// Survives reload: nothing was persisted.
-	st2, _ := Open(dir, "ama_dev", keksWith(t, "k1"))
+	st2, _ := Open(dir, "ama_dev", keksWith(t, "k1"), testFP)
 	if _, ok := st2.Get("acc-1"); ok {
 		t.Fatal("record resurrected on disk")
 	}
@@ -135,7 +147,7 @@ func TestUpdateBaselineDoesNotResurrect(t *testing.T) {
 // recall=disable that flipped the record to inactive is not reverted to active.
 func TestUpdateBaselinePreservesStatus(t *testing.T) {
 	dir := t.TempDir()
-	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"))
+	st, _ := Open(dir, "ama_dev", keksWith(t, "k1"), testFP)
 	old := []byte(`{"refreshToken":"r-old"}`)
 	if err := st.Upsert(Record{AMSAccountID: "acc-1", Email: "a@x.io", AllocationStatus: 2}, old); err != nil {
 		t.Fatal(err)

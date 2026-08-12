@@ -19,6 +19,7 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/command"
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
 	"github.com/2kwanghee/AMX/ama-agent/internal/metrics"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/resync"
 	"github.com/2kwanghee/AMX/ama-agent/internal/scheduler"
@@ -101,8 +102,13 @@ func run() error {
 		return err
 	}
 
+	// The provider driver owns all vendor-specific credential/config-home
+	// knowledge; every other package depends only on the neutral interface. One
+	// Claude driver is wired here (the only provider today).
+	drv := claude.New()
+
 	keks := store.NewKEKHolder()
-	st, err := store.Open(stateDir, agentID, keks)
+	st, err := store.Open(stateDir, agentID, keks, drv.Fingerprint)
 	if err != nil {
 		return err
 	}
@@ -115,7 +121,7 @@ func run() error {
 		return err
 	}
 
-	bridge := tsamx.NewExecBridge()
+	bridge := tsamx.NewExecBridge(drv)
 	rep := reporter.New(agentID, bridge, time.Now)
 	// Resolve each reported account's AMS identity from the manifest (tsamx knows
 	// only the email). Without ams_account_id in the report, AMS reconcile treats
@@ -226,11 +232,12 @@ func run() error {
 
 	// O9 credential re-sync (§5.7): watch the active account's live credential for
 	// a local refresh-token rotation and push the refreshed set back to AMS. The
-	// credential file is CLAUDE_CONFIG_DIR/.credentials.json (the home the bridge
-	// stages and tsamx refreshes in place). Empty config home disables re-sync.
+	// driver resolves both the config home and the credential file within it (the
+	// home the bridge stages and tsamx refreshes in place). Empty home disables
+	// re-sync.
 	var credPath string
-	if cfgDir := os.Getenv("CLAUDE_CONFIG_DIR"); cfgDir != "" {
-		credPath = filepath.Join(cfgDir, ".credentials.json")
+	if cfgDir := drv.ConfigHome(); cfgDir != "" {
+		credPath = drv.CredentialPath(cfgDir)
 	}
 	resyncer := resync.New(resync.Config{
 		AgentID:          agentID,
@@ -239,6 +246,7 @@ func run() error {
 		Bridge:           bridge,
 		Engine:           engine,
 		CredentialsPath:  credPath,
+		Fingerprint:      drv.Fingerprint,
 		ServerCredential: handler.ServerCredential,
 		Send: func(u *amxv1.CredentialUpdate) bool {
 			return client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_CredUpdate{CredUpdate: u}})
