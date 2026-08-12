@@ -691,7 +691,16 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-node .email-text { color: var(--canvas-ink); }
 .topo-node .email-sub { color: var(--canvas-muted); }
 
-.topo-acc { }
+/* 계정 노드 — 이메일 칩(가변) + 프로바이더 태그(고정). 서버당 Codex 1계정
+   규칙이 있어 연결을 끌기 전에 어느 쪽 계정인지 보여야 한다. */
+.topo-acc { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.topo-acc .email-cell { min-width: 0; }
+.topo-prov {
+  flex: 0 0 auto; font-size: 10px; line-height: 1.7; letter-spacing: .02em; padding: 0 6px;
+  border-radius: 5px; border: 1px solid var(--canvas-border);
+  background: var(--canvas-bg-3); color: var(--canvas-muted);
+}
+.topo-prov.codex { border-color: var(--canvas-accent); color: var(--canvas-accent); background: var(--canvas-accent-soft); }
 
 /* 서버 노드 */
 .topo-srv { display: flex; flex-direction: column; gap: 10px; }
@@ -815,3 +824,10 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .usage-windows { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 2px 0 6px 16px; }
 .usage-window { display: inline-flex; align-items: baseline; gap: 6px; font-size: 12px; color: var(--muted); }
 .usage-window .uw-pct { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+/* 창의 출처 프로바이더. codex의 10080분 창과 claude의 seven_day가 같은 "7일"로
+   찍히므로, 한 화면에 섞였을 때 이 태그가 유일한 구분점이다. */
+.usage-window .uw-prov {
+  font-size: 10px; line-height: 1.6; letter-spacing: .02em; padding: 0 5px;
+  border-radius: 4px; border: 1px solid var(--border); color: var(--muted);
+  background: var(--surface-2); align-self: center;
+}

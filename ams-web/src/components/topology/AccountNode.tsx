@@ -9,6 +9,7 @@ export function AccountNode({
   id,
   email,
   status,
+  provider,
   nodeRef,
   onClick,
   onPortDown,
@@ -16,6 +17,7 @@ export function AccountNode({
   id: string;
   email: string;
   status?: string;
+  provider?: string;
   nodeRef?: Ref<HTMLButtonElement>;
   onClick?: () => void;
   onPortDown?: (e: ReactPointerEvent) => void;
@@ -35,6 +37,9 @@ export function AccountNode({
         onPointerDown={onPortDown}
       />
       <EmailChip email={email} sub={krLabel(status)} />
+      {/* 어느 프로바이더의 계정인지 — 서버당 Codex 1계정 규칙 때문에 연결 전에
+          눈으로 구분돼야 한다. */}
+      {provider && <span className={`topo-prov ${provider}`}>{krLabel(provider)}</span>}
     </button>
   );
 }

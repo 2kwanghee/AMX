@@ -27,6 +27,7 @@ import {
   SwitchModePill,
   TimeCell,
   fmtTime,
+  krLabel,
   useAction,
   useMarkOnData,
   useNow,
@@ -579,6 +580,22 @@ function windowLabel(windowMinutes: number | undefined, id: string): string {
   return `${windowMinutes}분`;
 }
 
+// 창 id는 프로바이더가 정한다 — claude는 five_hour/seven_day, codex는
+// primary/secondary(ama-agent/internal/provider/codex/bridge.go). 라벨은 창
+// 길이에서 나오므로 codex의 10080분 창이 claude의 "7일"과 글자 그대로 같아진다.
+// 한 화면에 두 프로바이더가 섞일 때 어느 쪽 창인지 구분되도록 id로 출처를
+// 되짚어 태그를 붙인다. 모르는 id는 태그 없이 둔다(잘못 단정하지 않는다).
+const WINDOW_PROVIDER: Record<string, string> = {
+  five_hour: 'claude',
+  seven_day: 'claude',
+  primary: 'codex',
+  secondary: 'codex',
+};
+
+function windowProvider(id: string): string | undefined {
+  return WINDOW_PROVIDER[id];
+}
+
 function UsageModal({
   tenantId,
   server,
@@ -621,12 +638,20 @@ function UsageModal({
                         <tr className="usage-windows-row">
                           <td colSpan={3}>
                             <div className="usage-windows">
-                              {windows.map((w) => (
-                                <div className="usage-window" key={w.id}>
-                                  <span className="uw-label">{windowLabel(w.windowMinutes, w.id)}</span>
-                                  <span className="uw-pct">{w.pct}%</span>
-                                </div>
-                              ))}
+                              {windows.map((w) => {
+                                const prov = windowProvider(w.id);
+                                return (
+                                  <div className="usage-window" key={w.id}>
+                                    {prov && (
+                                      <span className={`uw-prov ${prov}`} title={`${krLabel(prov)} 창 ${w.id}`}>
+                                        {krLabel(prov)}
+                                      </span>
+                                    )}
+                                    <span className="uw-label">{windowLabel(w.windowMinutes, w.id)}</span>
+                                    <span className="uw-pct">{w.pct}%</span>
+                                  </div>
+                                );
+                              })}
                             </div>
                           </td>
                         </tr>

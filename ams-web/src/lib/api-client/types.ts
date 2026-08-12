@@ -6,7 +6,7 @@
 export type TenantStatus = 'active' | 'suspended';
 export type AccountStatus = 'available' | 'assigned' | 'disabled' | 'quarantined';
 export type CredentialType = 'oauth' | 'api_key';
-export type Provider = 'claude';
+export type Provider = 'claude' | 'codex';
 export type ServerStatus = 'online' | 'offline' | 'degraded';
 export type SwitchMode = 'auto' | 'manual';
 export type SwitchStrategy = 'best' | 'next_available';
@@ -44,6 +44,9 @@ export interface Account {
   tenantId: string;
   provider: Provider;
   email: string;
+  // Free-text label (a person, a team) for the console and for audit; not a
+  // reference to an admin principal.
+  owner?: string | null;
   credentialType: CredentialType;
   status: AccountStatus;
   secretMasked: string;
@@ -58,12 +61,16 @@ export interface AccountCreate {
   email: string;
   provider?: Provider;
   credentialType: CredentialType;
+  // For codex this is the complete ~/.codex/auth.json; for claude oauth the
+  // credential set, for api_key the raw key. Write-only, never echoed back.
   secret: string;
+  owner?: string;
 }
 export interface AccountUpdate {
   email?: string;
   status?: AccountStatus;
   secret?: string;
+  owner?: string;
 }
 
 export interface OauthStartRequest {

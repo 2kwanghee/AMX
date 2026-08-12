@@ -6,6 +6,7 @@ import type {
   Account,
   AccountCreate,
   AccountPage,
+  AccountUpdate,
   Alert,
   AlertPage,
   Assignment,
@@ -80,6 +81,8 @@ export const api = {
   listAccounts: (t: string) => bff<AccountPage>('GET', `tenants/${t}/accounts`),
   createAccount: (t: string, b: AccountCreate) =>
     bff<Account>('POST', `tenants/${t}/accounts`, b),
+  updateAccount: (t: string, id: string, b: AccountUpdate) =>
+    bff<Account>('PATCH', `tenants/${t}/accounts/${id}`, b),
   deleteAccount: (t: string, id: string) =>
     bff<void>('DELETE', `tenants/${t}/accounts/${id}`),
   oauthStart: (t: string, b: OauthStartRequest) =>
@@ -126,6 +129,35 @@ export const api = {
   ackAlert: (t: string, id: string) =>
     bff<Alert>('POST', `tenants/${t}/alerts/${id}:ack`),
 };
+
+// -- 오류 코드 한글화 ---------------------------------------------------------
+// ams-server가 problem+json의 `code`로 내려보내는 도메인 오류를, 사용자가 다음
+// 행동을 알 수 있는 문장으로 바꾼다. 여기 없는 코드는 상류 detail을 그대로 쓴다
+// (영문일 수 있으나 정보 손실은 없다).
+const KR_API_ERROR: Record<string, string> = {
+  'account.provider_unsupported':
+    '지원하지 않는 프로바이더입니다. 현재 등록 가능한 것은 Claude와 Codex뿐입니다.',
+  'account.codex_credential_invalid':
+    'auth.json을 읽을 수 없습니다. 로컬에서 codex login으로 만들어진 ~/.codex/auth.json 전문을 그대로 붙여넣었는지 확인하세요.',
+  'account.codex_email_mismatch':
+    '붙여넣은 auth.json은 다른 계정의 자격증명입니다. 입력한 이메일과 auth.json이 같은 계정의 것인지 확인하세요.',
+  'account.codex_email_requires_credential':
+    'Codex 계정의 이메일을 바꾸려면 새 auth.json을 같은 요청에 함께 넣어야 합니다. 자격증명 칸에 바뀐 계정의 auth.json을 붙여넣으세요.',
+  'assignment.server_codex_capacity':
+    '이 서버에는 이미 Codex 계정이 연결돼 있습니다. Codex는 호스트당 자격증명을 하나만 두므로, 기존 Codex 연결을 회수한 뒤 다시 연결하세요.',
+};
+
+// 자격증명 파싱 실패만은 상류 detail을 덧붙인다. 서버가 문제된 KEY 이름만
+// 담도록 보장하므로(inventory._codex_invalid) 토큰 값이 새지 않는다.
+const KEEP_DETAIL = new Set(['account.codex_credential_invalid']);
+
+export function krApiError(e: unknown): string {
+  if (e instanceof BffError && e.code) {
+    const kr = KR_API_ERROR[e.code];
+    if (kr) return KEEP_DETAIL.has(e.code) ? `${kr} (${e.message})` : kr;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
 
 export type AssignmentActionVerb =
   | 'deliver'
