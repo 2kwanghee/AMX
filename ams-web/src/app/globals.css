@@ -691,7 +691,8 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .gauge-row { display: grid; grid-template-columns: 42px 1fr 40px; align-items: center; gap: 8px; height: 18px; }
 .gauge-label { font-size: 10px; letter-spacing: .04em; color: var(--canvas-muted); }
 .gauge-track { height: 5px; border-radius: 999px; background: var(--canvas-bg-3); overflow: hidden; box-shadow: inset 0 0 0 1px var(--canvas-border); }
-.gauge-fill { height: 100%; border-radius: 999px; background: var(--canvas-accent); transition: width .3s ease; }
+/* span이라 display:block 없이는 width/height가 무시돼 막대가 안 그려진다 */
+.gauge-fill { display: block; height: 100%; border-radius: 999px; background: var(--canvas-accent); transition: width .3s ease; }
 .gauge-fill.warn { background: var(--canvas-warn); }
 .gauge-fill.crit { background: var(--canvas-crit); }
 .gauge-val { font-size: 11px; font-family: var(--mono); color: var(--canvas-ink); text-align: right; font-variant-numeric: tabular-nums; }

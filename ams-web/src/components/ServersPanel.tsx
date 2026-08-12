@@ -33,6 +33,11 @@ import {
 
 const POLL = 7000;
 
+// 하트비트 메트릭 표기 — 에이전트가 아직 보고 안 했으면(구버전 포함) null이다.
+function fmtPct(n?: number | null) {
+  return n === undefined || n === null ? '—' : `${Math.round(n)}%`;
+}
+
 // 마지막 접속 카운트업 표기. offline이면 crit 톤, 90초 초과면 warn + 경고 아이콘.
 function lastSeen(iso: string | undefined, offline: boolean, now: number) {
   if (!iso) return { cls: offline ? 'crit' : '', warn: offline, text: '접속 기록 없음' };
@@ -110,6 +115,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
               </span>
               <SwitchModePill mode={s.switchMode} />
             </div>
+            <div className="muted mono" style={{ fontSize: 12 }}>
+              CPU {fmtPct(s.cpuPct)} · MEM {fmtPct(s.memPct)} · DISK {fmtPct(s.diskPct)}
+            </div>
             <div className="srv-tile-accounts">
               {emails.length > 0 ? <AvatarStack emails={emails} /> : <span className="muted" style={{ fontSize: 12 }}>할당 계정 없음</span>}
               {activeEmail && <span className="srv-tile-current">활성 <b>{activeEmail}</b></span>}
@@ -162,6 +170,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
           <thead>
             <tr>
               <th>이름</th><th>상태</th><th>전환 모드</th><th className="num">할당 계정</th>
+              <th className="num">CPU</th><th className="num">MEM</th><th className="num">DISK</th>
               <th>마지막 접속</th><th>동작</th>
             </tr>
           </thead>
@@ -172,6 +181,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
                 <td><Badge value={s.status} /></td>
                 <td><SwitchModePill mode={s.switchMode} /></td>
                 <td className="num">{s.assignedAccountCount ?? 0}</td>
+                <td className="num mono">{fmtPct(s.cpuPct)}</td>
+                <td className="num mono">{fmtPct(s.memPct)}</td>
+                <td className="num mono">{fmtPct(s.diskPct)}</td>
                 <td><TimeCell iso={s.lastSeenAt} /></td>
                 <td>
                   <div className="actions">
@@ -218,7 +230,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
               </tr>
             ))}
             {servers.length === 0 && (
-              <tr><td colSpan={6} className="muted">등록된 서버가 없습니다. '서버 등록'으로 시작하세요.</td></tr>
+              <tr><td colSpan={9} className="muted">등록된 서버가 없습니다. '서버 등록'으로 시작하세요.</td></tr>
             )}
           </tbody>
         </table>
