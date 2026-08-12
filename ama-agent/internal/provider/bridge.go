@@ -119,15 +119,27 @@ type AccountRow struct {
 }
 
 // Usage is the per-account usage projection (pool usage_to_json).
+//
+// FiveHour/SevenDay are the original Claude-shaped two-window view, kept for the
+// existing reporter consumer. Windows is the vendor-neutral list a driver fills
+// with whatever binding windows it actually has (Claude: five_hour/seven_day;
+// Codex: primary/secondary): each Window carries its own Id and WindowMinutes so
+// no vendor has to force its windows into the fixed two-field shape. Drivers that
+// populate both keep them consistent (dual record) until the reporter migrates.
 type Usage struct {
-	FiveHour *Window `json:"fiveHour"`
-	SevenDay *Window `json:"sevenDay"`
+	FiveHour *Window  `json:"fiveHour"`
+	SevenDay *Window  `json:"sevenDay"`
+	Windows  []Window `json:"windows,omitempty"`
 }
 
-// Window is one binding window's utilization.
+// Window is one binding window's utilization. Id and WindowMinutes are set only
+// on entries carried in Usage.Windows (the neutral list); the legacy FiveHour/
+// SevenDay fields leave them zero-valued.
 type Window struct {
-	Pct      float64 `json:"pct"`
-	ResetsAt string  `json:"resetsAt"`
+	Id            string  `json:"id,omitempty"`
+	WindowMinutes int     `json:"windowMinutes,omitempty"`
+	Pct           float64 `json:"pct"`
+	ResetsAt      string  `json:"resetsAt"`
 }
 
 // StatusResult is a minimal projection of the pool `status`: which account
