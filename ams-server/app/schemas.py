@@ -19,6 +19,8 @@ from pydantic.alias_generators import to_camel
 TenantStatus = Literal["active", "suspended"]
 AccountStatus = Literal["available", "assigned", "disabled", "quarantined"]
 CredentialType = Literal["oauth", "api_key"]
+# Only "claude" is accepted today; "codex" arrives with its driver (P2b).
+Provider = Literal["claude"]
 ServerStatus = Literal["online", "offline", "degraded"]
 SwitchMode = Literal["auto", "manual"]
 SwitchStrategy = Literal["best", "next_available"]
@@ -64,6 +66,9 @@ class TenantPage(Wire):
 # -- Account ------------------------------------------------------------------
 class AccountCreate(Wire):
     email: EmailStr
+    # Free string on the wire so an unsupported value yields an explicit 400
+    # (account.provider_unsupported) rather than a 422; validated in the API.
+    provider: str = "claude"
     credential_type: CredentialType
     secret: str = Field(min_length=1)
 
@@ -77,6 +82,7 @@ class AccountUpdate(Wire):
 class Account(Wire):
     id: uuid.UUID
     tenant_id: uuid.UUID
+    provider: Provider = "claude"
     email: str
     credential_type: CredentialType
     status: AccountStatus
@@ -96,6 +102,8 @@ class AccountPage(Wire):
 
 class OauthStartRequest(Wire):
     label: str | None = None
+    # See AccountCreate.provider — validated in the API for an explicit 400.
+    provider: str = "claude"
 
 
 class OauthStartResponse(Wire):

@@ -27,6 +27,8 @@ const KR_LABEL: Record<string, string> = {
   auto: '자동',
   oauth: 'OAuth',
   api_key: 'API 키',
+  claude: 'Claude',
+  codex: 'Codex',
 };
 
 export function krLabel(value?: string): string {

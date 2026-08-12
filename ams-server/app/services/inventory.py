@@ -166,10 +166,12 @@ def create_account(
     email: str,
     credential_type: str,
     secret: str,
+    provider: str = "claude",
 ) -> Account:
     get_tenant(db, tenant_id)
     account = Account(
         tenant_id=tenant_id,
+        provider=provider,
         email=email,
         credential_type=credential_type,
         encrypted_secret=crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db),

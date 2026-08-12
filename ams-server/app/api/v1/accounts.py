@@ -11,7 +11,7 @@ import uuid
 
 from fastapi import APIRouter, Query, Request, Response, status
 
-from app import schemas
+from app import models, schemas
 from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.config import get_settings
 from app.core import crypto
@@ -20,6 +20,15 @@ from app.services import inventory
 from app.services import oauth_enroll
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["accounts"], dependencies=[TenantScope])
+
+
+def _validate_provider(provider: str) -> str:
+    if provider not in models.PROVIDERS:
+        raise bad_request(
+            "account.provider_unsupported",
+            f"Unsupported provider '{provider}'. Supported: {', '.join(models.PROVIDERS)}.",
+        )
+    return provider
 
 
 @router.get("/accounts", response_model=schemas.AccountPage)
@@ -49,6 +58,7 @@ def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSess
         db,
         tenant_id,
         email=str(body.email),
+        provider=_validate_provider(body.provider),
         credential_type=body.credential_type,
         secret=body.secret,
     )
@@ -92,7 +102,8 @@ def start_oauth(
     inventory.get_tenant(db, tenant_id)
     settings = get_settings()
     flow = request.app.state.oauth_flows.create(
-        tenant_id, settings.oauth_flow_ttl_seconds, body.label
+        tenant_id, settings.oauth_flow_ttl_seconds, body.label,
+        provider=_validate_provider(body.provider),
     )
     return schemas.OauthStartResponse(
         flow_id=flow.flow_id,
@@ -134,6 +145,7 @@ def complete_oauth(
         db,
         tenant_id,
         email=email,
+        provider=flow.provider,
         credential_type="oauth",
         secret=crypto.dumps_credential(credential_set),
     )

@@ -557,10 +557,20 @@ func (AccountEvent_Trigger) EnumDescriptor() ([]byte, []int) {
 // Stable identity of an account across AMS and AMA.
 // The mapping key is email/uuid, never a tsamx slot number (§2.4-3).
 type AccountRef struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AmsAccountId  string                 `protobuf:"bytes,1,opt,name=ams_account_id,json=amsAccountId,proto3" json:"ams_account_id,omitempty"` // AMS accounts.id (UUID string)
-	Email         string                 `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`                                     // tsamx mapping key
-	AccountUuid   string                 `protobuf:"bytes,3,opt,name=account_uuid,json=accountUuid,proto3" json:"account_uuid,omitempty"`      // Claude account UUID from the credential metadata (optional)
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	AmsAccountId string                 `protobuf:"bytes,1,opt,name=ams_account_id,json=amsAccountId,proto3" json:"ams_account_id,omitempty"` // AMS accounts.id (UUID string)
+	Email        string                 `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`                                     // tsamx mapping key
+	AccountUuid  string                 `protobuf:"bytes,3,opt,name=account_uuid,json=accountUuid,proto3" json:"account_uuid,omitempty"`      // Claude account UUID from the credential metadata (optional)
+	// Account provider ("claude", later "codex"). An empty value MUST be read as
+	// "claude" for backward compatibility with agents that predate this field.
+	// AccountRef has no oneof (all regular fields), so a new trailing regular
+	// field serializes deterministically in field-number order on both Go and
+	// Python — the signing rule for oneof members (see SwitchNow) does not apply.
+	// ⚠ 서명 하위호환 불변식: 이 메시지가 서명 대상에 포함될 수 있으므로 새 필드는
+	// 반드시 "기존 최대 번호보다 큰 번호로 append"만 한다. 구버전이 unknown 필드를
+	// 말미에 재직렬화하기 때문에 최대 번호 append일 때만 바이트가 일치한다 —
+	// 낮은 번호를 끼워 넣으면 구에이전트의 서명 검증이 깨진다(P2a 리뷰 M2).
+	Provider      string `protobuf:"bytes,4,opt,name=provider,proto3" json:"provider,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -612,6 +622,13 @@ func (x *AccountRef) GetEmail() string {
 func (x *AccountRef) GetAccountUuid() string {
 	if x != nil {
 		return x.AccountUuid
+	}
+	return ""
+}
+
+func (x *AccountRef) GetProvider() string {
+	if x != nil {
+		return x.Provider
 	}
 	return ""
 }
@@ -2956,12 +2973,13 @@ var File_amx_proto protoreflect.FileDescriptor
 
 const file_amx_proto_rawDesc = "" +
 	"\n" +
-	"\tamx.proto\x12\x06amx.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"k\n" +
+	"\tamx.proto\x12\x06amx.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x87\x01\n" +
 	"\n" +
 	"AccountRef\x12$\n" +
 	"\x0eams_account_id\x18\x01 \x01(\tR\famsAccountId\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12!\n" +
-	"\faccount_uuid\x18\x03 \x01(\tR\vaccountUuid\"\xec\x01\n" +
+	"\faccount_uuid\x18\x03 \x01(\tR\vaccountUuid\x12\x1a\n" +
+	"\bprovider\x18\x04 \x01(\tR\bprovider\"\xec\x01\n" +
 	"\x13EncryptedCredential\x129\n" +
 	"\talgorithm\x18\x01 \x01(\x0e2\x1b.amx.v1.EncryptionAlgorithmR\talgorithm\x12\x1e\n" +
 	"\n" +
