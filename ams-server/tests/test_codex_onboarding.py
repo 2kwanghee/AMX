@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import uuid
 
 try:
     import pytest
@@ -429,17 +430,24 @@ def test_a_recalled_server_accepts_a_different_codex_account(client):
     )
     assert blocked.status_code == 409
 
+    # recall needs an installed assignment; delivery is the agent's job, so park
+    # it in `active` the way a converged deliver would.
+    from app.db import get_sessionmaker
+    from app.models import Assignment
+
+    assignment_id = uuid.UUID(created["id"])
+    with get_sessionmaker()() as session:
+        session.get(Assignment, assignment_id).state = "active"
+        session.commit()
+
     recalled = client.post(
         f"/api/v1/tenants/{tenant_id}/assignments/{created['id']}:recall"
     )
     assert recalled.status_code == 200, recalled.text
-    # The command the agent will receive is the purging form, so the sidecar
-    # goes with it and the host is genuinely free.
-    assignment_id = created["id"]
-    from app.db import get_sessionmaker
-
+    # The command the agent will receive is the purging form, so the identity
+    # sidecar goes with it and the host is genuinely free for the next account.
     with get_sessionmaker()() as session:
-        assert _last_recall_payload(session, uuid.UUID(assignment_id))["purge_local_copy"] is True
+        assert _last_recall_payload(session, assignment_id)["purge_local_copy"] is True
 
 
 # -- the per-server cap survives concurrency (A4) ------------------------------
