@@ -19,8 +19,9 @@ from pydantic.alias_generators import to_camel
 TenantStatus = Literal["active", "suspended"]
 AccountStatus = Literal["available", "assigned", "disabled", "quarantined"]
 CredentialType = Literal["oauth", "api_key"]
-# Only "claude" is accepted today; "codex" arrives with its driver (P2b).
-Provider = Literal["claude"]
+# Response-side mirror of models.PROVIDERS. Requests keep provider as a free
+# string (see AccountCreate) so a bad value is a 400, not a 422.
+Provider = Literal["claude", "codex"]
 ServerStatus = Literal["online", "offline", "degraded"]
 SwitchMode = Literal["auto", "manual"]
 SwitchStrategy = Literal["best", "next_available"]
@@ -71,12 +72,16 @@ class AccountCreate(Wire):
     provider: str = "claude"
     credential_type: CredentialType
     secret: str = Field(min_length=1)
+    # Free-text label (a person, a team) for the console and for audit; not a
+    # reference to an admin.
+    owner: str | None = Field(default=None, max_length=200)
 
 
 class AccountUpdate(Wire):
     email: EmailStr | None = None
     status: AccountStatus | None = None
     secret: str | None = Field(default=None, min_length=1)
+    owner: str | None = Field(default=None, max_length=200)
 
 
 class Account(Wire):
@@ -84,6 +89,7 @@ class Account(Wire):
     tenant_id: uuid.UUID
     provider: Provider = "claude"
     email: str
+    owner: str | None = None
     credential_type: CredentialType
     status: AccountStatus
     secret_masked: str | None = None

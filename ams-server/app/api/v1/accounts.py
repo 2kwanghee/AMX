@@ -61,6 +61,7 @@ def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSess
         provider=_validate_provider(body.provider),
         credential_type=body.credential_type,
         secret=body.secret,
+        owner=body.owner,
     )
     return schemas.Account.model_validate(account)
 
@@ -81,6 +82,7 @@ def update_account(
         email=str(body.email) if body.email else None,
         status=body.status,
         secret=body.secret,
+        owner=body.owner,
     )
     return schemas.Account.model_validate(account)
 
@@ -101,9 +103,14 @@ def start_oauth(
 ):
     inventory.get_tenant(db, tenant_id)
     settings = get_settings()
+    # A provider AMS knows about is not necessarily one it can run a flow for:
+    # codex is import-only. Resolve the profile before minting anything, so a
+    # rejected provider does not leave an unusable flow (and its verifier)
+    # sitting in the store until TTL.
+    provider = _validate_provider(body.provider)
+    oauth_enroll.profile_for(provider)
     flow = request.app.state.oauth_flows.create(
-        tenant_id, settings.oauth_flow_ttl_seconds, body.label,
-        provider=_validate_provider(body.provider),
+        tenant_id, settings.oauth_flow_ttl_seconds, body.label, provider=provider,
     )
     return schemas.OauthStartResponse(
         flow_id=flow.flow_id,

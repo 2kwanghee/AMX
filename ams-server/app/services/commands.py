@@ -131,6 +131,29 @@ def request_deliver(
     return assignment
 
 
+def recall_purges_local_copy(db: Session, assignment: Assignment) -> bool:
+    """Whether this assignment's recall must wipe the agent's local copy.
+
+    O2's default is preservation: a Claude recall disables the credential and
+    keeps the manifest record, so re-assigning the same account later is cheap.
+    That default is wrong for Codex, and not merely suboptimal.
+
+    A Codex config home holds one `auth.json` plus an identity sidecar naming
+    its account. A disabling recall leaves that sidecar in place, and the
+    bridge's Add refuses a DIFFERENT email while it is there
+    (codex_single_account, ama-agent bridge.go:131). The assignment meanwhile
+    reaches `detached`, so the server-side per-server cap lets the next
+    assignment through — AMS would create an assignment the agent can never
+    converge, and the host would be stuck on its first Codex account forever.
+    Purging routes the agent to Remove, which deletes the sidecar
+    (bridge.go:218) and frees the host.
+
+    Claude's behaviour is unchanged.
+    """
+    account = db.get(Account, assignment.account_id)
+    return account is not None and account.provider == "codex"
+
+
 def request_recall(
     db: Session, tenant_id: uuid.UUID, assignment_id: uuid.UUID, *, force: bool = False
 ) -> Assignment:
@@ -185,13 +208,11 @@ def request_recall(
         assignment.recall_retry_count += 1
     else:
         assignment.recall_retry_count = 0
-    # O2: recall keeps the local credential record and only disables it; a full
-    # wipe would set purge_local_copy=true. Default is preservation.
     command = enqueue(
         db,
         assignment=assignment,
         command_type="recall",
-        payload={"purge_local_copy": False},
+        payload={"purge_local_copy": recall_purges_local_copy(db, assignment)},
     )
     assignment.state = "recalling"
     assignment.pending_command_id = command.command_id

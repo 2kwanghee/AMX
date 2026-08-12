@@ -71,8 +71,9 @@ def profile_for(provider: str) -> OauthProfile:
     if profile is None:
         raise bad_request(
             "oauth.provider_unsupported",
-            f"No OAuth profile for provider '{provider}'. Supported: "
-            f"{', '.join(OAUTH_PROFILES)}.",
+            f"AMS cannot run the OAuth flow for provider '{provider}'; register "
+            "it by importing its credential file through POST /accounts instead. "
+            f"OAuth-capable providers: {', '.join(OAUTH_PROFILES)}.",
         )
     return profile
 

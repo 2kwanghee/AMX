@@ -459,7 +459,13 @@ def _apply_correction(
         }
     else:  # CORRECTION_RECALL
         command_type = "recall"
-        payload = {"reconcile_correction": correction, "purge_local_copy": False}
+        # Same Codex rule as the REST recall path: a disabling recall would
+        # strand the host on its first Codex account (see
+        # commands.recall_purges_local_copy).
+        payload = {
+            "reconcile_correction": correction,
+            "purge_local_copy": commands.recall_purges_local_copy(db, assignment),
+        }
 
     commands.enqueue(
         db, assignment=assignment, command_type=command_type, payload=payload
