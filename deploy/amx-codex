@@ -1,0 +1,65 @@
+#!/bin/sh
+# amx-codex — launch Codex CLI (the runner) under the AMX deliver lock (B1b).
+#
+# Why: when AMA delivers a new account it briefly stages that account's
+# credential into the shared Codex config home (auth.json) and, for a sub-second
+# window, makes it the live account before restoring the previously-active one
+# (see AMA handleDeliver / SSOT §6.3). A `codex` process that STARTS UP inside
+# that window would read the new account's auth.json and bill it by mistake. B1a
+# narrows the window to milliseconds; this wrapper closes it for runners launched
+# through it.
+#
+# How: AMA holds an EXCLUSIVE flock on `<CODEX_HOME>/.amx-deliver.lock` for the
+# whole swap. This wrapper takes a SHARED flock on the same file, waits (bounded)
+# for any in-progress deliver to finish, then RELEASES it and starts codex. We do
+# NOT hold the lock for codex's lifetime: that would make AMA's exclusive deliver
+# wait for the runner to exit (a long interactive session could stall deliver,
+# and thus the whole switching engine, for hours). The lock is separate from the
+# credential files, so codex never touches it.
+#
+# Best-effort, not a hard guarantee: after releasing the lock there is a tiny gap
+# before codex reads the credential. B1a (previous-active restore + atomic write)
+# is the PRIMARY defense that bounds that gap to a sub-second, torn-free window;
+# this wrapper is the secondary "do not start on top of an in-progress deliver"
+# guard. See docs/DEPLOYMENT-RUNNER.md.
+#
+# Usage: drop-in replacement for `codex`. All arguments are passed through
+# unchanged.
+#   amx-codex                  # interactive, same as `codex`
+#   amx-codex "do a thing"      # same as `codex "do a thing"`
+# Recommended install: alias codex=amx-codex for interactive shells, and call
+# amx-codex at the automation entrypoint. See docs/DEPLOYMENT-RUNNER.md.
+
+set -eu
+
+# The runner and AMA MUST agree on the config home. AMA activates codex only
+# when AMX_CODEX_HOME is set (no ~/.codex fallback on the agent side), so honor
+# that variable here too: CODEX_HOME (what codex itself reads) wins, else
+# AMX_CODEX_HOME (what the agent stages into), else codex's own default. A
+# mismatch between the two envs silently voids the lock — set both to the same
+# directory (agent-run.sh --codex-home exports AMX_CODEX_HOME only).
+CONFIG_DIR="${CODEX_HOME:-${AMX_CODEX_HOME:-$HOME/.codex}}"
+LOCK_FILE="$CONFIG_DIR/.amx-deliver.lock"
+
+# Locate the real codex (never recurse into this wrapper if it shadows codex on
+# PATH under the same name).
+CODEX_BIN="${AMX_CODEX_BIN:-codex}"
+
+# If flock(1) or the config dir is unavailable, fall back to launching codex
+# directly rather than blocking the runner. B1a still bounds the exposure to the
+# sub-second swap window; the flock is defense-in-depth on top of that.
+if ! command -v flock >/dev/null 2>&1; then
+	exec "$CODEX_BIN" "$@"
+fi
+if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+	exec "$CODEX_BIN" "$@"
+fi
+
+# Wait (bounded) for any in-progress deliver to release the exclusive lock, then
+# drop our shared lock immediately and start codex. `-w` bounds the wait; if it
+# times out (deliver still running) we start anyway — best-effort, B1a bounds the
+# residual exposure. `-c true` acquires+releases without holding across codex.
+# AMX_DELIVER_WAIT overrides the wait bound (seconds; default 5).
+flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
+
+exec "$CODEX_BIN" "$@"

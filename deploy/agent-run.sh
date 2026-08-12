@@ -20,6 +20,8 @@
 #   --server-id ID         등록 대상 서버 행 ID       (env AMX_SERVER_ID)
 #   --agent-id ID          에이전트 식별자            (env AMX_AGENT_ID, 기본 ama_dev)
 #   --config-dir PATH      Claude 설정 홈(tsamx·자격증명) (env CLAUDE_CONFIG_DIR)
+#   --codex-home PATH      Codex 설정 홈(auth.json) — 주면 codex 프로바이더 활성화
+#                          (env AMX_CODEX_HOME). 미지정 시 codex 완전 비활성.
 #   --tsamx-bin PATH       tsamx 실행파일 경로        (env AMX_TSAMX_BIN, 기본 PATH의 tsamx)
 #   --state-dir PATH       에이전트 상태 저장 위치    (env AMX_STATE_DIR, 기본 <repo>/.amx-agent/state)
 #   --client-cert / --client-key PATH   mTLS 클라이언트 인증서(선택)
@@ -51,6 +53,7 @@ INSECURE=0
 SERVER_ID="${AMX_SERVER_ID:-}"
 AGENT_ID="${AMX_AGENT_ID:-ama_dev}"
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
+CODEX_HOME_DIR="${AMX_CODEX_HOME:-}"
 TSAMX_BIN="${AMX_TSAMX_BIN:-}"
 STATE_DIR="${AMX_STATE_DIR:-$DEV_DIR/state}"
 CLIENT_CERT="${AMX_AMS_TLS_CLIENT_CERT:-}"
@@ -68,6 +71,7 @@ while [ $# -gt 0 ]; do
     --server-id)   SERVER_ID="$2"; shift 2 ;;
     --agent-id)    AGENT_ID="$2"; shift 2 ;;
     --config-dir)  CONFIG_DIR="$2"; shift 2 ;;
+    --codex-home)  CODEX_HOME_DIR="$2"; shift 2 ;;
     --tsamx-bin)   TSAMX_BIN="$2"; shift 2 ;;
     --state-dir)   STATE_DIR="$2"; shift 2 ;;
     --client-cert) CLIENT_CERT="$2"; shift 2 ;;
@@ -125,6 +129,8 @@ agent_up() {
   [ -n "$PUBKEY" ]       && e+=( AMX_AMS_PUBKEY="$PUBKEY" )
   [ -n "$PUBKEY_FILE" ]  && e+=( AMX_AMS_PUBKEY_FILE="$PUBKEY_FILE" )
   [ -n "$CONFIG_DIR" ]   && e+=( CLAUDE_CONFIG_DIR="$CONFIG_DIR" )
+  # 주면 codex 프로바이더가 켜진다(에이전트 게이트). 미지정 시 전달 안 함 → codex 비활성.
+  [ -n "$CODEX_HOME_DIR" ] && e+=( AMX_CODEX_HOME="$CODEX_HOME_DIR" )
   [ -n "$TSAMX_BIN" ]    && e+=( AMX_TSAMX_BIN="$TSAMX_BIN" )
   if [ "$INSECURE" = 1 ]; then
     e+=( AMX_GRPC_ALLOW_INSECURE=1 )

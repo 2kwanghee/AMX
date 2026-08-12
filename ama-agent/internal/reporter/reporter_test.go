@@ -254,6 +254,64 @@ func TestBuildUsageReportSummaryScopedToAutoSwitchProvider(t *testing.T) {
 	}
 }
 
+// TestBuildUsageReportConsumesNeutralWindows (P3 PR3): the reporter now sources
+// every account's windows from the vendor-neutral Usage.Windows list. A
+// claude-shaped account (bridge dual-records five_hour/seven_day into Windows)
+// still gets the legacy positional fields re-derived; a codex-shaped account
+// (Windows carries primary/secondary, no five_hour/seven_day) is reported with
+// windows=primary (pct>0) and the positional five_hour/seven_day left nil.
+func TestBuildUsageReportConsumesNeutralWindows(t *testing.T) {
+	ctx := context.Background()
+
+	// claude-form fake: seed the positional fields; the fake's List projects them
+	// into Usage.Windows exactly as the real ExecBridge does.
+	claudeFake := tsamx.NewFake()
+	_ = claudeFake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true})
+	claudeFake.SetUsage("a@x.io", &provider.Usage{
+		FiveHour: &provider.Window{Pct: 40}, SevenDay: &provider.Window{Pct: 55},
+	})
+
+	// codex-form fake: seed the neutral Windows directly (primary only, no
+	// five_hour/seven_day), the shape the codex bridge emits.
+	codexFake := tsamx.NewFake()
+	_ = codexFake.Add(ctx, provider.AddRequest{Email: "c@x.io", Enable: true})
+	codexFake.SetUsage("c@x.io", &provider.Usage{
+		Windows: []provider.Window{{Id: "primary", WindowMinutes: 300, Pct: 73}},
+	})
+
+	bridges := map[string]provider.Bridge{provider.DefaultProvider: claudeFake, "codex": codexFake}
+	r := New("ama_test", bridges, func() time.Time { return time.Unix(1700000000, 0) })
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byEmail := map[string]*amxv1.AccountUsage{}
+	for _, au := range rep.GetAccounts() {
+		byEmail[au.GetAccount().GetEmail()] = au
+	}
+
+	// claude account: dual-recorded, positional fields present.
+	a := byEmail["a@x.io"]
+	if got := len(a.GetWindows()); got != 2 {
+		t.Fatalf("claude windows = %d, want 2", got)
+	}
+	if a.GetFiveHour().GetPct() != 40 || a.GetSevenDay().GetPct() != 55 {
+		t.Fatalf("claude positional windows not re-derived: %+v", a)
+	}
+
+	// codex account: windows=primary with pct>0, positional fields nil.
+	c := byEmail["c@x.io"]
+	if got := len(c.GetWindows()); got != 1 {
+		t.Fatalf("codex windows = %d, want 1", got)
+	}
+	if c.GetWindows()[0].GetId() != "primary" || c.GetWindows()[0].GetPct() != 73 {
+		t.Fatalf("codex windows[0] = %+v, want primary pct 73", c.GetWindows()[0])
+	}
+	if c.GetFiveHour() != nil || c.GetSevenDay() != nil {
+		t.Fatalf("codex account must leave five_hour/seven_day nil, got five_hour=%+v seven_day=%+v", c.GetFiveHour(), c.GetSevenDay())
+	}
+}
+
 func TestOutboxDedupeAndFlush(t *testing.T) {
 	o := NewOutbox()
 	o.Enqueue(&amxv1.AccountEvent{EventId: "e1"})
