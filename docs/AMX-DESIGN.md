@@ -590,7 +590,7 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
 | AMS 명령 | 로컬 절차 | 재전송 시 |
 |---|---|---|
 | deliver | 서명 검증 → credential 세트 복호 → 매니페스트 upsert → 이전 활성 계정 기록 → credential 파일 기록(`~/.claude/.credentials.json` + `~/.claude.json` oauthAccount) → `tsamx add` (슬롯 자동 할당) → 필요 시 `tsamx switch <이전 활성>` 복귀 → 평문 메모리 소거 | 이미 존재하면 no-op, 수렴 상태 회신 |
-| recall | 대상이 활성이면 먼저 `tsamx switch <타계정>` → **기본(`purge_local_copy=false`, O2)**: `tsamx disable` + 매니페스트 레코드 `inactive`로 보존(빠른 재배정) / **`purge_local_copy=true`**: `tsamx remove` + 매니페스트 레코드 삭제 | 부재 시 성공 no-op |
+| recall | 대상이 활성이면 먼저 `tsamx switch <타계정>` → **기본(`purge_local_copy=false`, O2)**: `tsamx disable` + 매니페스트 레코드 `inactive`로 보존(빠른 재배정) / **`purge_local_copy=true`**: `tsamx remove` + 매니페스트 레코드 삭제. codex 계정은 AMS가 항상 `true`로 발행(O2 단서) | 부재 시 성공 no-op |
 | activate | `tsamx enable` + 매니페스트 상태 갱신 | 동일 상태면 no-op |
 | deactivate | `tsamx disable` (크레덴셜 유지, 로테이션만 제외) | no-op |
 | switch_now | `tsamx switch <num\|email>` (또는 `--strategy best`) | 이미 활성이면 no-op |
@@ -774,7 +774,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | # | 항목 | 선택지 | 시점 |
 |---|---|---|---|
 | O1 | AMA KEK 보관 | **결정: 메모리 전용** (2026-08-08). 재부팅 시 KEK 소실 → AMS 재연결로 `SessionSetup` 재수신해야 로컬 스토어 복호. TPM/봉인 없음. 콜드스타트 3규칙은 §6.3 | ✅ 확정 |
-| O2 | recall 시맨틱 | **결정: disable만** (2026-08-08). 기본 `purge_local_copy=false` — `tsamx disable`+레코드 보존(빠른 재배정), `true`만 완전 삭제. §5.2·§6.3 반영 | ✅ 확정 |
+| O2 | recall 시맨틱 | **결정: disable만** (2026-08-08). 기본 `purge_local_copy=false` — `tsamx disable`+레코드 보존(빠른 재배정), `true`만 완전 삭제. §5.2·§6.3 반영. **단서(2026-08-12, P3)**: codex 계정 회수는 provider 특성상 항상 `true`로 발행한다 — 사이드카가 남으면 다음 다른 계정 배달이 `codex_single_account`로 막혀 호스트가 영구 사용 불가가 된다. claude는 결정 그대로 | ✅ 확정 |
 | O3 | API-key 계정 | 구독 쿼터 없어 95% 임계 무의미 — 관리 대상 포함 여부. 포함 시 등록 경로는 `tsamx add-token`이 여전히 유효 (api_key는 대화형 로그인 불필요, §2.4-5의 폐기는 oauth 한정) | P1 중 |
 | O4 | 스위칭 정책 소유권 | **O4-B 완성 (P5 F4)**. `threshold_pct`·`default_strategy`(O4-C, cmd 17 필드 1·2)에 더해 **`cooldown_seconds`·`hysteresis_pct`(F4, 필드 3·4)도 AMS가 `SetPolicy`로 중앙 하달** → 전체 스위칭 정책 중앙화. AMA가 `tsamx config set autoswitch.{cooldownSeconds,hysteresisPct}` 주입(음수=unset·0=실제값). §6.4·설계노트 P3/F4 | ✅ 확정 (O4-B) |
 | O5 | 러너 config 공유 | **부분 해소(B1)**: deliver 오과금은 이전활성 복귀+원자적 쓰기(주 방어)+flock 조율(보조, §6.3)로 방어, `docs/DEPLOYMENT-RUNNER.md` 배포 가이드. 남은 것: 래퍼 미경유 직접 실행의 sub-second 창(배포 강제), 러너와 AMA의 `~/.claude` 공유 보장 | 부분 해소, 배포 강제 잔여 |

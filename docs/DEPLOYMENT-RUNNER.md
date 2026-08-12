@@ -167,17 +167,28 @@ codex 바이너리가 깔려 있다는 사실만으로 그 호스트가 Codex �
 claude와 똑같이 `[FAIL]`이다. Codex 계정을 운영하는 호스트라면 아래처럼 codex 쪽
 경로까지 넘겨 판정을 확정지어야 한다.
 
+codex 쪽 AMA 경로는 `AMA_USER`로 유도하지 않는다. 에이전트는 `AMX_CODEX_HOME`에만
+스테이징하고 `~/.codex` 폴백이 없어서, 양쪽 다 `~/.codex`로 추정하면 아무도 쓰지 않는
+디렉터리끼리 비교해 정작 잡아야 할 어긋남을 통과시킨다. 그래서 codex는 명시 경로를
+받을 때만 판정한다.
+
 ```sh
-AMA_USER=ama bash deploy/verify-runner-guard.sh   # ~/.claude, ~/.codex 둘 다 유도
-# 또는 명시 경로:
-AMA_CLAUDE_CONFIG_DIR=/home/ama/.claude \
-AMA_CODEX_CONFIG_DIR=/home/ama/.codex \
+AMX_CODEX_HOME=/srv/codex-home \
+AMA_CODEX_CONFIG_DIR=/srv/codex-home \
+AMA_USER=ama \
   bash deploy/verify-runner-guard.sh
 ```
 
+러너 쪽 `CODEX_HOME`(또는 `AMX_CODEX_HOME`)과 AMA 쪽 `AMA_CODEX_CONFIG_DIR`을 같은
+값으로 주면 `[ OK ]`, 다르면 `[FAIL]`, 한쪽이라도 비어 있으면 판정 불가라 `[WARN]`으로
+남기고 종료코드는 건드리지 않는다.
+
 서버 한 대는 Codex 계정을 하나만 받는다. auth.json이 한 장뿐이라 두 번째 배정은
 첫 계정을 덮어쓰기 때문이고, AMS가 배정 생성 시점에 409
-(`assignment.server_codex_capacity`)로 막는다.
+(`assignment.server_codex_capacity`)로 막는다. 회수는 claude와 달리 항상 완전 삭제로
+나간다(`purge_local_copy=true`). Codex 브리지가 계정 신원을 사이드카 파일에 남기는데,
+비활성화만 하면 그 파일이 남아 다음 다른 계정 배달을 `codex_single_account`로 거부해
+호스트가 첫 계정에 영구히 묶인다.
 
 ### 셀프테스트
 ```sh

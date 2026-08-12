@@ -86,7 +86,7 @@ report_resolution() {
 	esac
 }
 
-# check_config_dir <label> <runner_dir> <ama_dir> <unknown_is_fatal:0|1> —
+# check_config_dir <label> <runner_dir> <ama_dir> <unknown_is_fatal:0|1> <hint> —
 # judgement (b). A real MISMATCH always fails. Not knowing AMA's dir is fatal
 # for claude (every AMX host runs a Claude runner, so the check must be
 # conclusive) but only a warning for codex: the mere presence of a codex binary
@@ -97,7 +97,9 @@ check_config_dir() {
 	_runner_canon=$(canon "$2")
 	_ama=$3
 	if [ -z "$_ama" ]; then
-		_msg="(b) $_label: AMA config dir unknown — set AMA_${_label}_CONFIG_DIR or AMA_USER so runner/AMA equality can be judged"
+		# $5 names the variables that would actually settle it — AMA_USER is
+		# offered for claude only, since codex must not be guessed from a home dir.
+		_msg="(b) $_label: AMA config dir unknown — set $5 so runner/AMA equality can be judged"
 		if [ "$4" = "1" ]; then bad "$_msg"; else warn "$_msg"; fi
 		return 0
 	fi
@@ -122,7 +124,7 @@ fi
 
 ama_claude="${AMA_CLAUDE_CONFIG_DIR:-}"
 if [ -z "$ama_claude" ] && [ -n "$ama_home" ]; then ama_claude="$ama_home/.claude"; fi
-check_config_dir CLAUDE "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$ama_claude" 1
+check_config_dir CLAUDE "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$ama_claude" 1 "AMA_CLAUDE_CONFIG_DIR or AMA_USER"
 
 # ---- codex (optional until installed) ---------------------------------------
 codex_state=$(check_resolution codex)
@@ -142,7 +144,7 @@ else
 	if [ -z "$runner_codex" ]; then
 		warn "(b) CODEX: neither CODEX_HOME nor AMX_CODEX_HOME is set — amx-codex would fall back to ~/.codex while AMA stages only into AMX_CODEX_HOME; set both to the same directory"
 	else
-		check_config_dir CODEX "$runner_codex" "${AMA_CODEX_CONFIG_DIR:-${AMA_CODEX_HOME:-}}" 0
+		check_config_dir CODEX "$runner_codex" "${AMA_CODEX_CONFIG_DIR:-${AMA_CODEX_HOME:-}}" 0 "AMA_CODEX_CONFIG_DIR (or AMA_CODEX_HOME)"
 	fi
 fi
 
