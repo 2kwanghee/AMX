@@ -88,21 +88,35 @@ class UsageWindow(_message.Message):
     resets_at: _timestamp_pb2.Timestamp
     def __init__(self, pct: _Optional[float] = ..., resets_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
+class QuotaWindow(_message.Message):
+    __slots__ = ("id", "pct", "resets_at", "window_minutes")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    PCT_FIELD_NUMBER: _ClassVar[int]
+    RESETS_AT_FIELD_NUMBER: _ClassVar[int]
+    WINDOW_MINUTES_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    pct: float
+    resets_at: _timestamp_pb2.Timestamp
+    window_minutes: int
+    def __init__(self, id: _Optional[str] = ..., pct: _Optional[float] = ..., resets_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., window_minutes: _Optional[int] = ...) -> None: ...
+
 class AccountUsage(_message.Message):
-    __slots__ = ("account", "allocation_status", "is_current", "five_hour", "seven_day", "usage_fetched_at")
+    __slots__ = ("account", "allocation_status", "is_current", "five_hour", "seven_day", "usage_fetched_at", "windows")
     ACCOUNT_FIELD_NUMBER: _ClassVar[int]
     ALLOCATION_STATUS_FIELD_NUMBER: _ClassVar[int]
     IS_CURRENT_FIELD_NUMBER: _ClassVar[int]
     FIVE_HOUR_FIELD_NUMBER: _ClassVar[int]
     SEVEN_DAY_FIELD_NUMBER: _ClassVar[int]
     USAGE_FETCHED_AT_FIELD_NUMBER: _ClassVar[int]
+    WINDOWS_FIELD_NUMBER: _ClassVar[int]
     account: AccountRef
     allocation_status: AllocationStatus
     is_current: bool
     five_hour: UsageWindow
     seven_day: UsageWindow
     usage_fetched_at: _timestamp_pb2.Timestamp
-    def __init__(self, account: _Optional[_Union[AccountRef, _Mapping]] = ..., allocation_status: _Optional[_Union[AllocationStatus, str]] = ..., is_current: _Optional[bool] = ..., five_hour: _Optional[_Union[UsageWindow, _Mapping]] = ..., seven_day: _Optional[_Union[UsageWindow, _Mapping]] = ..., usage_fetched_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    windows: _containers.RepeatedCompositeFieldContainer[QuotaWindow]
+    def __init__(self, account: _Optional[_Union[AccountRef, _Mapping]] = ..., allocation_status: _Optional[_Union[AllocationStatus, str]] = ..., is_current: _Optional[bool] = ..., five_hour: _Optional[_Union[UsageWindow, _Mapping]] = ..., seven_day: _Optional[_Union[UsageWindow, _Mapping]] = ..., usage_fetched_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., windows: _Optional[_Iterable[_Union[QuotaWindow, _Mapping]]] = ...) -> None: ...
 
 class PoolSummary(_message.Message):
     __slots__ = ("total", "active", "eligible", "quarantined", "all_exhausted", "max_utilization_pct")

@@ -97,6 +97,73 @@ func TestBuildUsageReportNoResolverEmailOnly(t *testing.T) {
 	}
 }
 
+// TestBuildUsageReportWindows (P2b): accountUsage dual-records the positional
+// windows into the generalized windows[] list, ordered by window_minutes
+// ascending, and omits a nil source window. maxUtilizationPct stays the max of
+// the present windows (numeric equivalence with the former max(5h, 7d)).
+func TestBuildUsageReportWindows(t *testing.T) {
+	f := tsamx.NewFake()
+	ctx := context.Background()
+	_ = f.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true})
+	_ = f.Add(ctx, tsamx.AddRequest{Email: "b@x.io", Enable: true})
+	_ = f.Add(ctx, tsamx.AddRequest{Email: "c@x.io", Enable: true})
+	_ = f.Switch(ctx, "a@x.io")
+	// a: both windows, 7d is the max -> exercises ordering + max over windows[].
+	f.SetUsage("a@x.io", &tsamx.Usage{FiveHour: &tsamx.Window{Pct: 44}, SevenDay: &tsamx.Window{Pct: 61.2}})
+	// b: only five_hour present -> seven_day omitted from windows[].
+	f.SetUsage("b@x.io", &tsamx.Usage{FiveHour: &tsamx.Window{Pct: 12}})
+	// c: no usage at all -> windows[] empty, contributes 0 to maxPct.
+
+	r := New("ama_test", f, func() time.Time { return time.Unix(1700000000, 0) })
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byEmail := map[string]*amxv1.AccountUsage{}
+	for _, au := range rep.GetAccounts() {
+		byEmail[au.GetAccount().GetEmail()] = au
+	}
+
+	// a: two windows, ordered five_hour (300) then seven_day (10080), values
+	// mirror the positional fields.
+	a := byEmail["a@x.io"]
+	if got := len(a.GetWindows()); got != 2 {
+		t.Fatalf("a windows = %d, want 2", got)
+	}
+	if a.GetWindows()[0].GetId() != "five_hour" || a.GetWindows()[0].GetWindowMinutes() != 300 || a.GetWindows()[0].GetPct() != 44 {
+		t.Fatalf("a windows[0] = %+v", a.GetWindows()[0])
+	}
+	if a.GetWindows()[1].GetId() != "seven_day" || a.GetWindows()[1].GetWindowMinutes() != 10080 || a.GetWindows()[1].GetPct() != 61.2 {
+		t.Fatalf("a windows[1] = %+v", a.GetWindows()[1])
+	}
+	if a.GetFiveHour().GetPct() != 44 || a.GetSevenDay().GetPct() != 61.2 {
+		t.Fatalf("a positional windows not preserved: %+v", a)
+	}
+
+	// b: seven_day omitted (nil source), only five_hour recorded.
+	b := byEmail["b@x.io"]
+	if got := len(b.GetWindows()); got != 1 {
+		t.Fatalf("b windows = %d, want 1", got)
+	}
+	if b.GetWindows()[0].GetId() != "five_hour" {
+		t.Fatalf("b windows[0] = %+v", b.GetWindows()[0])
+	}
+	if b.GetSevenDay() != nil {
+		t.Fatalf("b seven_day should be nil, got %+v", b.GetSevenDay())
+	}
+
+	// c: no usage -> no windows.
+	c := byEmail["c@x.io"]
+	if got := len(c.GetWindows()); got != 0 {
+		t.Fatalf("c windows = %d, want 0", got)
+	}
+
+	// maxUtilizationPct is the max across all present windows (a's 7d = 61.2).
+	if got := rep.PoolSummary.MaxUtilizationPct; got != 61.2 {
+		t.Fatalf("maxUtilizationPct = %v, want 61.2", got)
+	}
+}
+
 func TestOutboxDedupeAndFlush(t *testing.T) {
 	o := NewOutbox()
 	o.Enqueue(&amxv1.AccountEvent{EventId: "e1"})

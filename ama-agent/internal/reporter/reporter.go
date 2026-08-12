@@ -93,7 +93,7 @@ func (r *Reporter) BuildUsageReport(ctx context.Context, trigger amxv1.UsageRepo
 		if row.Active {
 			rep.ActiveAccount = au.GetAccount()
 		}
-		pct := maxWindowPct(row.Usage)
+		pct := maxWindowPct(au.Windows)
 		if pct > maxPct {
 			maxPct = pct
 		}
@@ -137,26 +137,40 @@ func accountUsage(row tsamx.AccountRow) *amxv1.AccountUsage {
 		au.AllocationStatus = amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE
 	}
 	if row.Usage != nil {
+		// Dual-record: keep the legacy positional windows (five_hour/seven_day)
+		// and mirror them into the generalized windows[] list (P2b), ordered by
+		// window_minutes ascending. A nil source window is omitted from both.
 		if w := row.Usage.FiveHour; w != nil {
 			au.FiveHour = &amxv1.UsageWindow{Pct: w.Pct, ResetsAt: parseTime(w.ResetsAt)}
+			au.Windows = append(au.Windows, &amxv1.QuotaWindow{
+				Id:            "five_hour",
+				Pct:           w.Pct,
+				ResetsAt:      parseTime(w.ResetsAt),
+				WindowMinutes: 300,
+			})
 		}
 		if w := row.Usage.SevenDay; w != nil {
 			au.SevenDay = &amxv1.UsageWindow{Pct: w.Pct, ResetsAt: parseTime(w.ResetsAt)}
+			au.Windows = append(au.Windows, &amxv1.QuotaWindow{
+				Id:            "seven_day",
+				Pct:           w.Pct,
+				ResetsAt:      parseTime(w.ResetsAt),
+				WindowMinutes: 10080,
+			})
 		}
 	}
 	return au
 }
 
-func maxWindowPct(u *tsamx.Usage) float64 {
-	if u == nil {
-		return 0
-	}
+// maxWindowPct returns the highest utilization across the generalized windows.
+// Numerically equivalent to the former max(5h, 7d): windows carries exactly the
+// present positional windows. Empty windows (no usage) yields 0.
+func maxWindowPct(windows []*amxv1.QuotaWindow) float64 {
 	var m float64
-	if u.FiveHour != nil && u.FiveHour.Pct > m {
-		m = u.FiveHour.Pct
-	}
-	if u.SevenDay != nil && u.SevenDay.Pct > m {
-		m = u.SevenDay.Pct
+	for _, w := range windows {
+		if w.GetPct() > m {
+			m = w.GetPct()
+		}
 	}
 	return m
 }
