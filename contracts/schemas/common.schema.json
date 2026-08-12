@@ -29,6 +29,10 @@
         "accountUuid": {
           "type": "string",
           "format": "uuid"
+        },
+        "provider": {
+          "description": "Account provider (P3). Absent or empty means \"claude\".",
+          "type": "string"
         }
       }
     },

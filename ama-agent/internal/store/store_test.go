@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
@@ -27,6 +29,34 @@ func keksWith(t *testing.T, id string) *KEKHolder {
 		t.Fatal("SetActive failed")
 	}
 	return h
+}
+
+// TestFindByProviderEmailMigratesLegacyManifest (P3): a manifest written before
+// the provider field existed has records with no "provider" key. On load, such a
+// record must resolve as the claude provider (empty == "claude"), so a claude (or
+// empty) lookup finds it while another provider's lookup does not — the tolerant
+// migration that keeps existing on-disk state working after the shim ships.
+func TestFindByProviderEmailMigratesLegacyManifest(t *testing.T) {
+	dir := t.TempDir()
+	// No "provider" field on the record, exactly as a pre-multi-provider agent
+	// wrote it. The metadata is plaintext JSON; the lookup reads only email/provider.
+	legacy := `{"schemaVersion":1,"records":[{"amsAccountId":"acc-1","email":"a@x.io","allocationStatus":2}]}`
+	if err := os.WriteFile(filepath.Join(dir, ManifestFileName), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(dir, "ama_dev", keksWith(t, "k1"), testFP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec, ok := st.FindByProviderEmail("claude", "a@x.io"); !ok || rec.AMSAccountID != "acc-1" {
+		t.Fatalf("legacy record not resolved as claude: rec=%+v ok=%v", rec, ok)
+	}
+	if _, ok := st.FindByProviderEmail("", "a@x.io"); !ok {
+		t.Fatal("empty provider query must normalize to claude and match the legacy record")
+	}
+	if _, ok := st.FindByProviderEmail("codex", "a@x.io"); ok {
+		t.Fatal("legacy claude record must not match a codex lookup")
+	}
 }
 
 func TestManifestSealOpen(t *testing.T) {

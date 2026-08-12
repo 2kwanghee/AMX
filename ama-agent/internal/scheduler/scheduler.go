@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
-	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"github.com/fsnotify/fsnotify"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -28,8 +28,11 @@ const DefaultInterval = 60 * time.Second
 
 // Config assembles a Scheduler.
 type Config struct {
-	AgentID  string
-	Bridge   tsamx.Bridge
+	AgentID string
+	// Bridge is the auto-switch provider's Bridge. The scheduler is single-provider
+	// by design (only Claude rotates; other providers have no auto-switch), so this
+	// stays a single Bridge, not a registry.
+	Bridge   provider.Bridge
 	Reporter *reporter.Reporter
 	Outbox   *reporter.Outbox
 	Engine   *sync.Mutex // shared with the command Handler (R3 engine lock)
@@ -42,7 +45,7 @@ type Config struct {
 // (auto -> Start, manual -> Stop) and are safe to call from another goroutine.
 type Scheduler struct {
 	agentID  string
-	bridge   tsamx.Bridge
+	bridge   provider.Bridge
 	reporter *reporter.Reporter
 	outbox   *reporter.Outbox
 	engine   *sync.Mutex
@@ -208,7 +211,9 @@ func (s *Scheduler) Tick(ctx context.Context) float64 {
 			PoolSummary:   pool,
 		}
 		if beforeEmail != "" {
-			ev.From = &amxv1.AccountRef{Email: beforeEmail}
+			// The scheduler is the claude-only auto-switch loop, so from/to are claude
+			// accounts (the to ref comes from the report, already stamped).
+			ev.From = &amxv1.AccountRef{Email: beforeEmail, Provider: provider.DefaultProvider}
 		}
 		if err := s.outbox.Enqueue(ev); err != nil {
 			s.logf("scheduler: outbox persist switch event: %v", err)
@@ -291,7 +296,7 @@ func (s *Scheduler) enqueueQuarantine(email string) {
 		OccurredAt:    timestamppb.New(s.now().UTC()),
 		Kind:          amxv1.AccountEvent_KIND_QUARANTINE,
 		Trigger:       amxv1.AccountEvent_TRIGGER_FAILOVER,
-		From:          &amxv1.AccountRef{Email: email},
+		From:          &amxv1.AccountRef{Email: email, Provider: provider.DefaultProvider},
 	}); err != nil {
 		s.logf("scheduler: outbox persist quarantine event: %v", err)
 	}

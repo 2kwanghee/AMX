@@ -28,8 +28,8 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
-	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -39,7 +39,11 @@ type Config struct {
 	AgentID string
 	Store   *store.Store
 	KEKs    *store.KEKHolder
-	Bridge  tsamx.Bridge
+	Bridge  provider.Bridge
+	// Provider is the vendor key this resyncer's Bridge serves. It scopes the
+	// manifest lookup so the active account is resolved as (provider, email), not
+	// email alone. Empty normalizes to "claude".
+	Provider string
 	// Engine is the shared tsamx serialization lock (R3). The credential file is
 	// read while it is held, so a detection can never interleave with an auto tick
 	// (tsamx add/switch) rewriting it. Never nil in production; a nil falls back to
@@ -68,7 +72,8 @@ type Resyncer struct {
 	agentID     string
 	store       *store.Store
 	keks        *store.KEKHolder
-	bridge      tsamx.Bridge
+	bridge      provider.Bridge
+	providerKey string
 	engine      *sync.Mutex
 	credPath    string
 	fingerprint func([]byte) string
@@ -97,6 +102,7 @@ func New(cfg Config) *Resyncer {
 		store:       cfg.Store,
 		keks:        cfg.KEKs,
 		bridge:      cfg.Bridge,
+		providerKey: provider.Normalize(cfg.Provider),
 		engine:      engine,
 		credPath:    cfg.CredentialsPath,
 		fingerprint: cfg.Fingerprint,
@@ -161,7 +167,7 @@ func (r *Resyncer) detect(ctx context.Context) (*amxv1.CredentialUpdate, []byte,
 	if err != nil || status == nil || status.ActiveEmail == "" {
 		return nil, nil, store.Record{}, false
 	}
-	rec, ok := r.store.FindByEmail(status.ActiveEmail)
+	rec, ok := r.store.FindByProviderEmail(r.providerKey, status.ActiveEmail)
 	if !ok {
 		// Active account was never delivered by AMS -> nothing to re-sync.
 		return nil, nil, store.Record{}, false
@@ -204,6 +210,7 @@ func (r *Resyncer) detect(ctx context.Context) (*amxv1.CredentialUpdate, []byte,
 			AmsAccountId: rec.AMSAccountID,
 			Email:        rec.Email,
 			AccountUuid:  rec.AccountUUID,
+			Provider:     r.providerKey,
 		},
 		EncryptedCredential: &amxv1.EncryptedCredential{
 			Algorithm:       amxv1.EncryptionAlgorithm_ENCRYPTION_ALGORITHM_AES_256_GCM,

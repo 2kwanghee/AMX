@@ -19,6 +19,7 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/command"
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
 	"github.com/2kwanghee/AMX/ama-agent/internal/metrics"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/resync"
@@ -121,14 +122,33 @@ func run() error {
 		return err
 	}
 
-	bridge := tsamx.NewExecBridge(drv)
-	rep := reporter.New(agentID, bridge, time.Now)
-	// Resolve each reported account's AMS identity from the manifest (tsamx knows
-	// only the email). Without ams_account_id in the report, AMS reconcile treats
-	// every assigned account as absent and redelivers it in a loop, rewriting the
-	// live credential file and racing the O9 re-sync.
-	rep.SetIDResolver(func(email string) (string, string, bool) {
-		rec, ok := st.FindByEmail(email)
+	// The claude bridge is the default/auto-switch/resync provider — the only one
+	// that rotates — and the sole registry entry today.
+	claudeBridge := tsamx.NewExecBridge(drv)
+	bridge := claudeBridge
+
+	// Provider registry: one Bridge per provider, listed explicitly. A second
+	// provider is added as its own entry here (e.g. "codex": tsamx.NewExecBridge(
+	// codex.New())) without touching the routing. bridgeFor routes a command to its
+	// provider's bridge; an empty provider normalizes to "claude" and an
+	// unregistered non-empty provider resolves to nil (the command handlers turn
+	// that into a fail-closed provider_unsupported ack, never handing the credential
+	// to a bridge).
+	bridges := map[string]provider.Bridge{
+		drv.Name(): claudeBridge,
+	}
+	bridgeFor := func(providerKey string) provider.Bridge {
+		return bridges[provider.Normalize(providerKey)]
+	}
+
+	rep := reporter.New(agentID, bridges, time.Now)
+	// Resolve each reported account's AMS identity from the manifest, keyed by
+	// (provider, email) — a bridge knows only the email. Without ams_account_id in
+	// the report, AMS reconcile treats every assigned account as absent and
+	// redelivers it in a loop, rewriting the live credential file and racing the O9
+	// re-sync.
+	rep.SetIDResolver(func(providerKey, email string) (string, string, bool) {
+		rec, ok := st.FindByProviderEmail(providerKey, email)
 		if !ok {
 			return "", "", false
 		}
@@ -183,6 +203,7 @@ func run() error {
 		KEKs:             keks,
 		Applied:          applied,
 		Bridge:           bridge,
+		BridgeFor:        bridgeFor,
 		Creds:            creds,
 		Engine:           engine,
 		Outbox:           outbox,
@@ -244,6 +265,7 @@ func run() error {
 		Store:            st,
 		KEKs:             keks,
 		Bridge:           bridge,
+		Provider:         drv.Name(),
 		Engine:           engine,
 		CredentialsPath:  credPath,
 		Fingerprint:      drv.Fingerprint,

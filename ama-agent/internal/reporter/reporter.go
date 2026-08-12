@@ -8,10 +8,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"sort"
 	"sync"
 	"time"
 
-	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -31,40 +32,57 @@ func NewEventID() string {
 // exhausted for pool summary purposes (D10, injected into tsamx as 95).
 const SwitchThresholdPct = 95.0
 
-// Reporter turns the local pool into UsageReports.
+// Reporter turns the local pool into UsageReports. It reads one bridge per
+// registered provider and sums their pools into a single report; today only
+// "claude" is registered, so the report matches the pre-multi-provider output
+// except for the provider stamp added to each account.
 type Reporter struct {
 	agentID string
-	bridge  tsamx.Bridge
+	bridges map[string]provider.Bridge
 	now     func() time.Time
-	// resolveID maps a live account email to its AMS identity from the manifest.
-	// tsamx knows an account only by email, but reconcile-on-report (AMS §3) keys
-	// drift on ams_account_id, so a report that omits it reads as "account absent"
-	// and triggers an endless redelivery — which rewrites the live credential file
-	// and defeats the O9 re-sync. nil leaves the report email-only (unit tests).
-	resolveID func(email string) (amsAccountID, accountUUID string, ok bool)
+	// resolveID maps a live (provider, email) to its AMS identity from the
+	// manifest. A bridge knows an account only by email, but reconcile-on-report
+	// (AMS §3) keys drift on ams_account_id, so a report that omits it reads as
+	// "account absent" and triggers an endless redelivery — which rewrites the live
+	// credential file and defeats the O9 re-sync. The provider is passed too so the
+	// same email under two providers resolves to the correct record. nil leaves the
+	// report email-only (unit tests).
+	resolveID func(providerKey, email string) (amsAccountID, accountUUID string, ok bool)
 }
 
-// New returns a Reporter.
-func New(agentID string, bridge tsamx.Bridge, now func() time.Time) *Reporter {
+// New returns a Reporter over a provider->bridge registry. A nil/empty map
+// produces empty reports (no providers to read).
+func New(agentID string, bridges map[string]provider.Bridge, now func() time.Time) *Reporter {
 	if now == nil {
 		now = time.Now
 	}
-	return &Reporter{agentID: agentID, bridge: bridge, now: now}
+	return &Reporter{agentID: agentID, bridges: bridges, now: now}
 }
 
 // SetIDResolver installs the manifest lookup that stamps ams_account_id (and the
-// Claude account UUID) onto each reported account, so AMS can match the report to
-// its assignment. Set once at wiring time before the report ticker starts.
-func (r *Reporter) SetIDResolver(f func(email string) (amsAccountID, accountUUID string, ok bool)) {
+// account UUID) onto each reported account, so AMS can match the report to its
+// assignment. Set once at wiring time before the report ticker starts.
+func (r *Reporter) SetIDResolver(f func(providerKey, email string) (amsAccountID, accountUUID string, ok bool)) {
 	r.resolveID = f
 }
 
-// BuildUsageReport reads the tsamx cache and projects it onto a UsageReport.
+// BuildUsageReport reads every registered provider's pool and projects them onto
+// a single UsageReport. Providers are read in a stable (sorted) order so the
+// report is deterministic; the accounts[] list carries all providers, each
+// account stamped with the provider it came from.
+//
+// PoolSummary and ActiveAccount, however, are scoped to the auto-switch provider
+// (DefaultProvider, "claude") ALONE. Those two fields feed the auto-switch
+// control loop (scheduler AllExhausted alert, AMS extra-assignment decision), and
+// only Claude rotates. Summing a non-rotating provider in would corrupt them: a
+// codex account with no usage counts as eligible (pct 0), so AllExhausted would
+// never fire even with every Claude account exhausted, and the single
+// ActiveAccount field would be overwritten by a provider that has no active-slot
+// notion. accounts[] stays full so AMS still sees every provider's usage.
+//
+// An error from any provider's List fails the whole report (a partial report
+// would misreport the pool to AMS).
 func (r *Reporter) BuildUsageReport(ctx context.Context, trigger amxv1.UsageReport_Trigger) (*amxv1.UsageReport, error) {
-	list, err := r.bridge.List(ctx)
-	if err != nil {
-		return nil, err
-	}
 	rep := &amxv1.UsageReport{
 		SchemaVersion: 1,
 		AgentId:       r.agentID,
@@ -74,56 +92,83 @@ func (r *Reporter) BuildUsageReport(ctx context.Context, trigger amxv1.UsageRepo
 	var (
 		total, active, eligible, quarantined uint32
 		maxPct                               float64
-		allExhausted                         = len(list.Accounts) > 0
+		// relievesExhaustion is set by any account that keeps the pool from being
+		// fully exhausted (a disabled account, or an eligible one under threshold).
+		// allExhausted is then total>0 && !relievesExhaustion. Only the auto-switch
+		// provider's accounts contribute, so it is numerically identical to the
+		// former single-provider computation.
+		relievesExhaustion bool
 	)
-	for _, row := range list.Accounts {
-		total++
-		au := accountUsage(row)
-		// Stamp the AMS identity so reconcile-on-report can match this account to
-		// its assignment; without it the account reads as absent and AMS redelivers
-		// (clobbering a locally rotated credential the O9 re-sync must observe).
-		if r.resolveID != nil {
-			if amsID, accUUID, ok := r.resolveID(row.Email); ok {
-				au.Account.AmsAccountId = amsID
-				if accUUID != "" {
-					au.Account.AccountUuid = accUUID
+	keys := make([]string, 0, len(r.bridges))
+	for k := range r.bridges {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, providerKey := range keys {
+		list, err := r.bridges[providerKey].List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// The PoolSummary/ActiveAccount are the auto-switch control signals; only
+		// the rotating provider feeds them (see the doc comment).
+		summaryScope := providerKey == provider.DefaultProvider
+		for _, row := range list.Accounts {
+			au := accountUsage(row)
+			// Stamp the provider this account belongs to (proto AccountRef.provider).
+			au.Account.Provider = providerKey
+			// Stamp the AMS identity so reconcile-on-report can match this account to
+			// its assignment; without it the account reads as absent and AMS
+			// redelivers (clobbering a locally rotated credential the O9 re-sync must
+			// observe).
+			if r.resolveID != nil {
+				if amsID, accUUID, ok := r.resolveID(providerKey, row.Email); ok {
+					au.Account.AmsAccountId = amsID
+					if accUUID != "" {
+						au.Account.AccountUuid = accUUID
+					}
+				}
+			}
+			rep.Accounts = append(rep.Accounts, au)
+
+			if !summaryScope {
+				continue
+			}
+			total++
+			if row.Active {
+				rep.ActiveAccount = au.GetAccount()
+			}
+			pct := maxWindowPct(au.Windows)
+			if pct > maxPct {
+				maxPct = pct
+			}
+			switch {
+			case row.Disabled:
+				// out of rotation; not eligible, not counted as exhausted driver
+				relievesExhaustion = true
+			case row.UsageStatus == "quarantined":
+				quarantined++
+			default:
+				active++
+				if pct < SwitchThresholdPct {
+					eligible++
+					relievesExhaustion = true
 				}
 			}
 		}
-		if row.Active {
-			rep.ActiveAccount = au.GetAccount()
-		}
-		pct := maxWindowPct(au.Windows)
-		if pct > maxPct {
-			maxPct = pct
-		}
-		switch {
-		case row.Disabled:
-			// out of rotation; not eligible, not counted as exhausted driver
-			allExhausted = false
-		case row.UsageStatus == "quarantined":
-			quarantined++
-		default:
-			active++
-			if pct < SwitchThresholdPct {
-				eligible++
-				allExhausted = false
-			}
-		}
-		rep.Accounts = append(rep.Accounts, au)
 	}
 	rep.PoolSummary = &amxv1.PoolSummary{
 		Total:             total,
 		Active:            active,
 		Eligible:          eligible,
 		Quarantined:       quarantined,
-		AllExhausted:      allExhausted,
+		AllExhausted:      total > 0 && !relievesExhaustion,
 		MaxUtilizationPct: maxPct,
 	}
 	return rep, nil
 }
 
-func accountUsage(row tsamx.AccountRow) *amxv1.AccountUsage {
+func accountUsage(row provider.AccountRow) *amxv1.AccountUsage {
 	au := &amxv1.AccountUsage{
 		Account:   &amxv1.AccountRef{Email: row.Email},
 		IsCurrent: row.Active,

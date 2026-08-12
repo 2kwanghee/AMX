@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
@@ -106,7 +107,7 @@ func (h *harness) seedDelivered(t *testing.T, cred string) {
 	if err := h.st.Upsert(store.Record{AMSAccountID: testAMSID, Email: testEmail}, []byte(cred)); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.bridge.Add(context.Background(), tsamx.AddRequest{Email: testEmail, Enable: true}); err != nil {
+	if err := h.bridge.Add(context.Background(), provider.AddRequest{Email: testEmail, Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	h.bridge.SetActiveEmail(testEmail)
@@ -221,7 +222,7 @@ func TestSendFailureRetries(t *testing.T) {
 func TestNoKEKSkips(t *testing.T) {
 	h := newHarness(t, store.NewKEKHolder()) // empty holder
 	// Cannot Upsert without a KEK; seed the pool + disk only, no manifest record.
-	if err := h.bridge.Add(context.Background(), tsamx.AddRequest{Email: testEmail, Enable: true}); err != nil {
+	if err := h.bridge.Add(context.Background(), provider.AddRequest{Email: testEmail, Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	h.bridge.SetActiveEmail(testEmail)
@@ -237,7 +238,7 @@ func TestNoKEKSkips(t *testing.T) {
 // delivered by AMS), so there is nothing to re-sync.
 func TestUndeliveredActiveSkips(t *testing.T) {
 	h := newHarness(t, keks(t))
-	if err := h.bridge.Add(context.Background(), tsamx.AddRequest{Email: "stranger@x.io", Enable: true}); err != nil {
+	if err := h.bridge.Add(context.Background(), provider.AddRequest{Email: "stranger@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	h.bridge.SetActiveEmail("stranger@x.io")
@@ -256,7 +257,7 @@ func TestMissingCredentialFileSkips(t *testing.T) {
 	if err := h.st.Upsert(store.Record{AMSAccountID: testAMSID, Email: testEmail}, []byte(credV1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.bridge.Add(context.Background(), tsamx.AddRequest{Email: testEmail, Enable: true}); err != nil {
+	if err := h.bridge.Add(context.Background(), provider.AddRequest{Email: testEmail, Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	h.bridge.SetActiveEmail(testEmail)
