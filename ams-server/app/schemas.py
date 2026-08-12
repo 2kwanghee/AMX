@@ -177,6 +177,17 @@ class SwitchModeRequest(Wire):
     mode: SwitchMode
 
 
+class SelfUpdateRequest(Wire):
+    """Body of ``POST /servers/{id}:self-update``.
+
+    Only a commit pin, and nothing that could name a source: the agent rebuilds
+    from the clone it was configured with (see proto ``SelfUpdate``). Empty means
+    "advance to the upstream tip". The pattern keeps a typo from reaching the
+    agent as a mismatch that aborts the update after a pull."""
+
+    expected_commit: str = Field(default="", pattern=r"^([0-9a-fA-F]{7,40})?$")
+
+
 # -- Assignment ---------------------------------------------------------------
 class AssignmentCreate(Wire):
     account_id: uuid.UUID

@@ -49,6 +49,10 @@ type Handler struct {
 	outbox    *reporter.Outbox // AccountEvent sink for manual switches; may be nil
 	switchCtl SwitchController // scheduler start/stop; may be nil (tests)
 
+	// selfUpdate enables the self_update command. Nil -> the command is rejected
+	// as unsupported (see handleSelfUpdate).
+	selfUpdate *SelfUpdateConfig
+
 	window time.Duration
 	now    func() time.Time
 
@@ -106,6 +110,9 @@ type Config struct {
 	// SwitchController starts/stops the scheduler on SetSwitchMode. Nil -> mode is
 	// only recorded (P2 behavior).
 	SwitchController SwitchController
+	// SelfUpdate enables the self_update command (rebuild from the local working
+	// tree + restart). Nil -> self_update is rejected as unsupported.
+	SelfUpdate *SelfUpdateConfig
 }
 
 // New validates cfg and returns a Handler.
@@ -132,18 +139,19 @@ func New(cfg Config) (*Handler, error) {
 		engine = &sync.Mutex{}
 	}
 	h := &Handler{
-		agentID:   cfg.AgentID,
-		pub:       cfg.PublicKey,
-		store:     cfg.Store,
-		keks:      cfg.KEKs,
-		applied:   cfg.Applied,
-		bridge:    cfg.Bridge,
-		creds:     cfg.Creds,
-		engine:    engine,
-		outbox:    cfg.Outbox,
-		switchCtl: cfg.SwitchController,
-		window:    w,
-		now:       now,
+		agentID:    cfg.AgentID,
+		pub:        cfg.PublicKey,
+		store:      cfg.Store,
+		keks:       cfg.KEKs,
+		applied:    cfg.Applied,
+		bridge:     cfg.Bridge,
+		creds:      cfg.Creds,
+		engine:     engine,
+		outbox:     cfg.Outbox,
+		switchCtl:  cfg.SwitchController,
+		window:     w,
+		now:        now,
+		selfUpdate: cfg.SelfUpdate,
 	}
 	// Recover a credential persisted by a previous run so the first Register
 	// after a restart authenticates over path B (§7 enroll handshake).
@@ -212,6 +220,11 @@ func (h *Handler) DefaultStrategy() amxv1.SwitchNow_SwitchStrategy {
 }
 
 // Handle processes one command and returns the convergence ack.
+//
+// It returns nil for exactly one case: a self_update whose ack a configured
+// SelfUpdateConfig.AckSender has already delivered (the ack must go out before
+// the process is replaced by exec, which never returns). Callers must treat a
+// nil ack as "already sent" and send nothing.
 func (h *Handler) Handle(ctx context.Context, cmd *amxv1.AmsCommand) *amxv1.CommandAck {
 	ack := &amxv1.CommandAck{
 		CommandId:  cmd.GetCommandId(),
@@ -253,6 +266,8 @@ func (h *Handler) Handle(ctx context.Context, cmd *amxv1.AmsCommand) *amxv1.Comm
 		return h.handleSwitchNow(ctx, cmd, c.SwitchNow, ack)
 	case *amxv1.AmsCommand_ReqReport:
 		return h.handleReqReport(ctx, cmd, c.ReqReport, ack)
+	case *amxv1.AmsCommand_SelfUpdate:
+		return h.handleSelfUpdate(ctx, cmd, c.SelfUpdate, ack)
 	default:
 		return reject(ack, "unknown_command", errors.New("empty or unknown command payload"))
 	}

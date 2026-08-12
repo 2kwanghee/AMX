@@ -166,6 +166,62 @@ A·B트랙이 끝난 상태(서버 온라인)에서, 실제 Claude 계정을 한
 
 ---
 
+# C-2 — 에이전트 자기 업데이트 (self-update)
+
+C트랙이 끝난 상태에서, 원격으로 에이전트를 최신 커밋으로 올리는 경로를 확인합니다.
+에이전트는 **자기 노트북의 클론**(`~/AMX`)만 당겨서 자기를 다시 빌드합니다. 명령에는
+저장소 주소도 브랜치도 실리지 않으니, PC에서 코드를 밀어 넣는 게 아니라 노트북이 스스로
+`git pull`을 하는 것으로 이해하면 됩니다.
+
+호출은 REST입니다(화면 버튼은 별도 트랙). `<TEN>`·`<SRV>`는 테넌트·서버 UUID:
+
+```sh
+curl -X POST -H "Authorization: Bearer $AMX_ADMIN_TOKEN" \
+  http://localhost:8080/api/v1/tenants/<TEN>/servers/<SRV>:self-update    # 202
+```
+
+**시험 1 — 정상 왕복.** 노트북 `~/AMX`가 최신보다 뒤처진 상태를 만들고(`git -C ~/AMX reset
+--hard HEAD~1` 후 `deploy/agent-run.sh up`) 위 명령을 부릅니다.
+
+- **성공 판정**: 30초~2분 뒤 `agent-run.sh logs`에 재기동 흔적이 남고, 화면의 서버 상세
+  `agent_version`이 `p3+<새 커밋 앞 12자>`로 바뀝니다. **버전 문자열이 바뀌는 것이 유일한
+  성공 판정입니다** — ack(CONVERGED)은 "바이너리를 교체하고 재기동을 요청했다"까지만 뜻하고,
+  새 버전이 실제로 떴다는 보장이 아닙니다.
+- 빌드가 도는 동안 계정 전달·스위칭은 평소대로 동작해야 합니다(교체 직전까지 락을 잡지 않음).
+
+**시험 2 — 핀 불일치로 거부.** 있지도 않은 커밋을 못으로 박아 보냅니다:
+
+```sh
+curl -X POST -H "Authorization: Bearer $AMX_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"expectedCommit":"aaaaaaa"}' \
+  http://localhost:8080/api/v1/tenants/<TEN>/servers/<SRV>:self-update
+```
+
+- **성공 판정**: 화면 `알림`에 `self_update_failed`(사유 `commit_mismatch`)가 뜨고, 노트북에서
+  `git -C ~/AMX rev-parse HEAD`가 **호출 전과 같습니다**. 핀 대조는 pull 앞에서 하므로 거부된
+  요청은 작업 트리를 건드리지 않습니다. 에이전트는 계속 온라인이어야 합니다.
+- 같은 서버에 self-update가 이미 queued/sent면 두 번째 호출은 409
+  `self_update_already_pending`으로 막힙니다(연타 방지). 앞 건이 ack되거나 실패해야 다시 됩니다.
+
+**시험 3 — `ama.bak` 수동 복구.** 새 바이너리가 떠서 죽는 상황을 흉내 냅니다. 노트북에서:
+
+```sh
+bash deploy/agent-run.sh down
+cp ~/AMX/.amx-agent/ama.bak ~/AMX/.amx-agent/ama   # 직전 바이너리로 되돌리기
+bash deploy/agent-run.sh up
+```
+
+교체 직전 바이너리는 항상 `ama.bak`에 남습니다. 저장소까지 되돌려야 하면
+`git -C ~/AMX reset --hard origin/main && bash deploy/agent-run.sh up`.
+
+- **성공 판정**: 서버가 다시 온라인이 되고 `agent_version`이 되돌린 커밋을 가리킵니다.
+
+> ⚠ 새 커밋이 지금 돌고 있는 AMS보다 앞설 수 있습니다(핀 없이 보내면 upstream tip으로 갑니다).
+> PC 서버를 먼저 올리거나 `expectedCommit`으로 못을 박으세요. 그리고 플릿에 걸 때는 **1대 먼저
+> 걸어 `agent_version`을 확인한 뒤** 나머지에 겁니다.
+
+---
+
 # D — 끄기·초기화
 
 **PC:**

@@ -348,6 +348,49 @@ def request_refresh_usage(
     db.commit()
 
 
+def request_self_update(
+    db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID, *, expected_commit: str = ""
+) -> None:
+    """Ask the agent to rebuild itself from its own working tree and restart
+    (§6.3 self_update).
+
+    Server-scoped (``assignment_id`` NULL): it moves no assignment state. The
+    payload carries at most a commit pin — never a repository, branch or build
+    flag, so a compromised AMS cannot point an agent at foreign source (proto
+    ``SelfUpdate``). ``expected_commit`` is optional; empty means "whatever the
+    agent's configured upstream tip is".
+
+    Only one may be in flight per server. A self update costs a full rebuild and a
+    restart, so a double-clicked button — or a script fanning out across the fleet
+    twice — would otherwise queue several: the agent honours the first, restarts,
+    and comes back to find the rest waiting. They do not collapse into no-ops
+    either, since each carries its own command_id and the applied-log gate is
+    keyed on that."""
+    inventory.get_server(db, tenant_id, server_id)
+    in_flight = db.scalar(
+        select(AgentCommand).where(
+            AgentCommand.server_id == server_id,
+            AgentCommand.tenant_id == tenant_id,
+            AgentCommand.command_type == "self_update",
+            AgentCommand.status.in_(("queued", "sent")),
+        )
+    )
+    if in_flight is not None:
+        raise conflict(
+            "self_update_already_pending",
+            f"a self update is already {in_flight.status} for this server "
+            f"(command {in_flight.command_id}); wait for it to ack or fail.",
+        )
+    enqueue_server(
+        db,
+        tenant_id=tenant_id,
+        server_id=server_id,
+        command_type="self_update",
+        payload={"expected_commit": expected_commit or ""},
+    )
+    db.commit()
+
+
 def request_set_policy(
     db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID
 ) -> None:

@@ -129,7 +129,7 @@ class Ack(_message.Message):
     def __init__(self, accepted: _Optional[bool] = ..., message: _Optional[str] = ..., received_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class AmsCommand(_message.Message):
-    __slots__ = ("command_id", "signature", "issued_at", "target_agent_id", "deliver", "recall", "set_active", "set_mode", "switch_now", "req_report", "session_setup", "set_policy")
+    __slots__ = ("command_id", "signature", "issued_at", "target_agent_id", "deliver", "recall", "set_active", "set_mode", "switch_now", "req_report", "session_setup", "set_policy", "self_update")
     COMMAND_ID_FIELD_NUMBER: _ClassVar[int]
     SIGNATURE_FIELD_NUMBER: _ClassVar[int]
     ISSUED_AT_FIELD_NUMBER: _ClassVar[int]
@@ -142,6 +142,7 @@ class AmsCommand(_message.Message):
     REQ_REPORT_FIELD_NUMBER: _ClassVar[int]
     SESSION_SETUP_FIELD_NUMBER: _ClassVar[int]
     SET_POLICY_FIELD_NUMBER: _ClassVar[int]
+    SELF_UPDATE_FIELD_NUMBER: _ClassVar[int]
     command_id: str
     signature: bytes
     issued_at: _timestamp_pb2.Timestamp
@@ -154,7 +155,8 @@ class AmsCommand(_message.Message):
     req_report: RequestReport
     session_setup: SessionSetup
     set_policy: SetPolicy
-    def __init__(self, command_id: _Optional[str] = ..., signature: _Optional[bytes] = ..., issued_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., target_agent_id: _Optional[str] = ..., deliver: _Optional[_Union[DeliverAccount, _Mapping]] = ..., recall: _Optional[_Union[RecallAccount, _Mapping]] = ..., set_active: _Optional[_Union[SetAccountActive, _Mapping]] = ..., set_mode: _Optional[_Union[SetSwitchMode, _Mapping]] = ..., switch_now: _Optional[_Union[SwitchNow, _Mapping]] = ..., req_report: _Optional[_Union[RequestReport, _Mapping]] = ..., session_setup: _Optional[_Union[SessionSetup, _Mapping]] = ..., set_policy: _Optional[_Union[SetPolicy, _Mapping]] = ...) -> None: ...
+    self_update: SelfUpdate
+    def __init__(self, command_id: _Optional[str] = ..., signature: _Optional[bytes] = ..., issued_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., target_agent_id: _Optional[str] = ..., deliver: _Optional[_Union[DeliverAccount, _Mapping]] = ..., recall: _Optional[_Union[RecallAccount, _Mapping]] = ..., set_active: _Optional[_Union[SetAccountActive, _Mapping]] = ..., set_mode: _Optional[_Union[SetSwitchMode, _Mapping]] = ..., switch_now: _Optional[_Union[SwitchNow, _Mapping]] = ..., req_report: _Optional[_Union[RequestReport, _Mapping]] = ..., session_setup: _Optional[_Union[SessionSetup, _Mapping]] = ..., set_policy: _Optional[_Union[SetPolicy, _Mapping]] = ..., self_update: _Optional[_Union[SelfUpdate, _Mapping]] = ...) -> None: ...
 
 class SessionSetup(_message.Message):
     __slots__ = ("server_credential", "keys", "active_key_id", "revoked_key_ids")
@@ -254,6 +256,12 @@ class SetPolicy(_message.Message):
     cooldown_seconds: float
     hysteresis_pct: float
     def __init__(self, threshold_pct: _Optional[float] = ..., default_strategy: _Optional[_Union[SwitchNow.SwitchStrategy, str]] = ..., cooldown_seconds: _Optional[float] = ..., hysteresis_pct: _Optional[float] = ...) -> None: ...
+
+class SelfUpdate(_message.Message):
+    __slots__ = ("expected_commit",)
+    EXPECTED_COMMIT_FIELD_NUMBER: _ClassVar[int]
+    expected_commit: str
+    def __init__(self, expected_commit: _Optional[str] = ...) -> None: ...
 
 class RequestReport(_message.Message):
     __slots__ = ("report_type", "reason")

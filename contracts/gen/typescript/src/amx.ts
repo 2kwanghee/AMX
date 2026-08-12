@@ -349,6 +349,7 @@ export interface AmsCommand {
   reqReport?: RequestReport | undefined;
   sessionSetup?: SessionSetup | undefined;
   setPolicy?: SetPolicy | undefined;
+  selfUpdate?: SelfUpdate | undefined;
 }
 
 /**
@@ -562,6 +563,28 @@ export interface SetPolicy {
    */
   cooldownSeconds: number;
   hysteresisPct: number;
+}
+
+/**
+ * Rebuild-and-restart the agent from its own already-configured git working
+ * tree (§6.3 self_update, REST `:self-update`).
+ *
+ * The command deliberately carries NO source location — no repository URL, no
+ * branch, no remote, no build flags. The agent pulls only from the upstream its
+ * local clone is already pinned to (`git pull --ff-only`) and builds only its
+ * own `./cmd/ama`. That is the whole security argument for this command: an AMS
+ * compromise (or a forged-but-somehow-signed command) can make an agent
+ * reinstall the operator's own code, but it cannot point the agent at attacker
+ * source. Do NOT add a URL/branch/ref field here.
+ */
+export interface SelfUpdate {
+  /**
+   * Optional pin: the commit the agent MUST be on after the fast-forward pull.
+   * Empty means "whatever the upstream tip is". A full or abbreviated SHA-1 is
+   * accepted; a mismatch aborts the update BEFORE anything is built or swapped
+   * (ack DIVERGED commit_mismatch), so the running binary is left untouched.
+   */
+  expectedCommit: string;
 }
 
 /**
@@ -1789,6 +1812,7 @@ function createBaseAmsCommand(): AmsCommand {
     reqReport: undefined,
     sessionSetup: undefined,
     setPolicy: undefined,
+    selfUpdate: undefined,
   };
 }
 
@@ -1829,6 +1853,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
     }
     if (message.setPolicy !== undefined) {
       SetPolicy.encode(message.setPolicy, writer.uint32(138).fork()).join();
+    }
+    if (message.selfUpdate !== undefined) {
+      SelfUpdate.encode(message.selfUpdate, writer.uint32(146).fork()).join();
     }
     return writer;
   },
@@ -1936,6 +1963,14 @@ export const AmsCommand: MessageFns<AmsCommand> = {
           message.setPolicy = SetPolicy.decode(reader, reader.uint32());
           continue;
         }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.selfUpdate = SelfUpdate.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1995,6 +2030,11 @@ export const AmsCommand: MessageFns<AmsCommand> = {
         : isSet(object.set_policy)
         ? SetPolicy.fromJSON(object.set_policy)
         : undefined,
+      selfUpdate: isSet(object.selfUpdate)
+        ? SelfUpdate.fromJSON(object.selfUpdate)
+        : isSet(object.self_update)
+        ? SelfUpdate.fromJSON(object.self_update)
+        : undefined,
     };
   },
 
@@ -2036,6 +2076,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
     if (message.setPolicy !== undefined) {
       obj.setPolicy = SetPolicy.toJSON(message.setPolicy);
     }
+    if (message.selfUpdate !== undefined) {
+      obj.selfUpdate = SelfUpdate.toJSON(message.selfUpdate);
+    }
     return obj;
   },
 
@@ -2071,6 +2114,9 @@ export const AmsCommand: MessageFns<AmsCommand> = {
       : undefined;
     message.setPolicy = (object.setPolicy !== undefined && object.setPolicy !== null)
       ? SetPolicy.fromPartial(object.setPolicy)
+      : undefined;
+    message.selfUpdate = (object.selfUpdate !== undefined && object.selfUpdate !== null)
+      ? SelfUpdate.fromPartial(object.selfUpdate)
       : undefined;
     return message;
   },
@@ -3006,6 +3052,70 @@ export const SetPolicy: MessageFns<SetPolicy> = {
     message.defaultStrategy = object.defaultStrategy ?? 0;
     message.cooldownSeconds = object.cooldownSeconds ?? 0;
     message.hysteresisPct = object.hysteresisPct ?? 0;
+    return message;
+  },
+};
+
+function createBaseSelfUpdate(): SelfUpdate {
+  return { expectedCommit: "" };
+}
+
+export const SelfUpdate: MessageFns<SelfUpdate> = {
+  encode(message: SelfUpdate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.expectedCommit !== "") {
+      writer.uint32(10).string(message.expectedCommit);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SelfUpdate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSelfUpdate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.expectedCommit = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SelfUpdate {
+    return {
+      expectedCommit: isSet(object.expectedCommit)
+        ? globalThis.String(object.expectedCommit)
+        : isSet(object.expected_commit)
+        ? globalThis.String(object.expected_commit)
+        : "",
+    };
+  },
+
+  toJSON(message: SelfUpdate): unknown {
+    const obj: any = {};
+    if (message.expectedCommit !== "") {
+      obj.expectedCommit = message.expectedCommit;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<SelfUpdate>): SelfUpdate {
+    return SelfUpdate.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<SelfUpdate>): SelfUpdate {
+    const message = createBaseSelfUpdate();
+    message.expectedCommit = object.expectedCommit ?? "";
     return message;
   },
 };
