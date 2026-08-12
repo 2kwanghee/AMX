@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
@@ -187,7 +188,7 @@ func TestDeliverIdempotentResend(t *testing.T) {
 func TestDeliverResendPreservesActiveNoOp(t *testing.T) {
 	hn := newHarness(t)
 	ctx := context.Background()
-	if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+	if err := hn.fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	cmd := hn.deliverCmd(t, "d1", "acc-b", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, "")
@@ -221,7 +222,7 @@ func TestDeliverPreservesPreviousActive(t *testing.T) {
 	hn := newHarness(t)
 	ctx := context.Background()
 	// Account A is the runner's currently-active account.
-	if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+	if err := hn.fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := hn.fake.ActiveEmail(); got != "a@x.io" {
@@ -272,7 +273,7 @@ func TestDeliverDesiredStatusDoesNotMoveActive(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hn := newHarness(t)
 			ctx := context.Background()
-			if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+			if err := hn.fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 				t.Fatal(err)
 			}
 			ack := hn.apply(t, hn.deliverCmd(t, "d1", "acc-b", "b@x.io", tc.desired, ""))
@@ -692,7 +693,7 @@ func indexOfPrefix(calls []string, prefix string) int {
 func TestDeliverHoldsDeliverLockAroundSwap(t *testing.T) {
 	hn := newHarness(t)
 	ctx := context.Background()
-	if err := hn.fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+	if err := hn.fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	base := len(hn.fake.CallLog())

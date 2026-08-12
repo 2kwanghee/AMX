@@ -3,15 +3,17 @@ package tsamx
 import (
 	"context"
 	"testing"
+
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
 func TestFakeLifecycle(t *testing.T) {
 	ctx := context.Background()
 	f := NewFake()
-	if err := f.Add(ctx, AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+	if err := f.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Add(ctx, AddRequest{Email: "b@x.io", Enable: false}); err != nil {
+	if err := f.Add(ctx, provider.AddRequest{Email: "b@x.io", Enable: false}); err != nil {
 		t.Fatal(err)
 	}
 	if d, _ := f.Disabled("b@x.io"); !d {

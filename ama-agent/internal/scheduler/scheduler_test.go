@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
@@ -20,7 +21,7 @@ func seed(t *testing.T, interval time.Duration, emails ...string) (*tsamx.Fake, 
 	f := tsamx.NewFake()
 	ctx := context.Background()
 	for _, e := range emails {
-		if err := f.Add(ctx, tsamx.AddRequest{Email: e, Enable: true}); err != nil {
+		if err := f.Add(ctx, provider.AddRequest{Email: e, Enable: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -33,7 +34,7 @@ func seed(t *testing.T, interval time.Duration, emails ...string) (*tsamx.Fake, 
 	s := New(Config{
 		AgentID:  testAgent,
 		Bridge:   f,
-		Reporter: reporter.New(testAgent, f, time.Now),
+		Reporter: reporter.New(testAgent, map[string]provider.Bridge{provider.DefaultProvider: f}, time.Now),
 		Outbox:   ob,
 		Interval: interval,
 	})
@@ -106,8 +107,8 @@ func TestTickAllExhaustedByCode(t *testing.T) {
 func TestTickAllExhaustedByPoolSummary(t *testing.T) {
 	f, s, ob := seed(t, time.Hour, "a@x.io", "b@x.io")
 	// Every enabled account at/over the 95% threshold -> pool.all_exhausted.
-	f.SetUsage("a@x.io", &tsamx.Usage{FiveHour: &tsamx.Window{Pct: 99}})
-	f.SetUsage("b@x.io", &tsamx.Usage{FiveHour: &tsamx.Window{Pct: 97}})
+	f.SetUsage("a@x.io", &provider.Usage{FiveHour: &provider.Window{Pct: 99}})
+	f.SetUsage("b@x.io", &provider.Usage{FiveHour: &provider.Window{Pct: 97}})
 	f.AutoCode = 2 // no switch happened, but the pool is exhausted
 	s.Tick(context.Background())
 	got := drain(t, ob)

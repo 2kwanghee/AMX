@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
 // aadSeparator joins amsAccountId and agentId into the AAD. It is a control
@@ -41,8 +42,14 @@ var (
 // Record is one account's manifest entry. Metadata is plaintext; the credential
 // set lives only in Ciphertext (sealed). []byte fields marshal to base64.
 type Record struct {
-	AMSAccountID     string    `json:"amsAccountId"`
-	Email            string    `json:"email"`
+	AMSAccountID string `json:"amsAccountId"`
+	Email        string `json:"email"`
+	// Provider is the vendor key the account belongs to (proto AccountRef.provider).
+	// An empty value reads as provider.DefaultProvider ("claude") so a manifest
+	// written before multi-provider — where every record predates the field — loads
+	// as a Claude account. Lookups normalize both sides, so a record stored empty
+	// still matches a "claude" query.
+	Provider         string    `json:"provider,omitempty"`
 	AccountUUID      string    `json:"accountUuid,omitempty"`
 	AllocationStatus int32     `json:"allocationStatus"` // amxv1.AllocationStatus
 	OrganizationName string    `json:"organizationName,omitempty"`
@@ -253,17 +260,23 @@ func (s *Store) Get(amsAccountID string) (Record, bool) {
 	return *r, true
 }
 
-// FindByEmail returns a shallow copy of the record whose Email matches (the O9
-// re-sync maps the live active account, known only by email, back to its
-// ams_account_id and fingerprint baseline). Absent -> ok=false.
-func (s *Store) FindByEmail(email string) (Record, bool) {
+// FindByProviderEmail returns a shallow copy of the record matching (provider,
+// email) — the O9 re-sync maps the live active account, known only by
+// (provider, email), back to its ams_account_id and fingerprint baseline. Both
+// the stored provider and the query are normalized (empty -> "claude"), so a
+// pre-multi-provider record stored with an empty provider matches a "claude"
+// query. Email alone is NOT a key: the same email may hold a claude AND a codex
+// account, and resolving one by the other's id would misroute a report or a
+// re-sync push. Absent -> ok=false.
+func (s *Store) FindByProviderEmail(providerKey, email string) (Record, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if email == "" {
 		return Record{}, false
 	}
+	want := provider.Normalize(providerKey)
 	for _, r := range s.records {
-		if r.Email == email {
+		if r.Email == email && provider.Normalize(r.Provider) == want {
 			return *r, true
 		}
 	}

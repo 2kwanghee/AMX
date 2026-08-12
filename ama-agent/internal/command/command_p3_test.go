@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/scheduler"
@@ -23,7 +24,7 @@ import (
 // newHarnessBridge builds a harness over a caller-supplied bridge and engine
 // lock (so the same mutex can be shared with a scheduler), and delivers the KEK
 // via a signed SessionSetup as AMS would.
-func newHarnessBridge(t *testing.T, bridge tsamx.Bridge, engine *sync.Mutex, ob *reporter.Outbox) *harness {
+func newHarnessBridge(t *testing.T, bridge provider.Bridge, engine *sync.Mutex, ob *reporter.Outbox) *harness {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -198,8 +199,8 @@ func TestSetPolicyRejectsSnakeCaseKey(t *testing.T) {
 func TestSwitchNowUsesDefaultStrategy(t *testing.T) {
 	fake := tsamx.NewFake()
 	ctx := context.Background()
-	_ = fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true})
-	_ = fake.Add(ctx, tsamx.AddRequest{Email: "b@x.io", Enable: true})
+	_ = fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true})
+	_ = fake.Add(ctx, provider.AddRequest{Email: "b@x.io", Enable: true})
 	fake.SetActiveEmail("a@x.io")
 
 	ob := reporter.NewOutbox()
@@ -308,7 +309,7 @@ type blockingBridge struct {
 	release    chan struct{}
 }
 
-func (b *blockingBridge) Add(ctx context.Context, req tsamx.AddRequest) error {
+func (b *blockingBridge) Add(ctx context.Context, req provider.AddRequest) error {
 	close(b.addStarted)
 	<-b.release
 	return b.Fake.Add(ctx, req)
@@ -327,7 +328,7 @@ func TestEngineLockSerializesDeliverAndTick(t *testing.T) {
 	sched := scheduler.New(scheduler.Config{
 		AgentID:  testAgentID,
 		Bridge:   bb,
-		Reporter: reporter.New(testAgentID, bb, time.Now),
+		Reporter: reporter.New(testAgentID, map[string]provider.Bridge{provider.DefaultProvider: bb}, time.Now),
 		Outbox:   reporter.NewOutbox(),
 		Engine:   engine,
 		Interval: time.Hour,
@@ -366,6 +367,42 @@ func TestEngineLockSerializesDeliverAndTick(t *testing.T) {
 	}
 }
 
+// TestDeliverUnsupportedProviderDiverges (P3 shim security): a deliver naming a
+// provider with no registered bridge must fail CLOSED — DIVERGED with error_code
+// provider_unsupported, and the credential must reach NO bridge (no lock, no add)
+// and NO manifest record. The default harness registers only claude, so "codex"
+// is unregistered.
+func TestDeliverUnsupportedProviderDiverges(t *testing.T) {
+	fake := tsamx.NewFake()
+	hn := newHarnessBridge(t, fake, &sync.Mutex{}, nil)
+
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "d-codex",
+		Cmd: &amxv1.AmsCommand_Deliver{Deliver: &amxv1.DeliverAccount{
+			Account:       &amxv1.AccountRef{AmsAccountId: "acc-x", Email: "x@x.io", Provider: "codex"},
+			DesiredStatus: amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE,
+			// A well-formed envelope: the point is that it is NEVER opened, because the
+			// provider guard runs before any decryption.
+			EncryptedCredential: &amxv1.EncryptedCredential{KeyId: testKeyID},
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_DIVERGED {
+		t.Fatalf("convergence = %v, want DIVERGED", ack.Convergence)
+	}
+	if ack.ErrorCode != "provider_unsupported" {
+		t.Fatalf("error_code = %q, want provider_unsupported", ack.ErrorCode)
+	}
+	if log := fake.CallLog(); len(log) != 0 {
+		t.Fatalf("no bridge method must run for an unsupported provider, got calls: %v", log)
+	}
+	if fake.Has("x@x.io") {
+		t.Fatal("account must not be added for an unsupported provider")
+	}
+	if _, ok := hn.store.Get("acc-x"); ok {
+		t.Fatal("manifest must not record an unsupported-provider account")
+	}
+}
+
 func containsPrefix(log []string, prefix string) bool {
 	for _, c := range log {
 		if strings.HasPrefix(c, prefix) {
@@ -392,7 +429,7 @@ func (b *restoreFailBridge) Switch(_ context.Context, target string) error {
 func TestDeliverRestoreFailureDiverges(t *testing.T) {
 	fake := tsamx.NewFake()
 	ctx := context.Background()
-	if err := fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+	if err := fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	hn := newHarnessBridge(t, &restoreFailBridge{Fake: fake}, &sync.Mutex{}, nil)
@@ -415,7 +452,7 @@ type statusErrBridge struct {
 	*tsamx.Fake
 }
 
-func (b *statusErrBridge) Status(_ context.Context) (*tsamx.StatusResult, error) {
+func (b *statusErrBridge) Status(_ context.Context) (*provider.StatusResult, error) {
 	return nil, errors.New("status unavailable")
 }
 
@@ -426,7 +463,7 @@ func (b *statusErrBridge) Status(_ context.Context) (*tsamx.StatusResult, error)
 func TestDeliverStatusErrorDiverges(t *testing.T) {
 	fake := tsamx.NewFake()
 	ctx := context.Background()
-	if err := fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+	if err := fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	hn := newHarnessBridge(t, &statusErrBridge{Fake: fake}, &sync.Mutex{}, nil)
@@ -472,7 +509,7 @@ func TestDeliverLockTakenOutsideEngineLock(t *testing.T) {
 		lockRelease: make(chan struct{}),
 	}
 	ctx := context.Background()
-	if err := bb.Fake.Add(ctx, tsamx.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
+	if err := bb.Fake.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true}); err != nil {
 		t.Fatal(err)
 	}
 	hn := newHarnessBridge(t, bb, engine, reporter.NewOutbox())

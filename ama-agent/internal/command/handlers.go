@@ -6,17 +6,17 @@ import (
 	"fmt"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
-	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // tsamxAddRequest builds an AddRequest from a plaintext credential set. The
 // caller wipes plaintext after Add returns; the bridge copies what it needs.
-func tsamxAddRequest(ref *amxv1.AccountRef, organizationName string, plaintext []byte, enable bool) tsamx.AddRequest {
-	return tsamx.AddRequest{
+func tsamxAddRequest(ref *amxv1.AccountRef, organizationName string, plaintext []byte, enable bool) provider.AddRequest {
+	return provider.AddRequest{
 		Email:            ref.GetEmail(),
 		AccountUUID:      ref.GetAccountUuid(),
 		OrganizationName: organizationName,
@@ -78,24 +78,37 @@ func (h *Handler) handleSessionSetup(_ context.Context, cmd *amxv1.AmsCommand, s
 // handleDeliver decrypts the credential set, upserts the manifest, and installs
 // the account via the tsamx bridge (SSOT §6.3 deliver, single critical section).
 func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *amxv1.DeliverAccount, ack *amxv1.CommandAck) *amxv1.CommandAck {
+	ref := d.GetAccount()
+	if ref == nil || ref.GetAmsAccountId() == "" || ref.GetEmail() == "" {
+		return reject(ack, "bad_account", errors.New("deliver missing account ref"))
+	}
+	amsID := ref.GetAmsAccountId()
+
+	// Provider routing (P3): select the bridge for this account's provider BEFORE
+	// any lock, decryption, or effect. An unregistered provider must not have its
+	// credential decrypted or handed to any bridge — that fail-closed guard is the
+	// security point of the shim — so bail with a DIVERGED provider_unsupported ack
+	// while the credential is still an opaque envelope.
+	br := h.bridgeFor(ref.GetProvider())
+	if br == nil {
+		out := diverged(ack, "provider_unsupported", fmt.Errorf("provider %q is not registered", ref.GetProvider()))
+		h.record(out, "deliver", amsID, "")
+		return out
+	}
+
 	// B1b: acquire the cross-process deliver lock BEFORE the engine lock. Its
 	// acquisition is bounded and non-blocking (fail-open), so a runner holding the
 	// shared lock delays only THIS deliver's lock — never the engine lock — and the
 	// scheduler tick plus every other command keep running (the engine can never
 	// freeze). The lock wraps the engine-locked swap below and, because it is
 	// deferred first, is released AFTER h.engine.Unlock on return.
-	releaseLock := h.bridge.DeliverLock(ctx)
+	releaseLock := br.DeliverLock(ctx)
 	defer func() { _ = releaseLock() }()
 
 	// Engine lock (R3): the whole deliver critical section is serialized against
 	// the scheduler tick and other mutating commands (design decision 4).
 	h.engine.Lock()
 	defer h.engine.Unlock()
-	ref := d.GetAccount()
-	if ref == nil || ref.GetAmsAccountId() == "" || ref.GetEmail() == "" {
-		return reject(ack, "bad_account", errors.New("deliver missing account ref"))
-	}
-	amsID := ref.GetAmsAccountId()
 	desired := d.GetDesiredStatus()
 	wantEnabled := desired == amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE
 
@@ -119,10 +132,10 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	// enabled state, re-emit CONVERGED without re-running the effect (§3).
 	if _, seen := h.applied.Lookup(cmd.GetCommandId()); seen {
 		if rec, ok := h.store.Get(amsID); ok && rec.AllocationStatus == int32(desired) {
-			if list, err := h.bridge.List(ctx); err == nil {
+			if list, err := br.List(ctx); err == nil {
 				for _, row := range list.Accounts {
 					if row.Email == ref.GetEmail() && row.Disabled == !wantEnabled {
-						h.setAccountState(ctx, ack, ref, desired)
+						h.setAccountState(ctx, br, ack, ref, desired)
 						return converged(ack)
 					}
 				}
@@ -158,6 +171,7 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	rec := store.Record{
 		AMSAccountID:     amsID,
 		Email:            ref.GetEmail(),
+		Provider:         ref.GetProvider(),
 		AccountUUID:      ref.GetAccountUuid(),
 		AllocationStatus: int32(desired),
 		OrganizationName: d.GetOrganizationName(),
@@ -181,7 +195,7 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	// runner was on, so after Add the new account may be left active and we cannot
 	// safely restore. Rather than report a false CONVERGED (silent over-charge), we
 	// surface it as diverged below so AMS is alerted (B1b review item 4).
-	before, statusErr := h.bridge.Status(ctx)
+	before, statusErr := br.Status(ctx)
 	prevActive := ""
 	if statusErr == nil && before != nil {
 		prevActive = before.ActiveEmail
@@ -189,10 +203,10 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 
 	// Install via the bridge (critical section, §6.3). CredentialJSON is the
 	// plaintext set; the bridge writes it to the account's config home.
-	addErr := h.bridge.Add(ctx, tsamxAddRequest(ref, d.GetOrganizationName(), plaintext, wantEnabled))
+	addErr := br.Add(ctx, tsamxAddRequest(ref, d.GetOrganizationName(), plaintext, wantEnabled))
 	wipe(plaintext) // wipe plaintext from memory (§6.3)
 	if addErr != nil {
-		h.setAccountState(ctx, ack, ref, desired)
+		h.setAccountState(ctx, br, ack, ref, desired)
 		out := diverged(ack, "tsamx_add", addErr)
 		h.record(out, "deliver", amsID, desired.String())
 		return out
@@ -202,7 +216,7 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	// we have no safe restore target. Report diverged so the possible over-charge is
 	// not hidden behind a CONVERGED ack (B1b review item 4).
 	if statusErr != nil {
-		h.setAccountState(ctx, ack, ref, desired)
+		h.setAccountState(ctx, br, ack, ref, desired)
 		out := diverged(ack, "active_unknown", statusErr)
 		h.record(out, "deliver", amsID, desired.String())
 		return out
@@ -214,15 +228,15 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	// active. A failed restore leaves the runner on the new account, an overcharge
 	// risk, so it is surfaced as diverged (not converged).
 	if prevActive != "" && prevActive != ref.GetEmail() {
-		if serr := h.bridge.Switch(ctx, prevActive); serr != nil {
-			h.setAccountState(ctx, ack, ref, desired)
+		if serr := br.Switch(ctx, prevActive); serr != nil {
+			h.setAccountState(ctx, br, ack, ref, desired)
 			out := diverged(ack, "tsamx_restore_active", serr)
 			h.record(out, "deliver", amsID, desired.String())
 			return out
 		}
 	}
 
-	h.setAccountState(ctx, ack, ref, desired)
+	h.setAccountState(ctx, br, ack, ref, desired)
 	converged(ack)
 	h.record(ack, "deliver", amsID, desired.String())
 	return ack
@@ -241,6 +255,14 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 	amsID := ref.GetAmsAccountId()
 	email := ref.GetEmail()
 
+	// Provider routing (P3): an unregistered provider gets no bridge effect.
+	br := h.bridgeFor(ref.GetProvider())
+	if br == nil {
+		out := diverged(ack, "provider_unsupported", fmt.Errorf("provider %q is not registered", ref.GetProvider()))
+		h.record(out, "recall", amsID, "")
+		return out
+	}
+
 	// Replay gate (§3): a previously-CONVERGED command_id is a no-op that
 	// re-emits the convergence, so an in-window resend cannot re-purge/re-disable.
 	if h.alreadyApplied(cmd.GetCommandId()) {
@@ -248,12 +270,12 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 		if r.GetPurgeLocalCopy() {
 			status = amxv1.AllocationStatus_ALLOCATION_STATUS_ABSENT
 		}
-		h.setAccountState(ctx, ack, ref, status)
+		h.setAccountState(ctx, br, ack, ref, status)
 		return converged(ack)
 	}
 
 	if r.GetPurgeLocalCopy() {
-		if err := h.bridge.Remove(ctx, email); err != nil {
+		if err := br.Remove(ctx, email); err != nil {
 			out := diverged(ack, "tsamx_remove", err)
 			h.record(out, "recall", amsID, "purge")
 			return out
@@ -263,14 +285,14 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 			h.record(out, "recall", amsID, "purge")
 			return out
 		}
-		h.setAccountState(ctx, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_ABSENT)
+		h.setAccountState(ctx, br, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_ABSENT)
 		converged(ack)
 		h.record(ack, "recall", amsID, "purge")
 		return ack
 	}
 
 	// Default: disable in the pool, keep the record but mark INACTIVE (§O2).
-	if err := h.bridge.Disable(ctx, email); err != nil {
+	if err := br.Disable(ctx, email); err != nil {
 		out := diverged(ack, "tsamx_disable", err)
 		h.record(out, "recall", amsID, "disable")
 		return out
@@ -280,7 +302,7 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 		h.record(out, "recall", amsID, "disable")
 		return out
 	}
-	h.setAccountState(ctx, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_INACTIVE)
+	h.setAccountState(ctx, br, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_INACTIVE)
 	converged(ack)
 	h.record(ack, "recall", amsID, "disable")
 	return ack
@@ -302,18 +324,26 @@ func (h *Handler) handleSetActive(ctx context.Context, cmd *amxv1.AmsCommand, sa
 		status = amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE
 	}
 
+	// Provider routing (P3): an unregistered provider gets no bridge effect.
+	br := h.bridgeFor(ref.GetProvider())
+	if br == nil {
+		out := diverged(ack, "provider_unsupported", fmt.Errorf("provider %q is not registered", ref.GetProvider()))
+		h.record(out, "set_active", amsID, status.String())
+		return out
+	}
+
 	// Replay gate (§3): re-emit a previously-CONVERGED result without toggling
 	// the pool again, so a resend cannot flip a state the operator has changed.
 	if h.alreadyApplied(cmd.GetCommandId()) {
-		h.setAccountState(ctx, ack, ref, status)
+		h.setAccountState(ctx, br, ack, ref, status)
 		return converged(ack)
 	}
 
 	var err error
 	if sa.GetActive() {
-		err = h.bridge.Enable(ctx, email)
+		err = br.Enable(ctx, email)
 	} else {
-		err = h.bridge.Disable(ctx, email)
+		err = br.Disable(ctx, email)
 	}
 	if err != nil {
 		out := diverged(ack, "tsamx_set_active", err)
@@ -327,7 +357,7 @@ func (h *Handler) handleSetActive(ctx context.Context, cmd *amxv1.AmsCommand, sa
 		h.record(out, "set_active", amsID, status.String())
 		return out
 	}
-	h.setAccountState(ctx, ack, ref, status)
+	h.setAccountState(ctx, br, ack, ref, status)
 	converged(ack)
 	h.record(ack, "set_active", amsID, status.String())
 	return ack
@@ -357,7 +387,13 @@ func (h *Handler) handleSetMode(_ context.Context, cmd *amxv1.AmsCommand, sm *am
 // handleSetPolicy applies the central switching policy (O4-C + F4 O4-B):
 // threshold, cooldown_seconds and hysteresis_pct are injected into the tsamx
 // engine (config set autoswitch.*), and the default strategy is kept in memory
-// for auto/switch_now. Runs under the engine
+// for auto/switch_now.
+//
+// The central policy governs the auto-switch provider (claude) ONLY — it is the
+// sole provider that rotates, and these settings are its autoswitch.* config.
+// Non-rotating providers have no auto-switch, so SetPolicy carries no provider
+// dimension and is applied unconditionally to the claude engine. Runs under the
+// engine
 // lock — a threshold change alters the criterion an in-flight tick evaluates, so
 // it must be serialized. Memory-only and re-asserted each session, so it is NOT
 // gated by the applied log (re-application is idempotent).
@@ -434,19 +470,29 @@ func (h *Handler) handleSwitchNow(ctx context.Context, cmd *amxv1.AmsCommand, sn
 	h.engine.Lock()
 	defer h.engine.Unlock()
 
-	before, _ := h.bridge.Status(ctx)
+	ref := sn.GetAccount()
+	// Provider routing (P3): an explicit target's provider selects the bridge; a
+	// strategy-only switch (no account) resolves to the default provider. An
+	// unregistered provider gets no effect.
+	br := h.bridgeFor(ref.GetProvider())
+	if br == nil {
+		return diverged(ack, "provider_unsupported", fmt.Errorf("provider %q is not registered", ref.GetProvider()))
+	}
+	// The switch stays within one provider's pool, so from/to events carry it.
+	pk := provider.Normalize(ref.GetProvider())
+
+	before, _ := br.Status(ctx)
 	var fromEmail string
 	if before != nil {
 		fromEmail = before.ActiveEmail
 	}
 
-	ref := sn.GetAccount()
 	if ref != nil && ref.GetEmail() != "" {
-		if err := h.bridge.Switch(ctx, ref.GetEmail()); err != nil {
+		if err := br.Switch(ctx, ref.GetEmail()); err != nil {
 			return diverged(ack, "tsamx_switch", err)
 		}
-		h.setAccountState(ctx, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE)
-		h.emitManualSwitch(fromEmail, ref.GetEmail())
+		h.setAccountState(ctx, br, ack, ref, amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE)
+		h.emitManualSwitch(pk, fromEmail, ref.GetEmail())
 		converged(ack)
 		h.record(ack, "switch_now", ref.GetAmsAccountId(), ref.GetEmail())
 		return ack
@@ -464,18 +510,18 @@ func (h *Handler) handleSwitchNow(ctx context.Context, cmd *amxv1.AmsCommand, sn
 		ack.Detail = "switch_now: no target account and no strategy (explicit or default)"
 		return diverged(ack, "unsupported_target", nil)
 	}
-	if err := h.bridge.SwitchStrategy(ctx, name); err != nil {
+	if err := br.SwitchStrategy(ctx, name); err != nil {
 		return diverged(ack, "tsamx_switch", err)
 	}
-	after, _ := h.bridge.Status(ctx)
+	after, _ := br.Status(ctx)
 	toEmail := ""
 	if after != nil {
 		toEmail = after.ActiveEmail
 	}
 	if toEmail != "" {
-		h.setAccountState(ctx, ack, &amxv1.AccountRef{Email: toEmail}, amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE)
+		h.setAccountState(ctx, br, ack, &amxv1.AccountRef{Email: toEmail, Provider: pk}, amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE)
 	}
-	h.emitManualSwitch(fromEmail, toEmail)
+	h.emitManualSwitch(pk, fromEmail, toEmail)
 	converged(ack)
 	h.record(ack, "switch_now", "", name)
 	return ack
@@ -483,7 +529,7 @@ func (h *Handler) handleSwitchNow(ctx context.Context, cmd *amxv1.AmsCommand, sn
 
 // emitManualSwitch queues a manual (trigger=manual) switch AccountEvent and moves
 // last_switched_at. Called while the engine lock is held.
-func (h *Handler) emitManualSwitch(fromEmail, toEmail string) {
+func (h *Handler) emitManualSwitch(providerKey, fromEmail, toEmail string) {
 	h.mu.Lock()
 	h.lastSwitchedAt = h.now().UTC()
 	h.mu.Unlock()
@@ -499,10 +545,10 @@ func (h *Handler) emitManualSwitch(fromEmail, toEmail string) {
 		Trigger:       amxv1.AccountEvent_TRIGGER_MANUAL,
 	}
 	if fromEmail != "" {
-		ev.From = &amxv1.AccountRef{Email: fromEmail}
+		ev.From = &amxv1.AccountRef{Email: fromEmail, Provider: providerKey}
 	}
 	if toEmail != "" {
-		ev.To = &amxv1.AccountRef{Email: toEmail}
+		ev.To = &amxv1.AccountRef{Email: toEmail, Provider: providerKey}
 	}
 	// The event is queued in memory regardless; a disk-append error only forfeits
 	// restart durability for this one event (rare, e.g. disk full), so it is

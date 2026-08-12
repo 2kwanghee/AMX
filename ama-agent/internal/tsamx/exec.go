@@ -16,6 +16,9 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
+// ExecBridge implements the provider.Bridge control surface via the tsamx CLI.
+var _ provider.Bridge = (*ExecBridge)(nil)
+
 // deliverLockName is the file flock'd for the deliver critical section (B1b). It
 // is kept separate from the credential files so the runner never touches it.
 const deliverLockName = ".amx-deliver.lock"
@@ -140,7 +143,7 @@ func (b *ExecBridge) run(ctx context.Context, env []string, args ...string) ([]b
 // takes no identifier — so the bridge first has the driver stage that home
 // (credential set + identity). The credential travels by file, never as an
 // argument or a log line (§7).
-func (b *ExecBridge) Add(ctx context.Context, req AddRequest) error {
+func (b *ExecBridge) Add(ctx context.Context, req provider.AddRequest) error {
 	configDir := req.ConfigDir
 	if configDir == "" {
 		configDir = b.ConfigDir
@@ -377,12 +380,12 @@ func (b *ExecBridge) ReadQuarantine(_ context.Context) (map[string]string, error
 }
 
 // List runs `tsamx list --json` and parses the schema-v1 payload.
-func (b *ExecBridge) List(ctx context.Context) (*ListResult, error) {
+func (b *ExecBridge) List(ctx context.Context) (*provider.ListResult, error) {
 	out, err := b.run(ctx, b.env("", ""), "list", "--json")
 	if err != nil {
 		return nil, err
 	}
-	var res ListResult
+	var res provider.ListResult
 	if err := json.Unmarshal(out, &res); err != nil {
 		return nil, fmt.Errorf("parse tsamx list --json: %w", err)
 	}
@@ -392,12 +395,12 @@ func (b *ExecBridge) List(ctx context.Context) (*ListResult, error) {
 // Status runs `tsamx status --json`. tsamx does not emit a stable top-level
 // status schema this narrow, so AMA derives active-account from `list` and keeps
 // Status as a thin convenience over the same read.
-func (b *ExecBridge) Status(ctx context.Context) (*StatusResult, error) {
+func (b *ExecBridge) Status(ctx context.Context) (*provider.StatusResult, error) {
 	list, err := b.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res := &StatusResult{ActiveAccountNumber: list.ActiveAccountNumber}
+	res := &provider.StatusResult{ActiveAccountNumber: list.ActiveAccountNumber}
 	for _, a := range list.Accounts {
 		if a.Active {
 			res.ActiveEmail = a.Email

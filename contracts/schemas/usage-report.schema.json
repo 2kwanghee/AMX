@@ -135,6 +135,10 @@
           "type": "string",
           "minLength": 1
         },
+        "provider": {
+          "description": "Account provider (P3). Absent or empty means \"claude\" for reports from agents that predate the field.",
+          "type": "string"
+        },
         "email": {
           "type": "string",
           "format": "email"

@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
+
+// Fake implements the provider.Bridge control surface in memory for tests.
+var _ provider.Bridge = (*Fake)(nil)
 
 // Fake is an in-memory Bridge for tests. It models the tsamx local pool: a set
 // of accounts keyed by email, an active account, enabled/disabled flags, and a
@@ -47,7 +52,7 @@ type fakeAccount struct {
 	email    string
 	org      string
 	disabled bool
-	usage    *Usage
+	usage    *provider.Usage
 	cred     []byte
 }
 
@@ -66,7 +71,7 @@ func (f *Fake) log(format string, a ...any) {
 }
 
 // Add inserts or updates an account.
-func (f *Fake) Add(_ context.Context, req AddRequest) error {
+func (f *Fake) Add(_ context.Context, req provider.AddRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.AddErr != nil {
@@ -144,14 +149,14 @@ func (f *Fake) Switch(_ context.Context, target string) error {
 }
 
 // List returns the current pool as a ListResult.
-func (f *Fake) List(_ context.Context) (*ListResult, error) {
+func (f *Fake) List(_ context.Context) (*provider.ListResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	res := &ListResult{SchemaVersion: 1}
+	res := &provider.ListResult{SchemaVersion: 1}
 	for i, e := range f.order {
 		acc := f.accounts[e]
 		num := i + 1
-		row := AccountRow{
+		row := provider.AccountRow{
 			Number:           num,
 			Email:            acc.email,
 			OrganizationName: acc.org,
@@ -170,12 +175,12 @@ func (f *Fake) List(_ context.Context) (*ListResult, error) {
 }
 
 // Status returns the active account.
-func (f *Fake) Status(ctx context.Context) (*StatusResult, error) {
+func (f *Fake) Status(ctx context.Context) (*provider.StatusResult, error) {
 	list, err := f.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res := &StatusResult{ActiveAccountNumber: list.ActiveAccountNumber}
+	res := &provider.StatusResult{ActiveAccountNumber: list.ActiveAccountNumber}
 	for _, a := range list.Accounts {
 		if a.Active {
 			res.ActiveEmail = a.Email
@@ -317,7 +322,7 @@ func (f *Fake) ActiveEmail() string {
 }
 
 // SetUsage attaches usage to an account (test seeding).
-func (f *Fake) SetUsage(email string, u *Usage) {
+func (f *Fake) SetUsage(email string, u *provider.Usage) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if acc, ok := f.accounts[email]; ok {

@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/reporter"
 	"github.com/2kwanghee/AMX/ama-agent/internal/store"
-	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -40,8 +40,16 @@ type Handler struct {
 	store   *store.Store
 	keks    *store.KEKHolder
 	applied *store.AppliedLog
-	bridge  tsamx.Bridge
-	creds   *store.CredentialSidecar // nil -> memory-only (tests)
+	// bridge is the default provider's Bridge (claude), used for provider-neutral
+	// reads such as filling account_state on an ack. Routed command effects select
+	// their Bridge through bridgeFor instead.
+	bridge provider.Bridge
+	// bridgeFor resolves the Bridge for a command from its AccountRef.provider
+	// (empty -> "claude"); it returns nil for a provider with no registered bridge,
+	// which the routed handlers turn into a DIVERGED provider_unsupported ack
+	// WITHOUT handing the credential to any bridge. Never nil.
+	bridgeFor func(providerKey string) provider.Bridge
+	creds     *store.CredentialSidecar // nil -> memory-only (tests)
 
 	// engine serializes every tsamx mutation sequence with the scheduler tick
 	// (design decision 4, R3). Shared with the Scheduler; never nil.
@@ -93,12 +101,20 @@ type Handler struct {
 
 // Config assembles a Handler.
 type Config struct {
-	AgentID          string
-	PublicKey        ed25519.PublicKey
-	Store            *store.Store
-	KEKs             *store.KEKHolder
-	Applied          *store.AppliedLog
-	Bridge           tsamx.Bridge
+	AgentID   string
+	PublicKey ed25519.PublicKey
+	Store     *store.Store
+	KEKs      *store.KEKHolder
+	Applied   *store.AppliedLog
+	// Bridge is the default provider's Bridge (claude), required. It backs
+	// provider-neutral reads and is the fallback registry when BridgeFor is nil.
+	Bridge provider.Bridge
+	// BridgeFor resolves a command's Bridge from AccountRef.provider (empty ->
+	// "claude"), returning nil for an unregistered provider. Nil -> the Handler
+	// synthesizes a single-provider router over Bridge: "" / "claude" resolve to
+	// Bridge, any other provider resolves to nil (unsupported). Production wires the
+	// full registry; tests leave it nil.
+	BridgeFor        func(providerKey string) provider.Bridge
 	Creds            *store.CredentialSidecar // optional; nil keeps the credential in memory only
 	AcceptanceWindow time.Duration            // 0 -> DefaultAcceptanceWindow
 	Now              func() time.Time
@@ -138,6 +154,19 @@ func New(cfg Config) (*Handler, error) {
 	if engine == nil {
 		engine = &sync.Mutex{}
 	}
+	// Router: use the wired registry, else synthesize a single-provider one over
+	// the default Bridge. The synthesized form still returns nil for any provider
+	// other than "claude", so the provider_unsupported guard holds in tests too.
+	bridgeFor := cfg.BridgeFor
+	if bridgeFor == nil {
+		defaultBridge := cfg.Bridge
+		bridgeFor = func(providerKey string) provider.Bridge {
+			if provider.Normalize(providerKey) == provider.DefaultProvider {
+				return defaultBridge
+			}
+			return nil
+		}
+	}
 	h := &Handler{
 		agentID:    cfg.AgentID,
 		pub:        cfg.PublicKey,
@@ -145,6 +174,7 @@ func New(cfg Config) (*Handler, error) {
 		keks:       cfg.KEKs,
 		applied:    cfg.Applied,
 		bridge:     cfg.Bridge,
+		bridgeFor:  bridgeFor,
 		creds:      cfg.Creds,
 		engine:     engine,
 		outbox:     cfg.Outbox,
@@ -340,12 +370,14 @@ func (h *Handler) record(ack *amxv1.CommandAck, kind, target, desired string) {
 }
 
 // setAccountState fills ack.account_state from the manifest record + live pool.
-func (h *Handler) setAccountState(ctx context.Context, ack *amxv1.CommandAck, ref *amxv1.AccountRef, status amxv1.AllocationStatus) {
+// The is_current read goes through br — the command's routed bridge — so the ack
+// reflects the pool the command actually acted on, not the default provider's.
+func (h *Handler) setAccountState(ctx context.Context, br provider.Bridge, ack *amxv1.CommandAck, ref *amxv1.AccountRef, status amxv1.AllocationStatus) {
 	au := &amxv1.AccountUsage{
 		Account:          ref,
 		AllocationStatus: status,
 	}
-	if list, err := h.bridge.List(ctx); err == nil {
+	if list, err := br.List(ctx); err == nil {
 		for _, row := range list.Accounts {
 			if row.Email == ref.GetEmail() {
 				au.IsCurrent = row.Active
