@@ -429,6 +429,18 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             cmd.set_mode.CopyFrom(pb.SetSwitchMode(mode=mode))
             sign_command(self._signer, cmd)
             return cmd
+        if ctype == "self_update":
+            # Only the optional commit pin crosses the wire. There is deliberately
+            # no source field to fill in (proto SelfUpdate): the agent updates from
+            # the clone the operator configured on it, never from anything AMS
+            # names. An agent built before this command existed sees an unknown
+            # oneof, so GetCmd() is nil and it nacks REJECTED/unknown_command
+            # rather than misinterpreting the bytes.
+            cmd.self_update.CopyFrom(
+                pb.SelfUpdate(expected_commit=row.payload.get("expected_commit") or "")
+            )
+            sign_command(self._signer, cmd)
+            return cmd
         if ctype == "req_report":
             cmd.req_report.CopyFrom(
                 pb.RequestReport(

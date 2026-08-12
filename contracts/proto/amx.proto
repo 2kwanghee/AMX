@@ -191,10 +191,11 @@ message AmsCommand {
     RequestReport req_report = 15;
     SessionSetup session_setup = 16;
     SetPolicy set_policy = 17;
+    SelfUpdate self_update = 18;
   }
 
   // Reserved for future commands.
-  reserved 18 to 29;
+  reserved 19 to 29;
 }
 
 // Session establishment layer, sent by AMS at the start of a session and again
@@ -352,6 +353,24 @@ message SetPolicy {
   // (e.g. cooldown_seconds=0 disables the cooldown). AMA distinguishes the two.
   double cooldown_seconds = 3;
   double hysteresis_pct = 4;
+}
+
+// Rebuild-and-restart the agent from its own already-configured git working
+// tree (§6.3 self_update, REST `:self-update`).
+//
+// The command deliberately carries NO source location — no repository URL, no
+// branch, no remote, no build flags. The agent pulls only from the upstream its
+// local clone is already pinned to (`git pull --ff-only`) and builds only its
+// own `./cmd/ama`. That is the whole security argument for this command: an AMS
+// compromise (or a forged-but-somehow-signed command) can make an agent
+// reinstall the operator's own code, but it cannot point the agent at attacker
+// source. Do NOT add a URL/branch/ref field here.
+message SelfUpdate {
+  // Optional pin: the commit the agent MUST be on after the fast-forward pull.
+  // Empty means "whatever the upstream tip is". A full or abbreviated SHA-1 is
+  // accepted; a mismatch aborts the update BEFORE anything is built or swapped
+  // (ack DIVERGED commit_mismatch), so the running binary is left untouched.
+  string expected_commit = 1;
 }
 
 // Ask for an immediate report (§6.3 req_report, REST `:refresh-usage`).

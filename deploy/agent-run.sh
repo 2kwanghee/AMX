@@ -82,7 +82,11 @@ build() {
   need go
   mkdir -p "$DEV_DIR"
   printf '%s빌드: go build ./cmd/ama…%s\n' "$c_dim" "$c_rst"
-  ( cd "$ROOT/ama-agent" && go build -o "$BIN" ./cmd/ama ) || die "go build 실패"
+  # 커밋 해시를 바이너리에 새겨 Register 의 agent_version 으로 올린다. self_update
+  # 가 재빌드할 때도 같은 -X main.commit 을 쓰므로, 콘솔에서 보이는 버전 문자열이
+  # 두 경로에서 동일하다. 저장소가 아니면 빈 값 → 버전만 표기.
+  local sha; sha="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  ( cd "$ROOT/ama-agent" && go build -ldflags "-X main.commit=$sha" -o "$BIN" ./cmd/ama ) || die "go build 실패"
   ok "빌드 완료 → $BIN"
 }
 
@@ -112,6 +116,9 @@ agent_up() {
     AMX_AMS_ADDR="$AMS_ADDR"
     AMX_AGENT_ID="$AGENT_ID"
     AMX_STATE_DIR="$STATE_DIR"
+    # self_update 가 fast-forward 할 작업 트리. 명령에는 소스가 실려 오지 않고,
+    # 에이전트는 오직 이 경로의 upstream 만 당긴다.
+    AMX_REPO_DIR="$ROOT"
   )
   [ -n "$ENROLL_TOKEN" ] && e+=( AMX_ENROLL_TOKEN="$ENROLL_TOKEN" )
   [ -n "$SERVER_ID" ]    && e+=( AMX_SERVER_ID="$SERVER_ID" )

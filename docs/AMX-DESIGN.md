@@ -419,6 +419,7 @@ message AmsCommand {
     SetSwitchMode    set_mode    = 13;  // auto / manual
     SwitchNow        switch_now  = 14;  // 수동 스위칭 대상 지정
     RequestReport    req_report  = 15;  // 즉시 사용량 보고 요청
+    SelfUpdate       self_update = 18;  // 자기 저장소 ff-only pull + 재빌드 + 재기동. 소스 지정 필드 없음
   }
 }
 
@@ -449,7 +450,10 @@ message AmaMessage {
 switch_now)는 신규 `command_send_failed`, 모두 `server:kind:account` 키. 같은 대상의 후속 명령이
 CONVERGED로 acked되면 auto-resolve. **서버-scoped 명령**(set_mode/set_policy/req_report)의 최종
 실패는 경보를 열지 않는다 — 다음 세션의 정책 재-assertion이 의도를 재적용하는 자가치유 부류라 침묵이
-설계 의도다(수동 경보 영구 누적·3종 dedupe 키 공유 방지). 승계 명령이 배정의 pending 마커를 이미
+설계 의도다(수동 경보 영구 누적·3종 dedupe 키 공유 방지). **예외는 `self_update`**: 서버-scoped지만
+재-assertion으로 낫지 않고(다음 세션이 다시 빌드해주지 않는다) 되돌릴 배정도 없어서, 실패 ack이
+`self_update_failed`(`server:kind` 키, account 없음)를 연다. 나중 self_update가 CONVERGED로 acked되면
+auto-resolve. 승계 명령이 배정의 pending 마커를 이미
 가져간 구(舊) 명령도 경보를 열지 않는다(승계 명령이 자기 결과로 보고). D2 판정 갭 2건(수용):
 - **갭3 오프라인 서버**: report가 오지 않으면 reconcile-on-report에 도달하지 못하나, 오프라인 서버는
   `server_offline` 경보(§5.6, `last_seen_at` 스위퍼)가 커버한다. `command_send_failed`는 account-scoped
@@ -592,6 +596,54 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
 | switch_now | `tsamx switch <num\|email>` (또는 `--strategy best`) | 이미 활성이면 no-op |
 | set_mode | auto: scheduler 틱 시작 / manual: 틱 중지 | 값 동일 no-op |
 | req_report | 즉시 §6.5 리포트 생성·전송 | 항상 수행 (조회는 멱등) |
+| self_update | 프리플라이트(go 툴체인·디스크) → `git fetch` → `git rev-parse @{u}`로 원격 tip 확인 → (핀 지정 시) tip 대조 → `git pull --ff-only` → `go build -o ama.new ./cmd/ama` → `ama.new --version` 스모크 → 현 바이너리를 `ama.bak`으로 백업 → `rename(ama.new → ama)` → applied.log 기록 → ack → `execve` 재기동 | applied.log에 CONVERGED면 재빌드·재기동 없이 CONVERGED 재회신 |
+
+- ⚠ **self_update는 소스를 명령으로 받지 않는다**: 프로토 `SelfUpdate`에는 `expected_commit`
+  하나뿐이고 저장소 URL·브랜치·빌드 플래그 필드가 없다. 에이전트는 운영자가 심어둔 자기 클론의
+  upstream만 `--ff-only`로 당기고 자기 `./cmd/ama`만 빌드한다. AMS가 털려도 공격자 소스를 가리킬
+  수는 없다는 것이 이 명령 설계의 전부이므로, 나중에도 소스 지정 필드를 추가하지 않는다.
+- ⚠ **핀 대조는 pull 앞에서 한다**: `expected_commit`은 "이 커밋이 되어라"가 아니라 "이 커밋이
+  아니면 하지 마라"는 거부권이다. 그래서 fetch로 추적 ref만 갱신한 뒤 `@{u}`(현재 브랜치의 upstream)
+  tip과 먼저 대조하고, 일치할 때만 pull한다. 대조를 pull 뒤로 미루면 운영자가 명시적으로 거부한
+  커밋으로 작업 트리가 이미 이동한 뒤가 된다. 불일치면 `commit_mismatch`로 nack하고 트리는 그대로다.
+  짧은 해시(7자 이상) prefix 매칭이며 대소문자는 무시한다. pull 뒤 HEAD를 한 번 더 보는 것은
+  이중 방어일 뿐 1차 관문이 아니다.
+- ⚠ **실패는 전부 무변경으로 끝난다**: fetch·핀 대조·pull·빌드·스모크는 **엔진 락 밖**에서 돌고
+  설치된 바이너리를 건드리지 않는다. 어느 단계에서 깨지든 DIVERGED(`preflight_failed`/
+  `git_fetch_failed`/`no_upstream`/`commit_mismatch`/`git_pull_failed`/`build_failed`/`smoke_failed`)로
+  nack하고 에이전트는 쓰던 바이너리로 계속 돈다. 각 단계에는 상한이 걸려 있고(git 120s·빌드 600s·
+  스모크 15s) 초과하면 `timeout_git`/`timeout_build`/`timeout_smoke`다 — 응답 없는 remote나 물린
+  링커가 명령을 영원히 붙잡고 있으면, 교체 전까지 락을 잡지 않는 설계 탓에 운영자 눈에는 그냥 ack이
+  오지 않는 에이전트로만 보인다. 검증된 바이너리가 나온 뒤에야 엔진 락을 잡고 백업·교체·기록·
+  ack·exec을 잇달아 수행한다.
+- ⚠ **스모크는 세 조건을 모두 요구한다**: 15초 내 종료, exit 0, 그리고 출력에 방금 빌드한 커밋
+  해시가 들어 있을 것. 셋째가 핵심이다 — `--version`을 모르는 커밋(기능 revert, 구 브랜치)은 그
+  플래그를 그냥 무시하고 **정식 에이전트로 기동해** 버린다. 그대로 설치하면 중복 등록이고, 그
+  바이너리는 다시는 self_update를 받을 수 없다. 스모크 실행 env는 `PATH`·`HOME`만 넘기는
+  화이트리스트라 `AMX_AMS_ADDR`·`AMX_AGENT_ID`가 없고, 그런 빌드는 AMS를 못 찾아 상한에 걸려
+  죽거나 커밋 해시 없는 출력을 내므로 어느 쪽이든 거부된다.
+- ⚠ **ack은 "교체 성공"이지 "신버전 기동"이 아니다**: CONVERGED는 디스크의 바이너리를 바꾸고
+  재기동을 요청했다는 뜻까지다. 새 버전이 실제로 떴는지는 다음 Register의 `agent_version`
+  (`p3+<shortsha>`)으로만 확인한다. ack 송신은 exec 전에 전송 확인까지 최대 2초 기다리지만
+  best-effort다 — 유실돼도 AMS가 같은 command_id를 재큐하고 재기동한 프로세스가 applied.log를 보고
+  CONVERGED를 재회신한다. 그래서 applied.log 기록이 exec보다 **먼저**여야 한다. 기록이 날아가면
+  재큐마다 다시 빌드하고 다시 재기동하는 부트 루프가 된다. exec 자체가 실패한 경우에도 이미 확정한
+  CONVERGED를 뒤집지 않는다 — 교체는 성공했고 다음 재시작에 반영되므로, DIVERGED로 정정하면
+  사실과 어긋나는 데다 재큐 억제까지 풀린다.
+- ⚠ **플릿 적용은 한 대씩 검증하고 넓힌다**: 1대에 먼저 걸고 `agent_version`이 새 커밋으로 바뀌는
+  것을 확인한 뒤 나머지에 건다. 한 서버에 동시에 두 건은 못 건다 — queued/sent인 self_update가
+  있으면 REST가 409 `self_update_already_pending`으로 막는다(버튼 연타·중복 스크립트 방지).
+- ⚠ **버전 스큐**: 핀 없이 보내면 에이전트는 자기 upstream tip으로 간다. 그 tip이 지금 돌고 있는
+  AMS보다 앞설 수 있고, 그러면 서버가 모르는 계약으로 빌드된 에이전트가 뜬다. 서버를 먼저 올리거나
+  `expected_commit`으로 못을 박아라.
+- ⚠ **로컬 클론을 신뢰한다는 전제**: 이 설계는 AMS를 신뢰하지 않는 대신 에이전트의 클론과 그
+  추적 브랜치를 신뢰한다. 따라서 **그 브랜치에 push할 수 있는 사람은 에이전트 호스트에서 코드를
+  실행할 수 있는 사람과 같다.** 배포용 추적 브랜치의 push 권한은 그 기준으로 관리한다.
+- ⚠ **연결 단계에서 죽으면 수동 복구**: 새 바이너리가 뜨자마자 크래시하면 감시형 러너가 없어
+  자동 롤백이 걸리지 않는다(승격은 보류 결정). 직전 바이너리는 `ama.bak`에 남아 있고, 정석 복구는
+  `git -C ~/AMX reset --hard origin/main && bash deploy/agent-run.sh up`이다. 실패 ack은 서버에서
+  `self_update_failed` 알림으로 뜬다 — 서버-scoped 명령이라 되돌릴 배정이 없어서, 알림이 아니면
+  업데이트가 안 먹은 사실이 아무 데도 안 보인다.
 
 - ⚠ **deliver 크리티컬 섹션 (B1 구현)**: `add`가 신규 슬롯을 활성으로 만들지만 deliver는 풀 추가·
   enable/disable일 뿐이므로(활성 전환은 §6.4 auto/switch_now 소유), AMA는 **add 전 활성 계정을 기록해

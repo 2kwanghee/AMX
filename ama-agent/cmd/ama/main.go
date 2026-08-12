@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -44,7 +45,45 @@ const eventFlushInterval = 1 * time.Second
 // full or disconnected; the next flush (or OnConnect) retries it.
 var errOutboxSendUnavailable = errors.New("ama: outbox send unavailable")
 
+// selfUpdateAckWait bounds how long the self_update handler waits for its ack to
+// be confirmed on the wire before it execs anyway. Long enough for a healthy
+// stream to flush, short enough that a wedged one does not delay the restart.
+const selfUpdateAckWait = 2 * time.Second
+
+// version is the agent's release line. commit is stamped at build time with
+// `-ldflags "-X main.commit=<sha>"` (deploy/agent-run.sh, and the self_update
+// rebuild) and is empty for a plain `go build`. Together they form the
+// agent_version string AMS records on Register, so the console can tell which
+// commit each agent is actually running — the thing self_update exists to move.
+var (
+	version = "p3"
+	commit  = ""
+)
+
+// agentVersion renders "<version>+<shortsha>", or just the version when the
+// build carried no commit. The server column is a plain string, so no schema
+// change is involved.
+func agentVersion() string {
+	if commit == "" {
+		return version
+	}
+	short := commit
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	return version + "+" + short
+}
+
 func main() {
+	// --version must work before any state is opened: the self_update smoke test
+	// runs the freshly built binary with this flag to prove it can execute at all
+	// (internal/command/selfupdate.go), and it must not touch the live state dir.
+	for _, a := range os.Args[1:] {
+		if a == "--version" || a == "-version" {
+			fmt.Println(agentVersion())
+			return
+		}
+	}
 	if err := run(); err != nil {
 		log.Fatalf("ama: %v", err)
 	}
@@ -121,6 +160,16 @@ func run() error {
 		Logf:     log.Printf,
 	})
 
+	// self_update (§6.3): rebuild from the agent's OWN working tree and restart.
+	// AMX_REPO_DIR names that tree (deploy/agent-run.sh sets it); with no repo
+	// configured the command is rejected as unsupported rather than guessing a
+	// path. AckSender is filled in below, once the transport client exists — the
+	// ack has to go out before the exec replaces this process.
+	var selfUpdate *command.SelfUpdateConfig
+	if repoDir := os.Getenv("AMX_REPO_DIR"); repoDir != "" {
+		selfUpdate = &command.SelfUpdateConfig{RepoDir: repoDir}
+	}
+
 	handler, err := command.New(command.Config{
 		AgentID:          agentID,
 		PublicKey:        pub,
@@ -132,6 +181,7 @@ func run() error {
 		Engine:           engine,
 		Outbox:           outbox,
 		SwitchController: sched,
+		SelfUpdate:       selfUpdate,
 	})
 	if err != nil {
 		return err
@@ -147,6 +197,32 @@ func run() error {
 	}
 	client := transport.Dial(amsAddr, secOpt)
 	defer client.Close()
+
+	// The self_update handler sends its own ack: syscall.Exec never returns, so
+	// an ack left for the loop below would never be sent. Handle then returns nil
+	// for that command and the loop skips its own send.
+	//
+	// SendConfirmed yields the stream.Send result, so we can wait for the write to
+	// actually leave rather than only reaching the send buffer — otherwise the
+	// exec routinely destroys the ack before the pump gets to it. The wait is
+	// bounded: a stalled or disconnected stream must not hold up the restart,
+	// because a lost ack is already covered (AMS re-queues the command_id and the
+	// restarted agent answers CONVERGED from its applied log).
+	if selfUpdate != nil {
+		selfUpdate.Logf = log.Printf
+		selfUpdate.AckSender = func(ack *amxv1.CommandAck) error {
+			done, ok := client.SendConfirmed(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Ack{Ack: ack}})
+			if !ok {
+				return errors.New("ama: transport closed")
+			}
+			select {
+			case err := <-done:
+				return err
+			case <-time.After(selfUpdateAckWait):
+				return errors.New("ama: ack send not confirmed in time")
+			}
+		}
+	}
 
 	// O9 credential re-sync (§5.7): watch the active account's live credential for
 	// a local refresh-token rotation and push the refreshed set back to AMS. The
@@ -186,7 +262,7 @@ func run() error {
 			AgentId:           agentID,
 			ServerId:          serverID,
 			Hostname:          hostname(),
-			AgentVersion:      "p3",
+			AgentVersion:      agentVersion(),
 			SwitchMode:        handler.SwitchMode(),
 			AppliedCommandIds: applied.RecentIDs(),
 			AgentPublicKey:    agentPub,
@@ -330,9 +406,12 @@ func run() error {
 		case <-ctx.Done():
 			return nil
 		case cmd := <-client.Recv():
-			ack := handler.Handle(ctx, cmd)
-			if err := client.Send(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Ack{Ack: ack}}); err != nil {
-				log.Printf("ack send: %v", err)
+			// A nil ack means the handler already sent it (self_update, which acks
+			// from inside its critical section and then execs).
+			if ack := handler.Handle(ctx, cmd); ack != nil {
+				if err := client.Send(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Ack{Ack: ack}}); err != nil {
+					log.Printf("ack send: %v", err)
+				}
 			}
 			// A RequestReport also produces a UsageReport (reading is idempotent).
 			if _, ok := cmd.GetCmd().(*amxv1.AmsCommand_ReqReport); ok {

@@ -107,6 +107,8 @@ export const api = {
     bff<CommandAccepted>('POST', `tenants/${t}/servers/${id}:switch-mode`, { mode }),
   refreshUsage: (t: string, id: string) =>
     bff<CommandAccepted>('POST', `tenants/${t}/servers/${id}:refresh-usage`),
+  serverSelfUpdate: (t: string, id: string) =>
+    bff<CommandAccepted>('POST', `tenants/${t}/servers/${id}:self-update`),
 
   // Assignments
   listAssignments: (t: string) => bff<AssignmentPage>('GET', `tenants/${t}/assignments`),

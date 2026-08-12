@@ -116,6 +116,11 @@ def apply_ack(
         command.updated_at = _now()
         if assignment is not None:
             _apply_converged(db, command, assignment)
+        elif command.command_type == "self_update":
+            # The agent rebuilt and restarted; close any alert from an earlier
+            # failed attempt (the account-scoped auto-resolves live in
+            # _apply_converged, which server-scoped commands never reach).
+            alerts.resolve(db, server_id=command.server_id, kind="self_update_failed")
         db.commit()
         return
 
@@ -123,6 +128,26 @@ def apply_ack(
     command.status = "failed"
     command.detail = (error_code or detail or convergence)[:2000]
     command.updated_at = _now()
+    if command.command_type == "self_update":
+        # Server-scoped, so there is no assignment to revert and nothing else
+        # would surface this: the agent stayed on its old binary and simply
+        # nacked (preflight/pull/build/commit_mismatch — see the AMA handler).
+        # Without an alert a self update that never lands is invisible, and the
+        # operator would go on believing the fleet is on the new commit.
+        alerts.open_alert(
+            db,
+            tenant_id=tenant_id,
+            server_id=command.server_id,
+            kind="self_update_failed",
+            severity="warning",
+            detail={
+                "reason": convergence,
+                "error_code": error_code or "",
+                "last_error": command.detail,
+                "command_id": command_id,
+                "expected_commit": (command.payload or {}).get("expected_commit") or "",
+            },
+        )
     if assignment is not None:
         assignment.last_error = (error_code or detail or convergence)[:2000]
         assignment.pending_command_id = None

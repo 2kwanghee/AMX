@@ -149,6 +149,24 @@ def refresh_usage(tenant_id: uuid.UUID, server_id: uuid.UUID, db: DbSession, pri
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
+@router.post("/servers/{server_id}:self-update", status_code=status.HTTP_202_ACCEPTED)
+def self_update(
+    tenant_id: uuid.UUID,
+    server_id: uuid.UUID,
+    db: DbSession,
+    principal: AdminPrincipal,
+    body: schemas.SelfUpdateRequest | None = None,
+):
+    # Queues a SelfUpdate for the connected agent: it fast-forwards its own
+    # working tree, rebuilds and restarts (§6.3 self_update). 202 rather than 200
+    # because the outcome only arrives later, as the agent's ack — a failure opens
+    # a ``self_update_failed`` alert. Resolves the server first so a cross-tenant
+    # id gets 404 before anything is queued.
+    commit = body.expected_commit if body is not None else ""
+    commands.request_self_update(db, tenant_id, server_id, expected_commit=commit)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
 @router.post("/servers/{server_id}:switch-mode", response_model=schemas.Server)
 def set_switch_mode(
     tenant_id: uuid.UUID, server_id: uuid.UUID, body: schemas.SwitchModeRequest, db: DbSession, principal: AdminPrincipal

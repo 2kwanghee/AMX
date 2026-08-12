@@ -58,6 +58,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
   const [policyOf, setPolicyOf] = useState<Server | null>(null);
   const [eventsOf, setEventsOf] = useState<Server | null>(null);
   const [tokenOf, setTokenOf] = useState<EnrollTokenResponse | null>(null);
+  const [updateOf, setUpdateOf] = useState<Server | null>(null);
   const act = useAction();
   const now = useNow(1000);
   const servers = data?.items ?? [];
@@ -131,6 +132,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
               >
                 <Icon name="key" size={15} />
               </button>
+              <button className="tile-btn" title="에이전트 업데이트" disabled={act.busy} onClick={() => setUpdateOf(s)}>
+                <Icon name="rotate" size={15} />
+              </button>
               <button className="tile-btn danger" title="삭제" disabled={act.busy} onClick={() => act.run(() => api.deleteServer(tenantId, s.id), () => mutate())}>
                 <Icon name="trash" size={15} />
               </button>
@@ -199,6 +203,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
                     >
                       등록 토큰
                     </button>
+                    <button disabled={act.busy} onClick={() => setUpdateOf(s)}>
+                      에이전트 업데이트
+                    </button>
                     <button
                       className="danger"
                       disabled={act.busy}
@@ -231,6 +238,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
           onDone={() => { setPolicyOf(null); mutate(); }}
         />
       )}
+      {updateOf && <SelfUpdateModal tenantId={tenantId} server={updateOf} onClose={() => setUpdateOf(null)} />}
       {tokenOf && (
         <Modal title="등록 토큰 (한 번만 표시)" onClose={() => setTokenOf(null)}>
           <p className="muted">지금 복사하세요 — 다시 조회할 수 없습니다.</p>
@@ -242,6 +250,46 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
         </Modal>
       )}
     </div>
+  );
+}
+
+// SelfUpdate 2단계 — 에이전트를 최신 코드로 자체 업데이트하도록 명령한다. 진행
+// 상태는 별도 추적하지 않고, 명령 전송 후에는 기존 servers 폴링이 status(잠깐
+// offline→online)와 agentVersion(커밋 해시 변경)으로 결과를 드러낸다. 실패 시
+// self_update_failed 경보가 AlertsPanel에 뜬다.
+function SelfUpdateModal({
+  tenantId,
+  server,
+  onClose,
+}: {
+  tenantId: string;
+  server: Server;
+  onClose: () => void;
+}) {
+  const act = useAction();
+  const [sent, setSent] = useState(false);
+  return (
+    <Modal title={`에이전트 업데이트 — ${server.name}`} onClose={onClose}>
+      <p>
+        서버 <b>{server.name}</b>의 에이전트를 최신 코드로 업데이트합니다. 업데이트 중 잠시 오프라인이 될 수 있습니다.
+      </p>
+      <p className="muted">
+        현재 버전 <span className="mono">{server.agentVersion || '알 수 없음'}</span>
+      </p>
+      {act.error && <p className="err">{act.error}</p>}
+      {sent ? (
+        <p style={{ marginTop: 14 }}>업데이트 명령 전송됨 — 폴링으로 상태·버전이 곧 갱신됩니다.</p>
+      ) : (
+        <button
+          className="primary"
+          style={{ marginTop: 14 }}
+          disabled={act.busy}
+          onClick={() => act.run(() => api.serverSelfUpdate(tenantId, server.id), () => setSent(true))}
+        >
+          업데이트 실행
+        </button>
+      )}
+    </Modal>
   );
 }
 

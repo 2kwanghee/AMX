@@ -54,6 +54,7 @@ COMMAND_TYPES = (
     "switch_now",
     "req_report",
     "set_policy",
+    "self_update",
 )
 COMMAND_STATUSES = ("queued", "sent", "acked", "failed")
 SWITCH_STRATEGIES = ("best", "next_available")
@@ -64,6 +65,7 @@ ALERT_KINDS = (
     "quarantine",
     "recall_failed",
     "command_send_failed",
+    "self_update_failed",
 )
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")
