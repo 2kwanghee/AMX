@@ -18,6 +18,7 @@ import type {
   OauthCompleteRequest,
   OauthStartRequest,
   OauthStartResponse,
+  SelfUpdateStatus,
   Server,
   ServerCreate,
   ServerPage,
@@ -109,6 +110,8 @@ export const api = {
     bff<CommandAccepted>('POST', `tenants/${t}/servers/${id}:refresh-usage`),
   serverSelfUpdate: (t: string, id: string) =>
     bff<CommandAccepted>('POST', `tenants/${t}/servers/${id}:self-update`),
+  getSelfUpdateStatus: (t: string, id: string) =>
+    bff<SelfUpdateStatus>('GET', `tenants/${t}/servers/${id}/self-update-status`),
 
   // Assignments
   listAssignments: (t: string) => bff<AssignmentPage>('GET', `tenants/${t}/assignments`),
