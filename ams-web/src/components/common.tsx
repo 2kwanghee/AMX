@@ -61,7 +61,8 @@ export type IconName =
   | 'activity'
   | 'alert'
   | 'refresh'
-  | 'check';
+  | 'check'
+  | 'help';
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   grid: (
@@ -190,6 +191,13 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
     </>
   ),
   check: <path d="M20 6 9 17l-5-5" />,
+  help: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </>
+  ),
 };
 
 export function Icon({

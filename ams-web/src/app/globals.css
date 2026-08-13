@@ -831,3 +831,34 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
   border-radius: 4px; border: 1px solid var(--border); color: var(--muted);
   background: var(--surface-2); align-self: center;
 }
+
+/* -- 설치·운영 가이드 (설치 가이드 탭) ---------------------------------- */
+.guide-section { margin-top: 18px; }
+.guide-section:first-of-type { margin-top: 8px; }
+.guide-h {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.guide-hint { font-size: 12px; font-weight: 400; }
+.guide-item {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); margin-bottom: 8px; overflow: hidden;
+}
+.guide-item summary {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 11px 14px; list-style: none; font-size: 13.5px;
+}
+.guide-item summary::-webkit-details-marker { display: none; }
+.guide-item summary:hover { background: var(--surface-2); }
+.guide-item[open] summary { border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.guide-mark { flex: 0 0 auto; display: inline-flex; color: var(--accent); }
+.guide-mark.warn { color: var(--warn); }
+.guide-symptom { font-weight: 500; }
+.guide-body { padding: 12px 14px 14px; }
+.guide-body p { margin: 0 0 10px; font-size: 13px; line-height: 1.7; }
+.guide-body p b { color: var(--ink); }
+.guide-cmd {
+  margin: 0; padding: 11px 13px; background: var(--side-bg); color: var(--side-ink-strong);
+  border-radius: 8px; font-family: var(--mono); font-size: 12px; line-height: 1.65;
+  white-space: pre; overflow-x: auto;
+}

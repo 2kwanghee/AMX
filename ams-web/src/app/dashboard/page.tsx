@@ -16,6 +16,7 @@ import { AccountsPanel } from '@/components/AccountsPanel';
 import { AlertsBadge, AlertsPanel } from '@/components/AlertsPanel';
 import { AssignmentsPanel, currentActiveByServer } from '@/components/AssignmentsPanel';
 import { ServersPanel } from '@/components/ServersPanel';
+import { SetupGuidePanel } from '@/components/SetupGuidePanel';
 import { TopologyView } from '@/components/topology/TopologyView';
 import {
   ConsoleHeader,
@@ -31,7 +32,7 @@ import {
   type IconName,
 } from '@/components/common';
 
-type Tab = 'home' | 'console' | 'servers' | 'accounts' | 'assignments' | 'alerts';
+type Tab = 'home' | 'console' | 'servers' | 'accounts' | 'assignments' | 'alerts' | 'guide';
 
 const MENU: { id: Tab; label: string; icon: IconName }[] = [
   { id: 'home', label: '대시보드', icon: 'grid' },
@@ -40,6 +41,7 @@ const MENU: { id: Tab; label: string; icon: IconName }[] = [
   { id: 'accounts', label: '계정', icon: 'user' },
   { id: 'assignments', label: '할당', icon: 'link' },
   { id: 'alerts', label: '알림', icon: 'bell' },
+  { id: 'guide', label: '설치 가이드', icon: 'help' },
 ];
 
 const TITLES: Record<Tab, string> = {
@@ -49,6 +51,7 @@ const TITLES: Record<Tab, string> = {
   accounts: '계정',
   assignments: '할당',
   alerts: '알림',
+  guide: '설치·운영 가이드',
 };
 
 export default function Dashboard() {
@@ -123,7 +126,9 @@ export default function Dashboard() {
 
       <main className="main">
         <ConsoleHeader title={TITLES[tab]} />
-        {!active && <p className="muted">테넌트가 없습니다. 새 테넌트를 만들어 시작하세요.</p>}
+        {!active && tab !== 'guide' && (
+          <p className="muted">테넌트가 없습니다. 새 테넌트를 만들어 시작하세요.</p>
+        )}
 
         {active && tab === 'home' && (
           <>
@@ -138,6 +143,7 @@ export default function Dashboard() {
         {active && tab === 'accounts' && <AccountsPanel tenantId={active} />}
         {active && tab === 'assignments' && <AssignmentsPanel tenantId={active} />}
         {active && tab === 'alerts' && <AlertsPanel tenantId={active} />}
+        {tab === 'guide' && <SetupGuidePanel />}
       </main>
 
       {creatingTenant && (
