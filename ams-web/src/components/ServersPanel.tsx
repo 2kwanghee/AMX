@@ -28,6 +28,7 @@ import {
   TimeCell,
   fmtTime,
   krLabel,
+  providerIcon,
   useAction,
   useMarkOnData,
   useNow,
@@ -644,6 +645,7 @@ function UsageModal({
                                   <div className="usage-window" key={w.id}>
                                     {prov && (
                                       <span className={`uw-prov ${prov}`} title={`${krLabel(prov)} 창 ${w.id}`}>
+                                        <Icon name={providerIcon(prov)} size={10} />
                                         {krLabel(prov)}
                                       </span>
                                     )}

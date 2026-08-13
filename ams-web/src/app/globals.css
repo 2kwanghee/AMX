@@ -148,6 +148,17 @@ td.num, th.num { font-variant-numeric: tabular-nums; }
 @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .badge .dot { animation: none !important; } }
 
+/* provider 전용 태그 — 상태 Badge와 분리. provider 값에 따라 아이콘·색 고정.
+   claude=틸 액센트, codex=인디고. 특이도(0,1,0)만 써서 전역 규칙과 충돌 없음. */
+.prov-tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: 999px; font-size: 12px;
+  background: var(--surface-2); color: var(--ink); white-space: nowrap;
+}
+.prov-tag svg { flex: 0 0 auto; }
+.prov-tag.claude { background: var(--accent-soft); color: var(--accent); }
+.prov-tag.codex { background: var(--kpi-indigo-soft); color: var(--kpi-indigo); }
+
 .alert-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; padding: 0 5px;
@@ -599,6 +610,7 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
   --canvas-muted: #708096;
   --canvas-accent: #2DD4BF;      /* 밝은 틸 */
   --canvas-accent-soft: rgba(45, 212, 191, 0.14);
+  --canvas-indigo: #A5B4FC;      /* 밝은 인디고 — 다크 캔버스에서 codex 구분용 */
   --canvas-ok: #34D399;
   --canvas-warn: #FBBF24;
   --canvas-crit: #F87171;
@@ -696,11 +708,16 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-acc { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .topo-acc .email-cell { min-width: 0; }
 .topo-prov {
-  flex: 0 0 auto; font-size: 10px; line-height: 1.7; letter-spacing: .02em; padding: 0 6px;
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; line-height: 1.7; letter-spacing: .02em; padding: 0 6px;
   border-radius: 5px; border: 1px solid var(--canvas-border);
   background: var(--canvas-bg-3); color: var(--canvas-muted);
 }
+.topo-prov svg { flex: 0 0 auto; }
+/* 아이콘 색만 프로바이더별로 구분 — 다크 캔버스 가독성 유지 */
+.topo-prov.claude svg { color: var(--canvas-accent); }
 .topo-prov.codex { border-color: var(--canvas-accent); color: var(--canvas-accent); background: var(--canvas-accent-soft); }
+.topo-prov.codex svg { color: var(--canvas-indigo); }
 
 /* 서버 노드 */
 .topo-srv { display: flex; flex-direction: column; gap: 10px; }
@@ -827,10 +844,15 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 /* 창의 출처 프로바이더. codex의 10080분 창과 claude의 seven_day가 같은 "7일"로
    찍히므로, 한 화면에 섞였을 때 이 태그가 유일한 구분점이다. */
 .usage-window .uw-prov {
+  display: inline-flex; align-items: center; gap: 4px;
   font-size: 10px; line-height: 1.6; letter-spacing: .02em; padding: 0 5px;
   border-radius: 4px; border: 1px solid var(--border); color: var(--muted);
   background: var(--surface-2); align-self: center;
 }
+.usage-window .uw-prov svg { flex: 0 0 auto; }
+/* 아이콘 색만 프로바이더별로 구분 */
+.usage-window .uw-prov.claude svg { color: var(--accent); }
+.usage-window .uw-prov.codex svg { color: var(--kpi-indigo); }
 
 /* -- 설치·운영 가이드 (설치 가이드 탭) ---------------------------------- */
 .guide-section { margin-top: 18px; }

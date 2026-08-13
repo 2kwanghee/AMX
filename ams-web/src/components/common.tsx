@@ -62,7 +62,9 @@ export type IconName =
   | 'alert'
   | 'refresh'
   | 'check'
-  | 'help';
+  | 'help'
+  | 'claude'
+  | 'codex';
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   grid: (
@@ -198,6 +200,21 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <line x1="12" y1="17" x2="12.01" y2="17" />
     </>
   ),
+  // Claude — 4각 스파클(큰 별 + 작은 별) 조합
+  claude: (
+    <>
+      <path d="M12 3c.4 3.4 1.6 4.6 5 5-3.4.4-4.6 1.6-5 5-.4-3.4-1.6-4.6-5-5 3.4-.4 4.6-1.6 5-5Z" />
+      <path d="M18 14c.2 1.4.6 1.8 2 2-1.4.2-1.8.6-2 2-.2-1.4-.6-1.8-2-2 1.4-.2 1.8-.6 2-2Z" />
+    </>
+  ),
+  // Codex — 코드 꺾쇠 </> (좌우 셰브런 + 사선)
+  codex: (
+    <>
+      <path d="m8 8-4 4 4 4" />
+      <path d="m16 8 4 4-4 4" />
+      <line x1="13.5" y1="6" x2="10.5" y2="18" />
+    </>
+  ),
 };
 
 export function Icon({
@@ -268,6 +285,24 @@ export function Badge({ value }: { value: string }) {
   return (
     <span className={`badge ${value}`}>
       <span className="dot" />
+      {krLabel(value)}
+    </span>
+  );
+}
+
+// provider 값 → 고정 아이콘. claude/codex 외에는 user로 폴백한다.
+export function providerIcon(provider?: string): IconName {
+  if (provider === 'claude') return 'claude';
+  if (provider === 'codex') return 'codex';
+  return 'user';
+}
+
+// provider 전용 태그 — 상태 Badge와 분리된 공용 단위. provider 값에 따라 아이콘·
+// 색이 자동으로 정해지며(수동 지정 없음), 한글 라벨은 그대로 유지한다.
+export function ProviderTag({ value }: { value: string }) {
+  return (
+    <span className={`prov-tag ${value}`}>
+      <Icon name={providerIcon(value)} size={13} />
       {krLabel(value)}
     </span>
   );
