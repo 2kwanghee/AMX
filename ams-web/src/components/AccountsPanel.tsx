@@ -4,7 +4,7 @@ import { useState } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import type { Account, AccountPage, OauthStartResponse, Provider } from '@/lib/api-client/types';
-import { Badge, CopyButton, EmailChip, LiveDot, Modal, TimeCell, fmtTime, krLabel, useAction, useMarkOnData } from './common';
+import { Badge, CopyButton, EmailChip, LiveDot, Modal, ProviderTag, TimeCell, fmtTime, krLabel, useAction, useMarkOnData } from './common';
 
 const POLL = 8000;
 
@@ -38,7 +38,7 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
             {accounts.map((a) => (
               <tr key={a.id}>
                 <td><EmailChip email={a.email} sub={a.organizationName} /></td>
-                <td><Badge value={a.provider} /></td>
+                <td><ProviderTag value={a.provider} /></td>
                 <td>{a.owner ? a.owner : <span className="muted">—</span>}</td>
                 <td>{krLabel(a.credentialType)}</td>
                 <td><Badge value={a.status} /></td>
@@ -275,7 +275,7 @@ function EditAccount({
   return (
     <Modal title="계정 수정" onClose={onClose}>
       <p className="muted">
-        <b>{account.email}</b> · {krLabel(account.provider)}
+        <b>{account.email}</b> · <ProviderTag value={account.provider} />
       </p>
       <label>소유자</label>
       <input
