@@ -347,7 +347,16 @@ if systemd_available; then
   # 최초 enroll 을 위해 토큰을 포함해 service.env 를 쓰고 기동한다. 기동 후에는
   # 토큰을 뺀 판으로 덮어써, 디스크에 1회용 토큰이 남지 않게 한다(재기동 enroll 은
   # 저장된 자격증명을 쓰므로 토큰 불요).
-  ( umask 077; { run_env; [ -n "$TOKEN" ] && printf 'AMX_ENROLL_TOKEN=%s\n' "$TOKEN"; } > "$INSTALL_ROOT/service.env" )
+  # 주의: `[ -n "$TOKEN" ] && printf` 를 서브셸 마지막 명령으로 두면 토큰이 없을 때
+  # AND-list 가 1을 반환해 set -e 가 스크립트를 죽인다(토큰 불요인 재설치 경로가 정확히
+  # 이 케이스). if 문으로 분기해 종료코드를 흘리지 않는다.
+  (
+    umask 077
+    {
+      run_env
+      if [ -n "$TOKEN" ]; then printf 'AMX_ENROLL_TOKEN=%s\n' "$TOKEN"; fi
+    } > "$INSTALL_ROOT/service.env"
+  )
   systemctl --user daemon-reload
   systemctl --user enable amx-agent >/dev/null 2>&1 || true
   # restart 는 정지 상태면 기동, 실행 중이면 재기동 — 새 바이너리를 항상 반영한다(H1).
