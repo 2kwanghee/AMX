@@ -183,6 +183,36 @@ func TestSelfUpdateBinarySmokeFailureKeepsOldBinary(t *testing.T) {
 	}
 }
 
+func TestSelfUpdateBinaryRefusesWhenNoBaselineAndNoPin(t *testing.T) {
+	hn := newHarness(t)
+	f := newFakeRunner()
+	binPath, fetch := binarySelfUpdateEnv(t, hn, f)
+	// Abnormal unstamped binary: no builtAt baseline to compare against.
+	hn.h.selfUpdate.CurrentBuiltAt = ""
+	seedHealthyManifest(t, hn, fetch, []byte("NEW-BINARY"))
+
+	// No expected_commit pin either -> nothing can vouch for the manifest.
+	ack := hn.apply(t, selfUpdateCmd(t, hn, "su-bin-nobaseline", ""))
+	assertBinaryUnchanged(t, ack, "rollback_baseline_missing", binPath, f)
+}
+
+func TestSelfUpdateBinaryNoBaselineButPinnedIsAccepted(t *testing.T) {
+	hn := newHarness(t)
+	f := newFakeRunner()
+	binPath, fetch := binarySelfUpdateEnv(t, hn, f)
+	hn.h.selfUpdate.CurrentBuiltAt = ""
+	seedHealthyManifest(t, hn, fetch, []byte("NEW-BINARY"))
+
+	// A matching pin is the guard when there is no builtAt baseline.
+	ack := hn.apply(t, selfUpdateCmd(t, hn, "su-bin-pinned", testCommit))
+	if ack.GetConvergence() != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("want CONVERGED, got %v/%q (%s)", ack.GetConvergence(), ack.GetErrorCode(), ack.GetDetail())
+	}
+	if got, _ := os.ReadFile(binPath); string(got) != "NEW-BINARY" {
+		t.Fatalf("installed binary = %q, want NEW-BINARY", got)
+	}
+}
+
 // TestSelfUpdateModeDispatch proves the install marker, not a fallback chain,
 // selects the path: package env -> binary, repo env -> git, neither -> nil.
 func TestSelfUpdateModeDispatch(t *testing.T) {

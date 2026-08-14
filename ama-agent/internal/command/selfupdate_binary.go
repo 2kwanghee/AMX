@@ -154,16 +154,25 @@ func (h *Handler) handleSelfUpdateBinary(ctx context.Context, cmd *amxv1.AmsComm
 
 	// Pin: a signed command may veto which commit the agent becomes (same meaning
 	// as the git path's expected_commit check against the remote tip).
-	if want := strings.TrimSpace(su.GetExpectedCommit()); want != "" && !commitMatches(newCommit, want) {
+	want := strings.TrimSpace(su.GetExpectedCommit())
+	if want != "" && !commitMatches(newCommit, want) {
 		return fail("commit_mismatch", fmt.Errorf("expected_commit %q but the manifest names %q", want, newCommit))
 	}
 
 	// Rollback guard: refuse a manifest not strictly newer than the running
 	// binary. AMS here is reached over a plaintext LAN, where an attacker can
 	// replay an OLD but validly-signed manifest+binary to force a downgrade to a
-	// known-vulnerable build; a monotonic builtAt makes that replay a no-op. With
-	// no known current builtAt (a dev build with no -ldflags stamp) the pin above
-	// is the only guard.
+	// known-vulnerable build; a monotonic builtAt makes that replay a no-op.
+	//
+	// A package build ALWAYS carries a builtAt stamp (build-artifacts.sh), so an
+	// empty CurrentBuiltAt here is an abnormal (unstamped) binary. In that state
+	// an unpinned update has NO defense against a replayed old manifest — neither
+	// a baseline nor a pin — so it is refused outright rather than accepted. When
+	// a pin is present it is the guard, and an unstamped baseline is tolerated.
+	if strings.TrimSpace(cfg.CurrentBuiltAt) == "" && want == "" {
+		return fail("rollback_baseline_missing", errors.New(
+			"package binary carries no builtAt baseline and the command carries no expected_commit pin; refusing an update that cannot be checked for rollback"))
+	}
 	if err := ensureNotRollback(cfg.CurrentBuiltAt, man.Version.BuiltAt); err != nil {
 		return fail("rollback_refused", err)
 	}
