@@ -472,8 +472,12 @@ export function fmtClock(t: number | Date): string {
 
 // 1초(기본) 틱 훅. setInterval + cleanup으로 언마운트 시 누수 없음.
 export function useNow(intervalMs = 1000): number {
-  const [now, setNow] = useState(() => Date.now());
+  // 초기값을 Date.now()로 두면 SSR 프리렌더 시각과 클라이언트 hydration 시각이
+  // 달라 "N초 전" 류 텍스트가 어긋나 hydration mismatch(React #418)가 난다. 서버·
+  // 클라가 동일한 0으로 시작하고, 마운트 직후 실제 시각으로 올려 CSR에서만 갱신한다.
+  const [now, setNow] = useState(0);
   useEffect(() => {
+    setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(id);
   }, [intervalMs]);
