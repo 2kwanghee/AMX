@@ -36,7 +36,7 @@ from app.db import get_sessionmaker, try_advisory_xact_lock as _try_advisory_xac
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
-from app.services import alerts, billing, commands, reconcile
+from app.services import alerts, billing, commands, reconcile, usage_cost
 
 _logger = logging.getLogger("ams.grpc")
 
@@ -1144,6 +1144,19 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("billing sweep iteration failed", exc_info=False)
+        # Usage-cost rollup: a fourth sibling sweep on the same timer compacts
+        # newly-closed UTC days from the usage_snapshots ledger into
+        # usage_daily_rollup (the cost-allocation input). Its own advisory lock
+        # (…04), cursor ("usage_rollup"), and isolated try/except keep it fully
+        # independent of the billing sweep above.
+        try:
+            rolled = await asyncio.to_thread(_sweep_usage_rollup_once, session_factory)
+            if rolled:
+                _logger.info("usage-rollup sweeper upserted %d rollup row(s)", rolled)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("usage-rollup sweep iteration failed", exc_info=False)
 
 
 # F3 multi-instance: the sweeps below are idempotent, but running them from every
@@ -1181,6 +1194,13 @@ def _sweep_billing_once(session_factory: sessionmaker[Session]) -> int:
     # billing.sweep_billing takes its own advisory lock (…03) and commits.
     with session_factory() as db:
         return billing.sweep_billing(db)
+
+
+def _sweep_usage_rollup_once(session_factory: sessionmaker[Session]) -> int:
+    # usage_cost.sweep_usage_rollup takes its own advisory lock (…04), separate
+    # cursor ("usage_rollup"), and commits — independent of the billing sweep.
+    with session_factory() as db:
+        return usage_cost.sweep_usage_rollup(db)
 
 
 async def serve(port: int = DEFAULT_PORT) -> None:
