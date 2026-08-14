@@ -80,6 +80,13 @@ const GUIDE: Section[] = [
         code: "CLAUDE_CONFIG_DIR=~/.claude-amx tsamx list   # (active)가 여기서 보여야 정상\n\n# 매번 치기 귀찮으면\necho \"alias amx-list='CLAUDE_CONFIG_DIR=~/.claude-amx tsamx list'\" >> ~/.bashrc",
       },
       {
+        symptom: 'AMX가 배분한 계정으로 claude를 띄우려면 — 기존 claude 명령을 바꿔야 하나',
+        cause:
+          '기존 claude 명령은 개인 프로필(~/.claude)을 읽으므로 그대로 두면 본인 계정으로만 동작한다. AMX는 ~/.claude-amx라는 별도 프로필에만 계정을 넣고 빼기 때문에, 콘솔에서 활성화한 계정으로 작업하려면 CLAUDE_CONFIG_DIR을 AMX 프로필로 지정해야 한다. 이때 맨 claude 대신 deploy/amx-claude 래퍼를 거쳐야 하는데, 계정 교체(deliver) 순간에 claude가 뜨면 엉뚱한 계정으로 과금될 수 있는 찰나를 래퍼의 잠금이 막아주기 때문이다.',
+        fix: '용도별 별칭을 한 번만 등록해 둔다. 이후 claude는 개인 계정, amx-claude는 AMX 배분 계정, amx-list는 배분 계정 조회로 나뉜다. 래퍼 경로는 에이전트 클론 위치(~/AMX-agent 기준)에 맞춘다. 순수 패키지 설치(git 클론 없는 장비)에는 amx-claude가 없으므로 중앙 서버 저장소의 deploy/amx-claude 한 파일만 복사해 두면 된다.',
+        code: "# ~/.bashrc에 한 번만 등록\ncat >> ~/.bashrc <<'EOF'\nalias amx-claude='CLAUDE_CONFIG_DIR=~/.claude-amx ~/AMX-agent/deploy/amx-claude'\nalias amx-list='CLAUDE_CONFIG_DIR=~/.claude-amx tsamx list'\nEOF\nsource ~/.bashrc\n\n# 확인\namx-list        # 배분 계정 목록 + (active) 표시\namx-claude      # 활성 계정으로 claude 실행 (개인용은 그대로 claude)",
+      },
+      {
         symptom: '서버 카드에 계속 "메트릭 미보고"로 뜬다',
         cause: '그 에이전트가 CPU/MEM/DISK 수집 기능 이전의 구버전이다.',
         fix: '위 업데이트로 최신화하면 게이지가 뜬다. 최신 에이전트가 붙은 서버는 정상 표시된다.',
