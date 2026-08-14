@@ -284,18 +284,19 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
 // 등록 토큰 모달 — 토큰만 보여주는 대신, 노트북에 그대로 붙여넣을 설치 명령까지 조립해
 // 준다. amsEndpoint/amsPubkey는 발급 응답에서 오며(app.config의 AMX_ADVERTISE_HOST·
 // 서명키에서 파생), 광고 host 미설정이면 endpoint가 null이라 자리표시자로 대체한다.
-// 명령 형식은 deploy/agent-install-cmd.sh와 동일. --insecure는 TLS 전환 전 시험 경로용.
+// 에이전트 저장소는 ~/AMX-agent(개발 트리 ~/AMX와 분리). 인자는 셸 메타문자 대비로
+// 큰따옴표로 감싸고, 자리표시자도 꺾쇠 없이 둔다. --insecure는 TLS 전환 전 시험 경로용.
 const AGENT_DIR = '~/AMX-agent';
 const AGENT_REPO = 'https://github.com/2kwanghee/AMX.git';
 
 function EnrollTokenModal({ token, onClose }: { token: EnrollTokenResponse; onClose: () => void }) {
-  const endpoint = token.amsEndpoint || '<서버IP:포트>';
-  const pubkey = token.amsPubkey || '<AMS공개키>';
-  const install =
-    `bash deploy/agent-setup.sh install --ams ${endpoint} ` +
-    `--token ${token.token} --pubkey ${pubkey} --insecure`;
-  const wslCmd = `cd ${AGENT_DIR} && git pull && ${install}`;
-  const winClone = `git clone ${AGENT_REPO} ${AGENT_DIR}`;
+  const endpoint = token.amsEndpoint || 'SERVER_IP:50051';
+  const pubkey = token.amsPubkey || 'AMS_PUBKEY';
+  const cloneLine = `git clone ${AGENT_REPO} ${AGENT_DIR}   # 최초 1회, 이미 받았으면 생략`;
+  const runLine =
+    `cd ${AGENT_DIR} && git pull && bash deploy/agent-setup.sh install ` +
+    `--ams "${endpoint}" --token "${token.token}" --pubkey "${pubkey}" --insecure`;
+  const block = `${cloneLine}\n${runLine}`;
   const noEndpoint = !token.amsEndpoint;
 
   return (
@@ -304,21 +305,19 @@ function EnrollTokenModal({ token, onClose }: { token: EnrollTokenResponse; onCl
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 2px' }}>
         <b style={{ fontSize: 13 }}>WSL · Linux</b>
-        <CopyButton text={wslCmd} label="명령 복사" />
+        <CopyButton text={block} label="명령 복사" />
       </div>
-      <pre className="guide-cmd">{wslCmd}</pre>
+      <pre className="guide-cmd">{block}</pre>
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '12px 0 2px' }}>
         <b style={{ fontSize: 13 }}>Windows · Git Bash</b>
-        <CopyButton text={wslCmd} label="명령 복사" />
+        <CopyButton text={block} label="명령 복사" />
       </div>
-      <p className="muted" style={{ margin: '2px 0' }}>저장소가 없으면 먼저 clone:</p>
-      <pre className="guide-cmd">{winClone}</pre>
-      <pre className="guide-cmd" style={{ marginTop: 6 }}>{wslCmd}</pre>
+      <pre className="guide-cmd">{block}</pre>
 
       {noEndpoint && (
         <p className="muted" style={{ marginTop: 10 }}>
-          광고 주소 미설정 — <code>&lt;서버IP:포트&gt;</code>를 실제 AMS 주소로 바꾸세요.
+          광고 주소 미설정 — <code>SERVER_IP:50051</code>을 실제 AMS 주소로 바꾸세요.
           서버에 <code>AMX_ADVERTISE_HOST</code>를 지정하면 이 값이 자동으로 채워집니다.
         </p>
       )}

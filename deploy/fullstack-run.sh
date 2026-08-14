@@ -57,6 +57,17 @@ lan_ip() {
   printf '%s' "$ip"
 }
 
+# dev.env에 key=value를 멱등 반영(있으면 교체, 없으면 추가). LAN IP 변동 시 갱신용.
+upsert_env() {
+  local k="$1" v="$2"
+  [ -f "$ENV_FILE" ] || return 0
+  if grep -q "^${k}=" "$ENV_FILE"; then
+    sed -i "s|^${k}=.*|${k}=${v}|" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$ENV_FILE"
+  fi
+}
+
 # ── 시크릿 생성/로드 ─────────────────────────────────────────────────────────
 gen_env() {
   mkdir -p "$DEV_DIR" "$LOG_DIR"
@@ -197,9 +208,20 @@ server_up() {
   resolve_grpc_security
 
   # 공통 서버 env(dev.env는 이미 load_env로 export됨). REST 기동.
+  # 콘솔 설치 명령을 위해 REST도 서명키(공개키 파생)·gRPC 포트를 받고, --lan이면
+  # 감지한 LAN IP를 광고 host로 주입한다(dev.env에도 멱등 반영). 미설정 시 null 유지.
+  local rest_env=( AMX_DATABASE_URL="$AMX_DATABASE_URL" AMX_ENCRYPTION_KEY="$AMX_ENCRYPTION_KEY"
+                   AMX_ADMIN_TOKEN="$AMX_ADMIN_TOKEN" AMX_SIGNING_KEY="$AMX_SIGNING_KEY"
+                   AMX_GRPC_PORT="$GRPC_PORT" )
+  if [ "$LAN" = 1 ]; then
+    local adv_host; adv_host="$(lan_ip)"
+    if [ -n "$adv_host" ]; then
+      rest_env+=( AMX_ADVERTISE_HOST="$adv_host" )
+      upsert_env AMX_ADVERTISE_HOST "$adv_host"
+    fi
+  fi
   start_bg ams-rest "$ROOT/ams-server" \
-    env AMX_DATABASE_URL="$AMX_DATABASE_URL" AMX_ENCRYPTION_KEY="$AMX_ENCRYPTION_KEY" \
-        AMX_ADMIN_TOKEN="$AMX_ADMIN_TOKEN" \
+    env "${rest_env[@]}" \
         uv run python -m uvicorn app.main:create_app --factory --host "$rest_bind" --port "$REST_PORT"
 
   # gRPC 제어면(별도 프로세스). 항상 [::](모든 인터페이스)에 바인딩된다.

@@ -59,19 +59,8 @@ class Settings:
         return f"{self.advertise_host}:{self.grpc_port}"
 
 
-def _derive_ams_pubkey() -> str | None:
-    """Standard-base64 Ed25519 public key for the enroll-token response.
-
-    Prefers an explicit AMX_AMS_PUBKEY; otherwise derives it from the same
-    AMX_SIGNING_KEY seed the gRPC signer loads (deploy/fullstack-run.sh keeps
-    both in sync). Returns None when neither is configured.
-    """
-    explicit = os.environ.get("AMX_AMS_PUBKEY", "").strip()
-    if explicit:
-        return explicit
-    seed_b64 = os.environ.get("AMX_SIGNING_KEY", "").strip()
-    if not seed_b64:
-        return None
+def _pubkey_from_seed(seed_b64: str) -> str:
+    """Standard-base64 Ed25519 public key derived from a url-safe base64 seed."""
     import base64
 
     from cryptography.hazmat.primitives import serialization
@@ -85,6 +74,37 @@ def _derive_ams_pubkey() -> str | None:
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     )
     return base64.b64encode(pub).decode()
+
+
+def _derive_ams_pubkey() -> str | None:
+    """Standard-base64 Ed25519 public key for the enroll-token response.
+
+    The value must equal the key the gRPC signer actually holds, so:
+
+    * both AMX_AMS_PUBKEY and AMX_SIGNING_KEY set → they must agree, else the
+      console would advertise a key the signer never signs with;
+    * AMX_AMS_PUBKEY alone → refused: with no seed the signer generates a random
+      key at startup that is guaranteed to diverge from the advertised one;
+    * AMX_SIGNING_KEY alone → derive from it;
+    * neither → None (dev without a fixed key; the console shows a placeholder).
+    """
+    explicit = os.environ.get("AMX_AMS_PUBKEY", "").strip() or None
+    seed_b64 = os.environ.get("AMX_SIGNING_KEY", "").strip() or None
+    derived = _pubkey_from_seed(seed_b64) if seed_b64 else None
+    if explicit and seed_b64:
+        if explicit != derived:
+            raise ConfigError(
+                "AMX_AMS_PUBKEY does not match the key derived from AMX_SIGNING_KEY; "
+                "the console would advertise a public key the gRPC signer does not hold."
+            )
+        return explicit
+    if explicit and not seed_b64:
+        raise ConfigError(
+            "AMX_AMS_PUBKEY is set without AMX_SIGNING_KEY. The gRPC signer would "
+            "generate a random key that diverges from the advertised one; set "
+            "AMX_SIGNING_KEY (the 32-byte seed) so both sides share one key."
+        )
+    return derived
 
 
 def _require(name: str) -> str:

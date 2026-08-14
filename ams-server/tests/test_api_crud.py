@@ -274,6 +274,8 @@ def test_enroll_token_endpoint_null_without_advertise_host(client, monkeypatch):
     from app.config import get_settings
 
     monkeypatch.delenv("AMX_ADVERTISE_HOST", raising=False)
+    monkeypatch.delenv("AMX_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("AMX_AMS_PUBKEY", raising=False)
     get_settings.cache_clear()
     try:
         tenant_id = make_tenant(client)
@@ -283,7 +285,10 @@ def test_enroll_token_endpoint_null_without_advertise_host(client, monkeypatch):
             json={"ttlSeconds": 600},
         )
         assert issued.status_code == 201, issued.text
-        assert issued.json()["amsEndpoint"] is None
+        body = issued.json()
+        assert body["amsEndpoint"] is None
+        # No seed and no explicit key → pubkey stays null; the console shows a placeholder.
+        assert body["amsPubkey"] is None
     finally:
         get_settings.cache_clear()
 

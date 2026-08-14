@@ -390,26 +390,50 @@ export function Modal({
   );
 }
 
-/** 클립보드 복사 버튼. 누르면 1.5초간 "복사됨"을 표시한다. */
+/** 클립보드 복사 버튼. 누르면 1.5초간 "복사됨"을 표시한다.
+ *  http LAN 콘솔은 insecure context라 navigator.clipboard가 없다 —
+ *  execCommand('copy')로 폴백하고, 그래도 실패하면 실패 피드백을 남긴다. */
 export function CopyButton({ text, label = '복사' }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   return (
     <button
       type="button"
       className="copy-btn"
       onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        } catch {
-          /* 클립보드 접근 불가 시 무시 */
-        }
+        const ok = await copyText(text);
+        setState(ok ? 'copied' : 'failed');
+        setTimeout(() => setState('idle'), 1500);
       }}
     >
-      {copied ? '복사됨' : label}
+      {state === 'copied' ? '복사됨' : state === 'failed' ? '복사 실패 — 수동 복사' : label}
     </button>
   );
+}
+
+/** 클립보드 API가 없거나 실패하면 execCommand('copy')로 폴백한다. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* 폴백으로 진행 */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Wraps an async action with busy + error state, for buttons/forms. */
