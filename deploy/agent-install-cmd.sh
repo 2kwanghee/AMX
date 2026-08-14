@@ -99,6 +99,16 @@ if [ "$WSL" = 1 ]; then
   # portproxy가 현재 WSL IP를 가리키는지 점검 (WSL IP는 재부팅 시 바뀐다)
   MAPPED="$(/mnt/c/Windows/System32/netsh.exe interface portproxy show v4tov4 2>/dev/null | tr -d '\r' \
             | awk -v p="$GRPC_PORT" '$2==p {print $3}' | head -1)"
+  # 패키지 설치는 REST(:8080)에서 install.sh·매니페스트·바이너리를 받으므로 gRPC 포트
+  # 뿐 아니라 REST 포트도 노트북에서 닿아야 한다.
+  REST_PORT="${AMX_DEV_REST_PORT:-8080}"
+  REST_MAPPED="$(/mnt/c/Windows/System32/netsh.exe interface portproxy show v4tov4 2>/dev/null | tr -d '\r' \
+            | awk -v p="$REST_PORT" '$2==p {print $3}' | head -1)"
+  if [ "$REST_MAPPED" != "$WSL_IP" ]; then
+    warn "portproxy $REST_PORT(REST)가 현재 WSL IP를 가리키지 않습니다 (현재: ${REST_MAPPED:-없음}) — 다운로드가 실패합니다."
+    printf '    netsh interface portproxy add v4tov4 listenport=%s listenaddress=0.0.0.0 connectport=%s connectaddress=%s\n' \
+      "$REST_PORT" "$REST_PORT" "$WSL_IP"
+  fi
   if [ "$MAPPED" = "$WSL_IP" ]; then
     ok "portproxy $GRPC_PORT → $WSL_IP 정상"
   else
@@ -115,21 +125,33 @@ else
 fi
 
 # 5) 완성 명령 출력
-SEC_FLAG="--insecure"
-[ "$TLS" = 1 ] && SEC_FLAG="--ca ./ca.crt"
+SEC_FLAG="--insecure"; PS_SEC_FLAG="-Insecure"; SCHEME="http"
+if [ "$TLS" = 1 ]; then
+  SEC_FLAG="--ca ./ca.crt"; PS_SEC_FLAG=""; SCHEME="https"
+fi
+# 다운로드 베이스 — install.sh/install.ps1·매니페스트·바이너리를 받는 REST 면.
+AMS_URL="$SCHEME://$LAN_IP:${AMX_DEV_REST_PORT:-8080}"
 echo
 echo "──────────────────────────────────────────────────────────────"
-echo "노트북에서 아래를 그대로 실행하세요 (저장소 clone이 되어 있어야 합니다):"
+echo "노트북에서 아래 한 줄을 그대로 실행하세요 (git·go·python 없어도 됩니다):"
 echo
-printf '%scd ~/AMX-agent && git pull && bash deploy/agent-setup.sh install \\\n'    "$c_grn"
-printf '  --ams %s:%s \\\n'   "$LAN_IP" "$GRPC_PORT"
-printf '  --token %s \\\n'    "$TOKEN"
-printf '  --pubkey %s \\\n'   "$AMX_AMS_PUBKEY"
-printf '  %s%s\n'             "$SEC_FLAG" "$c_rst"
+printf '%scurl -fsSL %s/install.sh | bash -s -- \\\n' "$c_grn" "$AMS_URL"
+printf '  --ams %s:%s \\\n'      "$LAN_IP" "$GRPC_PORT"
+printf '  --ams-url %s \\\n'     "$AMS_URL"
+printf '  --token %s \\\n'       "$TOKEN"
+printf '  --pubkey %s \\\n'      "$AMX_AMS_PUBKEY"
+printf '  %s%s\n'                "$SEC_FLAG" "$c_rst"
+echo "──────────────────────────────────────────────────────────────"
+echo "Windows(PowerShell)라면:"
+printf '%s$s = irm %s/install.ps1; & ([scriptblock]::Create($s)) `\n' "$c_grn" "$AMS_URL"
+printf '  -Ams %s:%s -AmsUrl %s -Token %s -Pubkey %s %s%s\n' \
+  "$LAN_IP" "$GRPC_PORT" "$AMS_URL" "$TOKEN" "$AMX_AMS_PUBKEY" "$PS_SEC_FLAG" "$c_rst"
 echo "──────────────────────────────────────────────────────────────"
 if [ "$TLS" = 1 ]; then
   warn "TLS 모드: 먼저 deploy/tls/ 로 인증서를 만들고 ca.crt를 노트북에 복사한 뒤 실행하세요 (가이드 B-3 참고)."
 else
-  warn "평문(--insecure) 명령입니다 — PC도 --insecure-grpc로 떠 있어야 하며, 첫 시험 전용입니다."
+  warn "신뢰 LAN 한정 — 평문 HTTP로 스크립트·바이너리를 받고 gRPC도 평문(--insecure)입니다."
+  warn "매니페스트가 위 공개키로 서명 검증되고 산출물은 sha256 대조되지만, 토큰은 평문으로 흐릅니다."
+  warn "PC도 --insecure-grpc로 떠 있어야 하며, 신뢰 LAN 밖에서는 --ca로 TLS를 쓰세요."
 fi
 printf '%s토큰은 이 출력에만 표시됩니다. 만료(%s) 전에 사용하세요.%s\n' "$c_dim" "$EXPIRES" "$c_rst"
