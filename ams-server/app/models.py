@@ -11,17 +11,20 @@ application code involved.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -233,6 +236,15 @@ class Account(Base):
     # person or team with no login here, and an FK would make deleting that
     # admin either fail or rewrite history.
     owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Subscription price of this account per month, in `currency`. NULL means
+    # "no price recorded" — such an account carries no cost to spread and is
+    # skipped by the allocation, which is why it stays nullable rather than
+    # defaulting to 0 (a real 0 would be a genuinely free plan).
+    monthly_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # ISO 4217 alphabetic code for monthly_price. NOT NULL with a 'USD' default
+    # so the amount is never stored without its unit; only the format is
+    # enforced (3 uppercase letters), not membership of the real code list.
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="USD")
     scopes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     credential_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -455,6 +467,60 @@ class UsageSnapshot(Base):
     # correction, corrected} entries recorded by reconcile_from_report.
     drift: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     reported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class UsageDailyRollup(Base):
+    """Per-(tenant, UTC day, server, account) usage aggregate — cost-allocation input.
+
+    A compaction of the ``usage_snapshots`` ledger: the raw snapshots stay the
+    source of truth, this table holds only what spreading an account's
+    subscription price across the servers that used it needs. The composite
+    primary key ``(tenant_id, day, server_id, account_id)`` is the idempotency
+    anchor — recomputing a day upserts in place instead of duplicating it.
+
+    ``account_id`` is a UUID because the reports' ``ams_account_id`` is
+    ``str(Account.id)`` (grpc/server.py builds it that way), the same value
+    ``usage_snapshots.account_id`` already stores as a UUID. It carries no
+    foreign key on purpose: a rollup is billing history and must outlive the
+    deletion of the account it names.
+    """
+
+    __tablename__ = "usage_daily_rollup"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["server_id", "tenant_id"],
+            ["servers.id", "servers.tenant_id"],
+            name="fk_usage_daily_rollup_server_tenant",
+            ondelete="CASCADE",
+        ),
+        Index("ix_usage_daily_rollup_tenant_day", "tenant_id", "day"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # UTC calendar day the aggregate covers.
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    server_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    # Numerator of the allocation weight: utilization integrated over the time
+    # this server held the account (utilization x seconds).
+    held_util_seconds: Mapped[Decimal] = mapped_column(
+        Numeric(20, 6), nullable=False, server_default=text("0")
+    )
+    # Total seconds actually observed for this pair. Denominator-side quantity:
+    # it bounds held_util_seconds and marks how much of the day was covered.
+    observed_seconds: Mapped[Decimal] = mapped_column(
+        Numeric(20, 6), nullable=False, server_default=text("0")
+    )
+    # How many raw snapshots the two sums were integrated from — a coverage
+    # signal for the day, not a billed quantity.
+    snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

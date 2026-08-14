@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -65,6 +66,12 @@ class TenantPage(Wire):
 
 
 # -- Account ------------------------------------------------------------------
+# ISO 4217 alphabetic form only — three uppercase letters. Membership of the
+# real code list is not enforced, so a private or newly minted code still
+# round-trips.
+_CURRENCY_PATTERN = r"^[A-Z]{3}$"
+
+
 class AccountCreate(Wire):
     email: EmailStr
     # Free string on the wire so an unsupported value yields an explicit 400
@@ -75,6 +82,10 @@ class AccountCreate(Wire):
     # Free-text label (a person, a team) for the console and for audit; not a
     # reference to an admin.
     owner: str | None = Field(default=None, max_length=200)
+    # Subscription price per month; omitted means "no price recorded", which the
+    # cost allocation skips. A stored 0 is a real free plan, not an omission.
+    monthly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    currency: str = Field(default="USD", pattern=_CURRENCY_PATTERN)
 
 
 class AccountUpdate(Wire):
@@ -82,6 +93,8 @@ class AccountUpdate(Wire):
     status: AccountStatus | None = None
     secret: str | None = Field(default=None, min_length=1)
     owner: str | None = Field(default=None, max_length=200)
+    monthly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    currency: str | None = Field(default=None, pattern=_CURRENCY_PATTERN)
 
 
 class Account(Wire):
@@ -90,6 +103,11 @@ class Account(Wire):
     provider: Provider = "claude"
     email: str
     owner: str | None = None
+    # Serialized by pydantic's Decimal default: a JSON string ("29.00"), which
+    # keeps the two stored decimal places exact instead of handing the console a
+    # binary float.
+    monthly_price: Decimal | None = None
+    currency: str = "USD"
     credential_type: CredentialType
     status: AccountStatus
     secret_masked: str | None = None
