@@ -2,12 +2,13 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
+	"github.com/2kwanghee/AMX/ama-agent/internal/fslock"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
@@ -341,23 +342,22 @@ func TestDeliverLockExclusive(t *testing.T) {
 	if release == nil {
 		t.Fatal("DeliverLock must always return a non-nil release")
 	}
-	// Independently probe the same lock file with a non-blocking flock: it must
-	// currently be held (EWOULDBLOCK).
+	// Independently probe the same lock file with a non-blocking attempt: it must
+	// currently be held (ErrWouldBlock).
 	lockPath := filepath.Join(b.ConfigDir, deliverLockName)
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != syscall.EWOULDBLOCK {
-		t.Fatalf("lock should be held: flock err = %v, want EWOULDBLOCK", err)
+	if l, err := fslock.TryLock(lockPath); !errors.Is(err, fslock.ErrWouldBlock) {
+		if l != nil {
+			_ = l.Unlock()
+		}
+		t.Fatalf("lock should be held: TryLock err = %v, want ErrWouldBlock", err)
 	}
 	if err := release(); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	// After release the probe can take it.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	l, err := fslock.TryLock(lockPath)
+	if err != nil {
 		t.Fatalf("after release the lock must be free: %v", err)
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = l.Unlock()
 }

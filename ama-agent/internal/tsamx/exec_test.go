@@ -2,18 +2,21 @@ package tsamx
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
+	"github.com/2kwanghee/AMX/ama-agent/internal/fslock"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider/claude"
 )
 
-// TestDeliverLockExclusive verifies DeliverLock takes a real exclusive flock over
-// <configDir>/.amx-deliver.lock: while held, a second LOCK_EX attempt fails, and
-// after release it succeeds (B1b — the runner's shared lock blocks likewise).
+// TestDeliverLockExclusive verifies DeliverLock takes a real exclusive lock over
+// <configDir>/.amx-deliver.lock: while held, a second non-blocking attempt fails
+// (ErrWouldBlock), and after release it succeeds (B1b — the runner's shared lock
+// blocks likewise). The probe uses fslock so the check is the same primitive on
+// every platform.
 func TestDeliverLockExclusive(t *testing.T) {
 	dir := t.TempDir()
 	b := &ExecBridge{ConfigDir: dir}
@@ -24,25 +27,23 @@ func TestDeliverLockExclusive(t *testing.T) {
 		t.Fatalf("lock file not created: %v", err)
 	}
 
-	f2, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f2.Close()
 	// A non-blocking exclusive attempt must fail while the deliver lock is held.
-	if err := syscall.Flock(int(f2.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-		_ = syscall.Flock(int(f2.Fd()), syscall.LOCK_UN)
-		t.Fatal("second LOCK_EX acquired while deliver lock held (lock is not exclusive)")
+	if l, err := fslock.TryLock(lockPath); !errors.Is(err, fslock.ErrWouldBlock) {
+		if l != nil {
+			_ = l.Unlock()
+		}
+		t.Fatalf("second lock acquired while deliver lock held (not exclusive): err=%v", err)
 	}
 
 	if err := release(); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	// After release the same attempt succeeds.
-	if err := syscall.Flock(int(f2.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		t.Fatalf("LOCK_EX after release should succeed: %v", err)
+	l2, err := fslock.TryLock(lockPath)
+	if err != nil {
+		t.Fatalf("lock after release should succeed: %v", err)
 	}
-	_ = syscall.Flock(int(f2.Fd()), syscall.LOCK_UN)
+	_ = l2.Unlock()
 }
 
 // TestDeliverLockFailOpen (B1b review item 1b): when the lock is already held by
@@ -55,14 +56,11 @@ func TestDeliverLockFailOpen(t *testing.T) {
 	lockPath := filepath.Join(dir, deliverLockName)
 
 	// Another process/holder owns the lock (models a running runner).
-	holder, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	holder, err := fslock.TryLock(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer holder.Close()
-	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
-		t.Fatal(err)
-	}
+	defer holder.Unlock()
 
 	b := &ExecBridge{ConfigDir: dir, LockMaxWait: 150 * time.Millisecond}
 	start := time.Now()
@@ -78,9 +76,13 @@ func TestDeliverLockFailOpen(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Fatalf("DeliverLock blocked far past its bound (%v) — not fail-open", elapsed)
 	}
-	// The holder must still own the lock — fail-open does not steal it.
-	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		t.Fatalf("holder lost the lock after DeliverLock fail-open: %v", err)
+	// The holder must still own the lock — fail-open does not steal it, so a fresh
+	// non-blocking attempt must still see it held.
+	if l, err := fslock.TryLock(lockPath); !errors.Is(err, fslock.ErrWouldBlock) {
+		if l != nil {
+			_ = l.Unlock()
+		}
+		t.Fatalf("holder lost the lock after DeliverLock fail-open: err=%v", err)
 	}
 	_ = release() // no-op release must be safe to call
 }
