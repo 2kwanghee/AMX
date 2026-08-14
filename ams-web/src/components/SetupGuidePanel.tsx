@@ -101,8 +101,22 @@ const GUIDE: Section[] = [
         symptom: '노트북이 PC에 연결되지 않는다 (등록 실패·오프라인)',
         cause:
           'PC의 WSL 내부 IP는 재부팅 때 바뀐다. 인바운드를 넘기는 portproxy가 옛 IP를 가리키면 연결이 끊긴다.',
-        fix: 'PC에서 현재 WSL IP를 확인하고, 관리자 PowerShell에서 portproxy를 그 IP로 갱신한다. 노트북이 안 붙을 때 가장 먼저 볼 곳이다.',
-        code: 'hostname -I        # WSL에서 현재 IP 확인\n# 관리자 PowerShell에서 portproxy(50051)를 위 IP로 갱신',
+        fix: 'PC에서 현재 WSL IP를 확인하고, 관리자 PowerShell에서 portproxy를 그 IP로 갱신한다. 노트북이 안 붙을 때 가장 먼저 볼 곳이다. 50051(gRPC)만이 아니라 8080(REST)·3000(웹)도 같은 방식이라 함께 갱신해야 한다.',
+        code: "hostname -I        # WSL에서 현재 IP 확인\n# 관리자 PowerShell에서 — 각 포트를 지우고 새 IP로 다시 추가\nnetsh interface portproxy show v4tov4   # 현재 매핑 확인\nnetsh interface portproxy delete v4tov4 listenport=50051 listenaddress=0.0.0.0\nnetsh interface portproxy add v4tov4 listenport=50051 listenaddress=0.0.0.0 connectport=50051 connectaddress=<새 WSL IP>\n# 8080·3000도 동일하게 반복",
+      },
+      {
+        symptom: '설치 원라이너(curl … install.sh | bash)가 아무 출력 없이 끝난다',
+        cause:
+          '10.60.1.15:8080(REST)이 밖으로 안 나가 있는 것이다. WSL은 NAT 모드라 포트마다 portproxy를 손으로 넣어줘야 하는데, gRPC(50051)·웹(3000)만 넣고 8080을 빠뜨리면 설치 스크립트 다운로드부터 막힌다. curl -fsSL은 실패해도 아무 말 없이 죽기 때문에 "무응답"으로 보인다. (2026-08-14 실제 발생 — Windows 네이티브 명령도 같은 이유로 함께 막혔다.)',
+        fix: '먼저 WSL 안에서 curl http://127.0.0.1:8080/install.sh 로 서버 자체가 사는지 확인한다(200이면 서버는 정상, 네트워크 문제). 그다음 관리자 PowerShell에서 8080 portproxy와 방화벽 인바운드 규칙을 추가한다. connectaddress는 hostname -I로 확인한 현재 WSL IP다.',
+        code: "# WSL에서 — 서버 생존 확인\ncurl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/install.sh   # 200이어야 함\nhostname -I   # 첫 IP가 현재 WSL IP (예: 172.22.118.30)\n\n# 관리자 PowerShell에서 — 8080 노출 (두 listenaddress 모두)\nnetsh interface portproxy add v4tov4 listenport=8080 listenaddress=0.0.0.0 connectport=8080 connectaddress=<WSL IP>\nnetsh interface portproxy add v4tov4 listenport=8080 listenaddress=10.60.1.15 connectport=8080 connectaddress=<WSL IP>\nNew-NetFirewallRule -DisplayName 'AMX REST 8080' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8080\n\n# 확인\nnetsh interface portproxy show v4tov4   # 8080 행이 보여야 함",
+      },
+      {
+        symptom: '같은 포트가 Windows·노트북에서는 되는데 WSL 안에서만 timeout 난다',
+        cause:
+          'WSL에서 10.60.1.15로 나갔다 되돌아오는 트래픽은 일반 Windows 방화벽이 아니라 별도의 Hyper-V 방화벽을 거친다. 일반 방화벽에 허용 규칙이 있어도 Hyper-V 쪽에 같은 포트 규칙이 없으면 WSL발 접속만 조용히 막힌다. (2026-08-14 실제 발생 — 8080이 Windows에서는 200, WSL에서만 timeout이었다.)',
+        fix: '관리자 PowerShell에서 Get-NetFirewallHyperVRule로 해당 포트 규칙이 있는지 보고, 없으면 추가한다. VMCreatorId는 WSL 고정값이다. 이 조치 스크립트는 .amx-dev/open-8080.ps1로 저장해 뒀다.',
+        code: "# 관리자 PowerShell에서\nGet-NetFirewallHyperVRule | Where-Object { $_.LocalPorts -eq '8080' }   # 없으면 아래 실행\nNew-NetFirewallHyperVRule -DisplayName 'AMX REST 8080' -Direction Inbound -Action Allow -Protocol TCP -LocalPorts 8080 -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'\n\n# WSL에서 확인\ncurl -s -o /dev/null -w '%{http_code}' http://10.60.1.15:8080/install.sh   # 200이면 해결",
       },
       {
         symptom: '대시보드가 갑자기 죽거나 /mnt/c 접근이 I/O error로 막힌다',

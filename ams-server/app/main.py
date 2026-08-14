@@ -10,6 +10,7 @@ import logging
 
 from fastapi import FastAPI
 
+from app.api import download
 from app.api.v1 import (
     accounts,
     admins,
@@ -48,6 +49,9 @@ def create_app() -> FastAPI:
     app.include_router(alerts.router, prefix=API_PREFIX)
     app.include_router(billing.router, prefix=API_PREFIX)
     app.include_router(usage.router, prefix=API_PREFIX)
+    # Root paths, no prefix and no auth: the install one-liner runs before the
+    # machine has any credential (app/api/download.py).
+    app.include_router(download.router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:

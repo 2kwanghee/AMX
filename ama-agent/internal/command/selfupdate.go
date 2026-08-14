@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -74,6 +75,10 @@ type SelfUpdateRunner interface {
 	Rename(oldpath, newpath string) error
 	// Remove deletes a path, ignoring "not exist".
 	Remove(name string) error
+	// WriteFile writes data to name with perm (os.WriteFile semantics). Only the
+	// binary-download path uses it, to stage the fetched artifact; the git path
+	// builds straight to disk and never calls it.
+	WriteFile(name string, data []byte, perm os.FileMode) error
 	// Exec replaces the current process image (syscall.Exec). It only ever
 	// returns on failure.
 	Exec(argv0 string, argv, envv []string) error
@@ -87,6 +92,27 @@ type SelfUpdateConfig struct {
 	// RepoDir is the git working tree to fast-forward. It must be a clone the
 	// operator configured; the command never names a source (proto SelfUpdate).
 	RepoDir string
+	// --- Binary (package) install mode. --------------------------------------
+	// When AMSURL is set the agent was laid down by the package installer
+	// (AMX_INSTALL_METHOD=package) and self_update DOWNLOADS a signed prebuilt
+	// binary from AMS instead of rebuilding a git tree. RepoDir (git) and AMSURL
+	// (binary) are two mutually exclusive install methods, not a fallback chain:
+	// main.go picks one from the install marker. See selfupdate_binary.go.
+	//
+	// AMSURL is the AMS base URL (e.g. http://pc:8000); the manifest and
+	// artifacts hang off /download/. InstallRoot is where the package was laid
+	// down (recorded for the operator; the swap targets the running binary, not
+	// this). PubKey is the AMS Ed25519 signing key the agent pinned at enroll —
+	// the SAME key that signs commands — used to verify the manifest envelope.
+	// CurrentBuiltAt is the running binary's build time (RFC3339, stamped via
+	// -ldflags main.builtAt); it is the monotonicity floor that refuses a
+	// replayed older manifest on a plaintext LAN. Fetch retrieves a URL's body;
+	// nil uses a bounded net/http client.
+	AMSURL         string
+	InstallRoot    string
+	PubKey         ed25519.PublicKey
+	CurrentBuiltAt string
+	Fetch          func(ctx context.Context, url string) ([]byte, error)
 	// ModuleDir is where `go build ./cmd/ama` runs. Empty -> RepoDir/ama-agent.
 	ModuleDir string
 	// BinaryPath is the running binary that gets replaced. Empty -> os.Executable().
@@ -105,6 +131,12 @@ type SelfUpdateConfig struct {
 	// Logf records what happens after the ack, when there is no longer an ack to
 	// carry the news. Nil discards.
 	Logf func(format string, args ...any)
+}
+
+// binaryMode reports whether this agent updates by downloading a signed binary
+// from AMS (package install) rather than rebuilding a git tree.
+func (c *SelfUpdateConfig) binaryMode() bool {
+	return c.AMSURL != ""
 }
 
 func (c *SelfUpdateConfig) moduleDir() string {
@@ -163,7 +195,7 @@ func smokeEnv() []string {
 // command_id is answered CONVERGED from the log.
 func (h *Handler) handleSelfUpdate(ctx context.Context, cmd *amxv1.AmsCommand, su *amxv1.SelfUpdate, ack *amxv1.CommandAck) *amxv1.CommandAck {
 	cfg := h.selfUpdate
-	if cfg == nil || cfg.RepoDir == "" {
+	if cfg == nil || (cfg.RepoDir == "" && !cfg.binaryMode()) {
 		return h.finishSelfUpdate(reject(ack, "unsupported_command", errors.New("self_update is not configured on this agent")))
 	}
 	// Idempotency (§3): a re-queued self_update whose predecessor already
@@ -171,6 +203,12 @@ func (h *Handler) handleSelfUpdate(ctx context.Context, cmd *amxv1.AmsCommand, s
 	// process takes after the exec, so it must come before any work.
 	if h.alreadyApplied(cmd.GetCommandId()) {
 		return h.finishSelfUpdate(converged(ack))
+	}
+
+	// Install method decides the acquisition path. Binary mode downloads a signed
+	// prebuilt binary from AMS; the shared swap + restart tail is identical.
+	if cfg.binaryMode() {
+		return h.handleSelfUpdateBinary(ctx, cmd, su, ack)
 	}
 
 	runner := cfg.Runner
@@ -300,8 +338,19 @@ func (h *Handler) handleSelfUpdate(ctx context.Context, cmd *amxv1.AmsCommand, s
 			fmt.Errorf("--version output does not name the built commit %s (does this commit predate the flag?): %s", short, tail(smokeOut)))
 	}
 
-	// --- Swap + restart. Under the engine lock so no tsamx mutation is in
-	// flight when the process image is replaced. ------------------------------
+	return h.swapAndRestart(runner, cfg, ack, binPath, newBin, newCommit)
+}
+
+// swapAndRestart is the irreversible half of a self update, shared by the git
+// and binary acquisition paths: under the engine lock it backs up the running
+// binary, moves the validated newBin into place, durably records the command as
+// applied BEFORE the exec, acks, and replaces the process image. newBin must
+// already be a built/downloaded, smoke-tested binary. Every path here returns a
+// terminal ack via finishSelfUpdate.
+//
+// It runs under the engine lock so no tsamx mutation is in flight when the
+// process image is replaced.
+func (h *Handler) swapAndRestart(runner SelfUpdateRunner, cfg *SelfUpdateConfig, ack *amxv1.CommandAck, binPath, newBin, newCommit string) *amxv1.CommandAck {
 	h.engine.Lock()
 	defer h.engine.Unlock()
 
@@ -466,4 +515,8 @@ func (OSSelfUpdateRunner) Remove(name string) error {
 		return err
 	}
 	return nil
+}
+
+func (OSSelfUpdateRunner) WriteFile(name string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(name, data, perm)
 }

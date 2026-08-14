@@ -212,6 +212,13 @@ server_up() {
   local rest_env=( AMX_DATABASE_URL="$AMX_DATABASE_URL" AMX_ENCRYPTION_KEY="$AMX_ENCRYPTION_KEY"
                    AMX_ADMIN_TOKEN="$AMX_ADMIN_TOKEN" AMX_SIGNING_KEY="$AMX_SIGNING_KEY"
                    AMX_GRPC_PORT="$GRPC_PORT" )
+  # 산출물 배포(/download, /install.sh). dev에서는 build-artifacts.sh가 채우는
+  # <repo>/dist를 그대로 서빙하고, 설치 스크립트는 repo의 deploy/에서 읽는다.
+  # dist가 아직 없으면 주입하지 않는다 — 배포 비활성으로 두는 편이 빈 디렉터리를
+  # 가리켜 404를 흩뿌리는 것보다 낫다.
+  if [ -d "$ROOT/dist" ]; then
+    rest_env+=( AMX_ARTIFACTS_DIR="$ROOT/dist" AMX_INSTALL_SCRIPTS_DIR="$ROOT/deploy" )
+  fi
   if [ "$LAN" = 1 ]; then
     local adv_host; adv_host="$(lan_ip)"
     [ -n "$adv_host" ] && rest_env+=( AMX_ADVERTISE_HOST="$adv_host" )

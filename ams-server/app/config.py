@@ -51,6 +51,16 @@ class Settings:
     advertise_host: str | None = None
     grpc_port: int = 50051
     ams_pubkey: str | None = None
+    # Artifact distribution (packaged install PR2). `artifacts_dir` is the
+    # filesystem directory holding what `deploy/build-artifacts.sh` produced
+    # (the ama binaries, the tsamx wheel and manifest.json). Absent or empty
+    # means distribution is off and every /download route answers 404 — an AMS
+    # that has no build output must not look like one that lost a file.
+    # `install_scripts_dir` holds install.sh / install.ps1; it defaults to
+    # `artifacts_dir` so a production host that copies the scripts next to the
+    # binaries needs one setting, while dev points it at the repo's deploy/.
+    artifacts_dir: str | None = None
+    install_scripts_dir: str | None = None
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -142,6 +152,7 @@ def load_settings() -> Settings:
             f"AMX_KEK_PROVIDER={kek_provider!r} is not one of local|aws-kms|vault."
         )
     kek = os.environ.get("AMX_KEK", "").strip() or None
+    artifacts_dir = os.environ.get("AMX_ARTIFACTS_DIR", "").strip() or None
 
     return Settings(
         database_url=_require("AMX_DATABASE_URL"),
@@ -160,6 +171,10 @@ def load_settings() -> Settings:
         advertise_host=os.environ.get("AMX_ADVERTISE_HOST", "").strip() or None,
         grpc_port=int(os.environ.get("AMX_GRPC_PORT", "50051")),
         ams_pubkey=_derive_ams_pubkey(),
+        artifacts_dir=artifacts_dir,
+        install_scripts_dir=(
+            os.environ.get("AMX_INSTALL_SCRIPTS_DIR", "").strip() or artifacts_dir
+        ),
     )
 
 

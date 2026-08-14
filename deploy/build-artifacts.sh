@@ -80,7 +80,7 @@ for t in $TARGETS; do
   [ "$goos" = "windows" ] && out="$out.exe"
   step "빌드 ama $t"
   ( cd "$ROOT/ama-agent" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-      go build -trimpath -ldflags "-X main.commit=$SHA" -o "$out" ./cmd/ama ) \
+      go build -trimpath -ldflags "-X main.commit=$SHA -X main.builtAt=$BUILT_AT" -o "$out" ./cmd/ama ) \
     || die "go build 실패: $t"
   record_artifact "$out"
   ok "ama-$t"
@@ -100,11 +100,15 @@ fi
 
 WHEEL="$(ls -1 "$DIST"/tsamx-*.whl 2>/dev/null | head -n1)"
 [ -n "$WHEEL" ] || die "wheel 산출물을 찾을 수 없습니다"
-# 설치 스크립트가 버전과 무관하게 참조할 수 있도록 안정 이름 심링크를 건다.
-# (심링크 미지원 환경 대비 복사 폴백) — 심링크 자체는 매니페스트에 넣지 않는다.
+# 안정 이름 심링크는 사람이 손으로 집을 때의 편의용일 뿐이다(심링크 미지원 환경
+# 대비 복사 폴백). 심링크 자체는 매니페스트에 없으므로 **서명으로 보호되지 않는다**
+# — install.sh 는 절대 tsamx-latest.whl 을 받으면 안 되고, 매니페스트의
+# version.wheel 이 가리키는 실파일명을 받아 sha256 을 대조해야 한다. 서명 밖 파일을
+# 설치 경로에 두면 그 파일 교체만으로 임의 파이썬 코드가 실행된다.
 ln -sf "$(basename "$WHEEL")" "$DIST/tsamx-latest.whl" 2>/dev/null \
   || cp -f "$WHEEL" "$DIST/tsamx-latest.whl"
 record_artifact "$WHEEL"
+WHEEL_NAME="$(basename "$WHEEL")"
 ok "$(basename "$WHEEL")  (→ tsamx-latest.whl)"
 
 # ── 3) manifest.json ──────────────────────────────────────────────────────────
@@ -112,7 +116,10 @@ ok "$(basename "$WHEEL")  (→ tsamx-latest.whl)"
 step "manifest.json 생성"
 {
   printf '{\n'
-  printf '  "version": { "commit": "%s", "builtAt": "%s" },\n' "$SHA" "$BUILT_AT"
+  # wheel: 서명 대상인 실파일명. install.sh 가 버전을 추측하거나 서명 밖의
+  # tsamx-latest.whl 로 폴백하지 않도록 매니페스트 안에서 정본을 지목한다.
+  printf '  "version": { "commit": "%s", "builtAt": "%s", "wheel": "%s" },\n' \
+    "$SHA" "$BUILT_AT" "$WHEEL_NAME"
   printf '  "artifacts": {\n'
   local_n=${#MANIFEST_ITEMS[@]}
   for i in "${!MANIFEST_ITEMS[@]}"; do
