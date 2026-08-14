@@ -51,21 +51,18 @@ need() { command -v "$1" >/dev/null 2>&1 || die "필요한 명령이 없습니�
 
 # ── LAN IP 감지 ──────────────────────────────────────────────────────────────
 lan_ip() {
+  # WSL2에서 `ip route`의 src는 172.x 내부 IP라 에이전트가 도달할 수 없다.
+  # WSL이면 Windows 실 LAN IP를 얻는다(로직은 deploy/agent-install-cmd.sh와 동일).
+  if grep -qi microsoft /proc/version 2>/dev/null; then
+    /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command \
+      "(Get-NetIPConfiguration | Where-Object {\$_.IPv4DefaultGateway -ne \$null} | Select-Object -First 1).IPv4Address.IPAddress" \
+      2>/dev/null | tr -d '\r' | head -1
+    return
+  fi
   local ip=""
   ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
   [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   printf '%s' "$ip"
-}
-
-# dev.env에 key=value를 멱등 반영(있으면 교체, 없으면 추가). LAN IP 변동 시 갱신용.
-upsert_env() {
-  local k="$1" v="$2"
-  [ -f "$ENV_FILE" ] || return 0
-  if grep -q "^${k}=" "$ENV_FILE"; then
-    sed -i "s|^${k}=.*|${k}=${v}|" "$ENV_FILE"
-  else
-    printf '%s=%s\n' "$k" "$v" >> "$ENV_FILE"
-  fi
 }
 
 # ── 시크릿 생성/로드 ─────────────────────────────────────────────────────────
@@ -209,16 +206,15 @@ server_up() {
 
   # 공통 서버 env(dev.env는 이미 load_env로 export됨). REST 기동.
   # 콘솔 설치 명령을 위해 REST도 서명키(공개키 파생)·gRPC 포트를 받고, --lan이면
-  # 감지한 LAN IP를 광고 host로 주입한다(dev.env에도 멱등 반영). 미설정 시 null 유지.
+  # 그 회차에 감지한 LAN IP를 광고 host로 이 프로세스 env에만 주입한다(영구화 없음 —
+  # LAN IP는 회차마다 바뀔 수 있다). --lan 없이는 광고하지 않으며, 운영자가 환경변수로
+  # AMX_ADVERTISE_HOST를 직접 지정한 경우는 dev.env 상속으로 그대로 존중된다.
   local rest_env=( AMX_DATABASE_URL="$AMX_DATABASE_URL" AMX_ENCRYPTION_KEY="$AMX_ENCRYPTION_KEY"
                    AMX_ADMIN_TOKEN="$AMX_ADMIN_TOKEN" AMX_SIGNING_KEY="$AMX_SIGNING_KEY"
                    AMX_GRPC_PORT="$GRPC_PORT" )
   if [ "$LAN" = 1 ]; then
     local adv_host; adv_host="$(lan_ip)"
-    if [ -n "$adv_host" ]; then
-      rest_env+=( AMX_ADVERTISE_HOST="$adv_host" )
-      upsert_env AMX_ADVERTISE_HOST "$adv_host"
-    fi
+    [ -n "$adv_host" ] && rest_env+=( AMX_ADVERTISE_HOST="$adv_host" )
   fi
   start_bg ams-rest "$ROOT/ams-server" \
     env "${rest_env[@]}" \
