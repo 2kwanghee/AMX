@@ -36,6 +36,11 @@ class Settings:
     # row) once now >= D+1 00:00 + this grace, so a late-arriving usage report
     # for D still lands before the day is aggregated.
     billing_close_grace_seconds: int = 3600
+    # Usage-cost integration: the step value of a usage snapshot represents time
+    # only up to this many seconds before the next snapshot is required. A longer
+    # real gap (agent offline / report loss) is clamped to this ceiling so a stale
+    # observation cannot dominate the time-weighted utilization integral.
+    usage_max_gap_seconds: int = 600
 
 
 def _require(name: str) -> str:
@@ -84,6 +89,9 @@ def load_settings() -> Settings:
         http_timeout_seconds=float(os.environ.get("AMX_HTTP_TIMEOUT_SECONDS", "15")),
         billing_close_grace_seconds=int(
             os.environ.get("AMX_BILLING_CLOSE_GRACE_SECONDS", "3600")
+        ),
+        usage_max_gap_seconds=int(
+            os.environ.get("AMX_USAGE_MAX_GAP_SECONDS", "600")
         ),
     )
 

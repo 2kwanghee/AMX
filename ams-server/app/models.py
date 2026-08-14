@@ -454,6 +454,12 @@ class UsageSnapshot(Base):
             ondelete="CASCADE",
         ),
         Index("ix_usage_snapshots_server_time", "server_id", "reported_at"),
+        # Usage-cost rollup sweep + live-tail integration scan by tenant +
+        # report_type over a reported_at day range (migration 0018).
+        Index(
+            "ix_usage_snapshots_tenant_type_time",
+            "tenant_id", "report_type", "reported_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -483,8 +489,12 @@ class UsageDailyRollup(Base):
     ``account_id`` is a UUID because the reports' ``ams_account_id`` is
     ``str(Account.id)`` (grpc/server.py builds it that way), the same value
     ``usage_snapshots.account_id`` already stores as a UUID. It carries no
-    foreign key on purpose: a rollup is billing history and must outlive the
-    deletion of the account it names.
+    foreign key on purpose, so the raw ``held_util_seconds`` / ``observed_seconds``
+    history survives the deletion of the account it names. That preservation is
+    only partial today: ``usage_cost.compute_month_cost`` joins ``accounts`` for
+    the price and currency, so a deleted account's rows still exist but drop out
+    of the priced allocation (the price is gone). Full price-preserving history
+    (snapshotting monthly_price into the rollup) is a follow-up.
     """
 
     __tablename__ = "usage_daily_rollup"
