@@ -459,9 +459,8 @@ def _apply_correction(
         }
     else:  # CORRECTION_RECALL
         command_type = "recall"
-        # Same Codex rule as the REST recall path: a disabling recall would
-        # strand the host on its first Codex account (see
-        # commands.recall_purges_local_copy).
+        # 회수는 provider 무관 항상 purge(O2 변경 2026-08-14) — REST 경로와
+        # 동일하게 commands.recall_purges_local_copy로 위임한다.
         payload = {
             "reconcile_correction": correction,
             "purge_local_copy": commands.recall_purges_local_copy(db, assignment),

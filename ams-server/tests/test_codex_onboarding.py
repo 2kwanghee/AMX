@@ -402,7 +402,10 @@ def test_recalling_a_codex_account_purges_the_local_copy(db):
     assert _last_recall_payload(db, assignment.id)["purge_local_copy"] is True
 
 
-def test_recalling_a_claude_account_still_preserves_the_local_copy(db):
+def test_recalling_a_claude_account_also_purges_the_local_copy(db):
+    # O2 변경(2026-08-14): 회수 = 완전 분리로 통일. Claude도 provider 무관
+    # 항상 purge=true 로 회수되어 옛 서버에서 자격증명·매니페스트가 제거되고
+    # 이력은 detached 행/이벤트로만 남는다.
     from app.services import commands
     from tests.test_api_crud import CREDENTIAL_SET
 
@@ -410,7 +413,7 @@ def test_recalling_a_claude_account_still_preserves_the_local_copy(db):
         db, "claude", "a@example.com", CREDENTIAL_SET
     )
     commands.request_recall(db, tenant.id, assignment.id)
-    assert _last_recall_payload(db, assignment.id)["purge_local_copy"] is False
+    assert _last_recall_payload(db, assignment.id)["purge_local_copy"] is True
 
 
 def test_a_recalled_server_accepts_a_different_codex_account(client):

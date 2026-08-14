@@ -1,7 +1,7 @@
 'use client';
 
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
 import { allowedAssignmentActions, api, krApiError } from '@/lib/api-client/client';
 import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
@@ -66,6 +66,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
 
   const minServerIdx = new Map<string, number>();
   for (const a of assignments) {
+    if (a.state === 'detached') continue; // 회수된 연결은 정렬 기준에서 제외
     const idx = serverIndex.get(a.serverId);
     if (idx === undefined) continue;
     const cur = minServerIdx.get(a.accountId);
@@ -96,7 +97,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   }, []);
 
   const edgeSpecs = assignments
-    .filter((a) => serverIndex.has(a.serverId) && emailOf.has(a.accountId))
+    .filter((a) => a.state !== 'detached' && serverIndex.has(a.serverId) && emailOf.has(a.accountId))
     .map((a) => {
       let kind: EdgeKind = '';
       if (a.lastError) kind = 'error';
@@ -209,8 +210,9 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     if (from === 'server' && tType === 'account') { serverId = id; accountId = tId; }
     else if (from === 'account' && tType === 'server') { serverId = tId; accountId = id; }
     else return; // 같은 유형 위 드롭은 무효
-    // 이미 같은 서버에 연결돼 있으면 무효(중복 생성 안 함).
-    if (assignments.some((a) => a.accountId === accountId && a.serverId === serverId)) return;
+    // 이미 같은 서버에 비-detached로 연결돼 있으면 무효(중복 생성 안 함). 회수된
+    // 이력 행은 중복으로 보지 않아 같은 서버로의 재연결 드롭이 막히지 않는다.
+    if (assignments.some((a) => a.accountId === accountId && a.serverId === serverId && a.state !== 'detached')) return;
     setConnect({ accountId, serverId });
   }
 
@@ -429,9 +431,17 @@ function EdgePopover({
   );
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// A→B 이동 체인 폴링: recall 요청 후 기존 할당이 detached로 수렴할 때까지 대기.
+const MOVE_DEADLINE_MS = 30_000;
+const MOVE_POLL_MS = 1_500;
+
 // 연결 확인 모달 — 기존 API만 사용한다. P1 백엔드는 deliverImmediately를 400으로
 // 거부하고 계정당 비-detached 할당을 유일하게(uq_assignments_active_account) 강제하므로:
-//  - 다른 서버에 비-detached 할당이 있으면 생성 자체를 막고 회수를 안내(409 회피).
+//  - 다른 서버에 비-detached 할당이 있으면(blocking) A에서 회수 후 이 서버로 옮기는
+//    이동 체인을 제공한다: recall → 기존 할당이 detached로 수렴할 때까지 폴링(상한
+//    30s) → createAssignment → deliver. 각 단계 실패는 어디까지 진행됐는지 구분해
+//    표출하고(낙관적 갱신 없이 서버 상태로 수렴), 폴링 타임아웃은 재시도를 안내한다.
 //  - 아니면 표 패널과 동일하게 할당을 생성(전달 옵션 없이)한 뒤 deliver verb를 체인.
 //    체인 실패 시 할당은 남으므로 "생성됨, 전달 실패"로 구분 표출한다.
 function ConnectModal({
@@ -458,12 +468,94 @@ function ConnectModal({
   const { mutate } = useSWRConfig();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [step, setStep] = useState('');
+  // 모달이 닫히거나 언마운트되면 진행 중인 이동 체인을 중단시킨다(고아 체인·409 경합 방지).
+  const cancelled = useRef(false);
+  useEffect(() => () => { cancelled.current = true; }, []);
   const fromName = blocking ? srvNameOf.get(blocking.serverId) ?? '다른 서버' : '';
+
+  // busy 중에는 닫기를 막아 진행 중인 체인이 UI 없이 계속 돌지 않게 한다.
+  function guardedClose() {
+    if (busy) return;
+    onClose();
+  }
 
   async function revalidate() {
     await mutate(['assignments', tenantId]);
     mutate(['servers', tenantId]);
     mutate(['accounts', tenantId]);
+  }
+
+  // A→B 이동 — blocking(다른 서버의 비-detached 할당)을 회수한 뒤 이 서버로 재연결한다.
+  // 낙관적 갱신 없이 매 폴링마다 assignments를 재검증해 실제 detached 수렴을 확인한다.
+  async function move() {
+    if (!blocking) return;
+    setBusy(true);
+    setError('');
+    setStep(`${fromName}에서 회수 중…`);
+    try {
+      await api.assignmentAction(tenantId, blocking.id, 'recall');
+    } catch (e) {
+      if (cancelled.current) return;
+      await revalidate();
+      setStep('');
+      setError(`회수 실패: ${krApiError(e)}`);
+      setBusy(false);
+      return;
+    }
+    if (cancelled.current) return;
+    // 기존 할당이 detached로 수렴할 때까지 폴링(상한 30s). 폴링 중 일시적 조회
+    // 실패는 스킵하고 다음 tick에 재시도하며, 계속 실패하면 타임아웃 경로로 떨어진다.
+    const start = Date.now();
+    let detached = false;
+    while (!cancelled.current && Date.now() - start < MOVE_DEADLINE_MS) {
+      await sleep(MOVE_POLL_MS);
+      if (cancelled.current) return;
+      try {
+        const page = (await mutate(['assignments', tenantId])) as AssignmentPage | undefined;
+        const row = page?.items.find((a) => a.id === blocking.id);
+        if (row && row.state === 'detached') { detached = true; break; }
+      } catch {
+        // 일시 오류 — 다음 tick 재시도.
+      }
+    }
+    if (cancelled.current) return;
+    if (!detached) {
+      await revalidate();
+      setStep('');
+      setError('회수는 요청됨 — 잠시 후 다시 드래그해 이동을 완료하세요.');
+      setBusy(false);
+      return;
+    }
+    setStep(`${srvName}에 재연결 중…`);
+    let created: Assignment;
+    try {
+      created = await api.createAssignment(tenantId, { accountId, serverId });
+    } catch (e) {
+      if (cancelled.current) return;
+      await revalidate();
+      setStep('');
+      setError(`회수됨, 재연결 실패: ${krApiError(e)}. 이 계정을 다시 드래그하면 연결부터 재시도합니다.`);
+      setBusy(false);
+      return;
+    }
+    if (cancelled.current) return;
+    setStep('전달 중…');
+    try {
+      await api.assignmentAction(tenantId, created.id, 'deliver');
+    } catch (e) {
+      if (cancelled.current) return;
+      await revalidate();
+      setStep('');
+      setError(`회수·재연결됨, 전달 실패: ${krApiError(e)}`);
+      setBusy(false);
+      return;
+    }
+    if (cancelled.current) return;
+    await revalidate();
+    setStep('');
+    setBusy(false);
+    onClose();
   }
 
   async function confirm() {
@@ -491,15 +583,26 @@ function ConnectModal({
   }
 
   return (
-    <Modal title="계정 연결" onClose={onClose}>
+    <Modal title="계정 연결" onClose={guardedClose}>
       <p>
         <span className="mono">{email}</span> 계정을 <b>{srvName}</b> 서버에 연결(할당 생성 후 전달)합니다.
       </p>
       {blocking ? (
-        <p className="topo-move-note">
-          이 계정은 <b>{fromName}</b>에 {krLabel(blocking.state)} 상태의 할당이 있습니다. 계정당 하나만
-          연결할 수 있으니, 먼저 해당 할당을 회수한 뒤 다시 연결하세요.
-        </p>
+        <>
+          <p className="topo-move-note">
+            이 계정은 <b>{fromName}</b>에 {krLabel(blocking.state)} 상태의 할당이 있습니다. 계정당 하나만
+            연결할 수 있으므로, <b>{fromName}</b>에서 회수한 뒤 이 서버로 이동합니다.
+          </p>
+          {codexBlockerEmail && (
+            <p className="topo-move-note">
+              이 서버에는 이미 Codex 계정 <span className="mono">{codexBlockerEmail}</span>이(가) 연결돼
+              있습니다. Codex는 호스트당 자격증명을 하나만 두므로 이동해도 서버가 거부할 수 있습니다.
+            </p>
+          )}
+          <button className="primary" style={{ marginTop: 14 }} disabled={busy} onClick={move}>
+            {fromName}에서 회수 후 이 서버로 이동
+          </button>
+        </>
       ) : (
         <>
           {codexBlockerEmail && (
@@ -509,12 +612,14 @@ function ConnectModal({
               기존 연결을 먼저 회수하세요.
             </p>
           )}
-          {error && <p className="err">{error}</p>}
           <button className="primary" style={{ marginTop: 14 }} disabled={busy} onClick={confirm}>
             연결 생성
           </button>
         </>
       )}
+      {/* 진행 단계·오류는 blocking 여부와 무관하게 공통 영역에서 표시(폴링 중 분기 전환에도 유지). */}
+      {step && <p className="muted" style={{ marginTop: 10 }}>{step}</p>}
+      {error && <p className="err" style={{ marginTop: 10 }}>{error}</p>}
     </Modal>
   );
 }

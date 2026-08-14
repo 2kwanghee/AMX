@@ -829,6 +829,9 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 /* 이동 경고(라이트 모달 내부) */
 .topo-move-note { color: var(--warn); font-size: 13px; background: var(--warn-soft); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
 
+/* 회수된(detached) 할당 행 — 이력으로만 남기고 현재 연결처럼 읽히지 않게 흐리게 */
+tr.detached-row { opacity: 0.55; }
+
 @media (prefers-reduced-motion: reduce) {
   .topo-ghost { animation: none; }
 }

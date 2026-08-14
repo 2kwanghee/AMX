@@ -77,6 +77,7 @@ export function currentActiveByServer(
   const switchedAt = new Map(accounts.map((a) => [a.id, a.lastSwitchedAt]));
   const best = new Map<string, { accountId: string; t: number }>();
   for (const a of assignments) {
+    if (a.state === 'detached') continue; // 회수된 연결은 "현재 활성" 판정에서 제외
     const iso = switchedAt.get(a.accountId);
     if (!iso) continue;
     const t = new Date(iso).getTime();
@@ -160,7 +161,7 @@ export function AssignmentsPanel({ tenantId }: { tenantId: string }) {
               const email = emailOf.get(a.accountId) ?? a.accountId.slice(0, 8);
               const serverName = serverNameOf.get(a.serverId) ?? a.serverId.slice(0, 8);
               const isActive = activeByServer.get(a.serverId) === a.accountId;
-              const rowClass = `${isActive ? 'pipe-active' : ''} ${flashId === a.id ? 'flash' : ''}`.trim();
+              const rowClass = `${isActive ? 'pipe-active' : ''} ${flashId === a.id ? 'flash' : ''} ${a.state === 'detached' ? 'detached-row' : ''}`.trim();
               return (
                 <tr key={a.id} className={rowClass || undefined}>
                   <td>

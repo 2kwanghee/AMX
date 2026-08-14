@@ -347,18 +347,18 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
 | active | 하달·확인 완료, 스위칭 후보 | `tsamx enable` 상태 |
 | inactive | 하달됐으나 로테이션 제외 | `tsamx disable` 상태 |
 | quarantined | AMA가 소진/실패 보고 | tsamx quarantine 반영 |
-| recalling | 회수 명령 전송, 확인 대기 | `tsamx disable` 수행 중 (credential 레코드 **보존**, O2 기본); `purge_local_copy=true`면 `tsamx remove` + 레코드 삭제 |
-| detached | 종말 상태 (행은 감사용 유지) | 로테이션 제외 + credential 레코드 보존(빠른 재배정); `purge_local_copy=true` 시에만 로컬 흔적 완전 제거 |
+| recalling | 회수 명령 전송, 확인 대기 | `tsamx remove` 수행 중 — 항상 `purge_local_copy=true`(O2 변경 2026-08-14): 로컬 credential·매니페스트 레코드 완전 삭제 |
+| detached | 종말 상태 (행은 감사용 유지) | 로컬 흔적 완전 제거됨; 이력은 detached 배정 행·이벤트로만 남는다(재배정은 재전달) |
 
 - **스위칭 모드**는 서버 단위 속성(`servers.switch_mode`), 계정 단위 제외는 `pinned`로.
 - **비상태 명령**: `switch_now`/`set_mode`/`req_report`는 배정 상태를 전이시키지 않는다
   (switch-now는 `last_switched_at`만 갱신, set_mode는 `servers.switch_mode`만 변경).
 - **recover 전이**: REST `POST …/assignments/{id}:recover`(§5.3)가 트리거 →
   AMA에 `set_active(activate)` 하달 → ack 시 quarantined → active.
-- **재배정 단축 (O2 파급)**: recall 기본이 credential 레코드를 보존하므로, 같은
-  계정을 같은 서버에 다시 배정할 때 AMA에 보존 레코드가 있으면 deliver는 재주입 대신
-  `tsamx enable`로 단축된다(credential 재전송 불필요). 레코드가 없거나
-  `purge_local_copy=true`로 삭제됐던 경우에만 full deliver.
+- **재배정 (O2 변경 2026-08-14)**: recall이 항상 purge로 통일되면서 회수된 계정은
+  로컬에 흔적을 남기지 않는다. 따라서 같은 서버로의 재배정도 예외 없이 full deliver
+  (credential 재전송)로 수행된다. 이전의 `tsamx enable` 단축 경로(보존 레코드 재사용)는
+  폐기됐다.
 - **recall 실패 회복 (D1)**: recall이 DIVERGED/REJECTED로 실패하면 배정은 `recalling`에
   머물되 `pending_command_id=NULL`(정착·비인플라이트 표식)이 되고, 확인 경로에서 계정 스코프
   `recall_failed` 경보(dedupe `server_id:recall_failed:account_id`)를 연다. 정착 recalling은
@@ -513,9 +513,10 @@ Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패�
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
 O9가 **회전형**으로 판별됨(§8): 계정이 서버에서 활성으로 돌면 그 서버의 Claude Code/tsamx가
-refresh하며 refresh token을 회전 → AMS 보관본(`accounts.encrypted_secret`)이 무효화된다. 같은 서버
-재배정은 O2(recall=disable, 로컬 credential 보존)로 커버되나, **다른 서버로 재배정**하면 AMS가 보낼
-수 있는 것은 무효화된 구본뿐이라 deliver가 실패한다. 이를 자동화로 메우는 역동기화:
+refresh하며 refresh token을 회전 → AMS 보관본(`accounts.encrypted_secret`)이 무효화된다. O2 변경
+(2026-08-14, recall=항상 purge)으로 회수 시 로컬 보존이 사라졌으므로, **같은 서버든 다른 서버든**
+재배정은 모두 full deliver이고 AMS가 보낼 수 있는 것은 무효화된 구본뿐이라 그대로면 실패한다.
+이를 자동화로 메우는 역동기화:
 
 - **AMA 감지**: tsamx가 refresh를 수행하면 로컬 `.credentials.json`이 갱신된다. AMA store/reporter가
   credential fingerprint 변화(§tsamx `oauth.credential_fingerprint` — refresh token 해시 기반)를
@@ -590,7 +591,7 @@ tsamx는 자체 버전으로 핀 관리하며, 업스트림(claude-swap) 반영�
 | AMS 명령 | 로컬 절차 | 재전송 시 |
 |---|---|---|
 | deliver | 서명 검증 → credential 세트 복호 → 매니페스트 upsert → 이전 활성 계정 기록 → credential 파일 기록(`~/.claude/.credentials.json` + `~/.claude.json` oauthAccount) → `tsamx add` (슬롯 자동 할당) → 필요 시 `tsamx switch <이전 활성>` 복귀 → 평문 메모리 소거 | 이미 존재하면 no-op, 수렴 상태 회신 |
-| recall | 대상이 활성이면 먼저 `tsamx switch <타계정>` → **기본(`purge_local_copy=false`, O2)**: `tsamx disable` + 매니페스트 레코드 `inactive`로 보존(빠른 재배정) / **`purge_local_copy=true`**: `tsamx remove` + 매니페스트 레코드 삭제. codex 계정은 AMS가 항상 `true`로 발행(O2 단서) | 부재 시 성공 no-op |
+| recall | 대상이 활성이면 먼저 `tsamx switch <타계정>` → **항상 `purge_local_copy=true`(O2 변경 2026-08-14)**: `tsamx remove` + 매니페스트 레코드 삭제. provider 무관(claude·codex 동일) AMS가 항상 `true`로 발행 — 회수는 해당 서버에서 완전 분리이고 이력은 detached 행·이벤트로만 남는다 | 부재 시 성공 no-op |
 | activate | `tsamx enable` + 매니페스트 상태 갱신 | 동일 상태면 no-op |
 | deactivate | `tsamx disable` (크레덴셜 유지, 로테이션만 제외) | no-op |
 | switch_now | `tsamx switch <num\|email>` (또는 `--strategy best`) | 이미 활성이면 no-op |
@@ -774,7 +775,7 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
 | # | 항목 | 선택지 | 시점 |
 |---|---|---|---|
 | O1 | AMA KEK 보관 | **결정: 메모리 전용** (2026-08-08). 재부팅 시 KEK 소실 → AMS 재연결로 `SessionSetup` 재수신해야 로컬 스토어 복호. TPM/봉인 없음. 콜드스타트 3규칙은 §6.3 | ✅ 확정 |
-| O2 | recall 시맨틱 | **결정: disable만** (2026-08-08). 기본 `purge_local_copy=false` — `tsamx disable`+레코드 보존(빠른 재배정), `true`만 완전 삭제. §5.2·§6.3 반영. **단서(2026-08-12, P3)**: codex 계정 회수는 provider 특성상 항상 `true`로 발행한다 — 사이드카가 남으면 다음 다른 계정 배달이 `codex_single_account`로 막혀 호스트가 영구 사용 불가가 된다. claude는 결정 그대로 | ✅ 확정 |
+| O2 | recall 시맨틱 | **변경: 항상 purge**(2026-08-14, 사용자 지시). 회수 = 해당 서버에서 계정 완전 분리 — provider 무관 항상 `purge_local_copy=true`(`tsamx remove`+레코드 삭제)이고, 이력은 detached 배정 행·이벤트로만 남으며 재배정은 재전달이다. §5.2·§6.3 반영. **이전 결정(2026-08-08)**: disable만(`false` 기본, 레코드 보존) — 그러나 회수 잔재가 usage 보고에 INACTIVE로 실려 reconcile 불일치·비용의 옛 서버 배분을 유발해 폐기. codex는 애초에 사이드카 문제(`codex_single_account`)로 항상 purge가 필수였고, 이제 claude도 동일 | ✅ 확정 |
 | O3 | API-key 계정 | 구독 쿼터 없어 95% 임계 무의미 — 관리 대상 포함 여부. 포함 시 등록 경로는 `tsamx add-token`이 여전히 유효 (api_key는 대화형 로그인 불필요, §2.4-5의 폐기는 oauth 한정) | P1 중 |
 | O4 | 스위칭 정책 소유권 | **O4-B 완성 (P5 F4)**. `threshold_pct`·`default_strategy`(O4-C, cmd 17 필드 1·2)에 더해 **`cooldown_seconds`·`hysteresis_pct`(F4, 필드 3·4)도 AMS가 `SetPolicy`로 중앙 하달** → 전체 스위칭 정책 중앙화. AMA가 `tsamx config set autoswitch.{cooldownSeconds,hysteresisPct}` 주입(음수=unset·0=실제값). §6.4·설계노트 P3/F4 | ✅ 확정 (O4-B) |
 | O5 | 러너 config 공유 | **부분 해소(B1)**: deliver 오과금은 이전활성 복귀+원자적 쓰기(주 방어)+flock 조율(보조, §6.3)로 방어, `docs/DEPLOYMENT-RUNNER.md` 배포 가이드. 남은 것: 래퍼 미경유 직접 실행의 sub-second 창(배포 강제), 러너와 AMA의 `~/.claude` 공유 보장 | 부분 해소, 배포 강제 잔여 |

@@ -77,6 +77,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
   const activeByServer = currentActiveByServer(asgItems, accItems);
   const accountsByServer = new Map<string, string[]>();
   for (const a of asgItems) {
+    if (a.state === 'detached') continue; // 회수된 연결은 서버 타일 아바타에서 제외
     const email = emailOf.get(a.accountId);
     if (!email) continue;
     const arr = accountsByServer.get(a.serverId) ?? [];
