@@ -287,6 +287,60 @@ export type AssignmentPage = Page<Assignment>;
 export type AlertPage = Page<Alert>;
 export type EventPage = Page<ServerEvent>;
 
+// -- 사용량·비용 배분 ---------------------------------------------------------
+// GET /tenants/{id}/usage/cost. 서버는 Decimal을 JSON 문자열로 내려보내므로
+// 금액·비율은 모두 string이다(부동소수 오차를 만들지 않도록 숫자로 되돌리지
+// 않고 문자열 그대로 표시한다). 필드는 ams-server/app/schemas.py의
+// UsageCost* Wire 모델(camelCase 별칭) 기준.
+
+// 계정 가격이 이 서버에 놓인 근거. no_price·unallocated 줄의 cost는 0이며,
+// 미배분 금액은 서버 줄이 아니라 subtotals.unallocatedCost에 잡힌다.
+export type UsageCostBasis = 'held' | 'observed' | 'unallocated' | 'no_price';
+
+export interface UsageCostAccountLine {
+  accountId: string;
+  email?: string | null;
+  provider?: string | null;
+  monthlyPrice?: string | null;
+  currency: string;
+  basis: UsageCostBasis | string;
+  utilizationPct: string;
+  sharePct: string;
+  cost: string;
+}
+
+export interface UsageCostAmount {
+  currency: string;
+  amount: string;
+}
+
+export interface UsageCostServerLine {
+  serverId: string;
+  name?: string | null;
+  utilizationPct: string;
+  // 통화별로 나뉘어 오며 절대 합산되지 않는다(한 서버에 통화가 다른 계정이
+  // 함께 놓일 수 있다).
+  costs: UsageCostAmount[];
+  accounts: UsageCostAccountLine[];
+}
+
+export interface UsageCostSubtotal {
+  currency: string;
+  allocatedCost: string;
+  unallocatedCost: string;
+}
+
+export interface UsageCostResponse {
+  month: string; // YYYY-MM
+  asOf: string;
+  // 이 UTC 날짜 이전은 확정(불변)이다. 롤업이 아직 안 돌았으면 null.
+  watermark?: string | null;
+  // 아직 확정되지 않은 구간이 포함돼 값이 움직일 수 있으면 true.
+  isPartial: boolean;
+  servers: UsageCostServerLine[];
+  subtotals: UsageCostSubtotal[];
+}
+
 export interface ApiError {
   type?: string;
   title?: string;
