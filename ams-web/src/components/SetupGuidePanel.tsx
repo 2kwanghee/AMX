@@ -73,6 +73,13 @@ const GUIDE: Section[] = [
         code: 'bash deploy/agent-run.sh up ... \\\n  --config-dir ~/.claude-amx \\\n  --tsamx-bin ~/.local/bin/tsamx',
       },
       {
+        symptom: '콘솔에서 계정을 활성화했는데 tsamx list에 (active) 표시가 안 나온다',
+        cause:
+          'tsamx의 (active) 표시는 계정 풀이 아니라 "지금 CLAUDE_CONFIG_DIR이 가리키는 프로필"의 자격증명과 대조해 붙는다. 에이전트는 계정을 ~/.claude-amx 프로필에 활성화하는데, 환경변수 없이 tsamx list를 치면 기본 프로필(~/.claude)을 들여다보므로 계정 목록은 다 나와도 active 매칭만 빠진다. 하달 실패가 아니다 — 콘솔 할당 상태가 active고 명령이 acked면 서버 쪽은 이미 끝난 것이다. (2026-08-14 실제 발생.)',
+        fix: 'AMX 관리 상태를 볼 때는 항상 CLAUDE_CONFIG_DIR을 붙여 조회한다. 설치 스크립트가 만든 tsclaude 래퍼가 같은 env로 동작하므로 이것이 러너가 실제로 쓰는 계정과 일치하는 뷰다. 자주 쓰면 alias로 박아둔다.',
+        code: "CLAUDE_CONFIG_DIR=~/.claude-amx tsamx list   # (active)가 여기서 보여야 정상\n\n# 매번 치기 귀찮으면\necho \"alias amx-list='CLAUDE_CONFIG_DIR=~/.claude-amx tsamx list'\" >> ~/.bashrc",
+      },
+      {
         symptom: '서버 카드에 계속 "메트릭 미보고"로 뜬다',
         cause: '그 에이전트가 CPU/MEM/DISK 수집 기능 이전의 구버전이다.',
         fix: '위 업데이트로 최신화하면 게이지가 뜬다. 최신 에이전트가 붙은 서버는 정상 표시된다.',
