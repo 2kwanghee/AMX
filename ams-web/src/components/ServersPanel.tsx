@@ -276,17 +276,64 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
           onClose={() => setUpdateOf(null)}
         />
       )}
-      {tokenOf && (
-        <Modal title="등록 토큰 (한 번만 표시)" onClose={() => setTokenOf(null)}>
-          <p className="muted">지금 복사하세요 — 다시 조회할 수 없습니다.</p>
-          <p style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <code>{tokenOf.token}</code>
-            <CopyButton text={tokenOf.token} />
-          </p>
-          <p className="muted">만료 {fmtTime(tokenOf.expiresAt)}</p>
-        </Modal>
-      )}
+      {tokenOf && <EnrollTokenModal token={tokenOf} onClose={() => setTokenOf(null)} />}
     </div>
+  );
+}
+
+// 등록 토큰 모달 — 토큰만 보여주는 대신, 노트북에 그대로 붙여넣을 설치 명령까지 조립해
+// 준다. amsEndpoint/amsPubkey는 발급 응답에서 오며(app.config의 AMX_ADVERTISE_HOST·
+// 서명키에서 파생), 광고 host 미설정이면 endpoint가 null이라 자리표시자로 대체한다.
+// 명령 형식은 deploy/agent-install-cmd.sh와 동일. --insecure는 TLS 전환 전 시험 경로용.
+const AGENT_DIR = '~/AMX-agent';
+const AGENT_REPO = 'https://github.com/2kwanghee/AMX.git';
+
+function EnrollTokenModal({ token, onClose }: { token: EnrollTokenResponse; onClose: () => void }) {
+  const endpoint = token.amsEndpoint || '<서버IP:포트>';
+  const pubkey = token.amsPubkey || '<AMS공개키>';
+  const install =
+    `bash deploy/agent-setup.sh install --ams ${endpoint} ` +
+    `--token ${token.token} --pubkey ${pubkey} --insecure`;
+  const wslCmd = `cd ${AGENT_DIR} && git pull && ${install}`;
+  const winClone = `git clone ${AGENT_REPO} ${AGENT_DIR}`;
+  const noEndpoint = !token.amsEndpoint;
+
+  return (
+    <Modal title="등록 토큰 (한 번만 표시)" onClose={onClose}>
+      <p className="muted">토큰은 지금 한 번만 표시됩니다. 아래 명령을 복사해 대상 노트북에서 실행하세요.</p>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 2px' }}>
+        <b style={{ fontSize: 13 }}>WSL · Linux</b>
+        <CopyButton text={wslCmd} label="명령 복사" />
+      </div>
+      <pre className="guide-cmd">{wslCmd}</pre>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '12px 0 2px' }}>
+        <b style={{ fontSize: 13 }}>Windows · Git Bash</b>
+        <CopyButton text={wslCmd} label="명령 복사" />
+      </div>
+      <p className="muted" style={{ margin: '2px 0' }}>저장소가 없으면 먼저 clone:</p>
+      <pre className="guide-cmd">{winClone}</pre>
+      <pre className="guide-cmd" style={{ marginTop: 6 }}>{wslCmd}</pre>
+
+      {noEndpoint && (
+        <p className="muted" style={{ marginTop: 10 }}>
+          광고 주소 미설정 — <code>&lt;서버IP:포트&gt;</code>를 실제 AMS 주소로 바꾸세요.
+          서버에 <code>AMX_ADVERTISE_HOST</code>를 지정하면 이 값이 자동으로 채워집니다.
+        </p>
+      )}
+
+      <p className="muted" style={{ marginTop: 10 }}>
+        <b>portproxy · 방화벽</b> — 노트북이 다른 호스트면 PC의 gRPC 포트로 접근 가능해야 합니다.
+        WSL에서 구동 시 관리자 PowerShell에서 <code>netsh interface portproxy</code>로 포트를 전달하고,
+        방화벽 인바운드를 허용하세요.
+      </p>
+      <p className="muted">
+        <code>--insecure</code>는 평문 경로로, TLS 전환 전 시험 전용입니다. PC도 <code>--insecure-grpc</code>로 떠 있어야 합니다.
+      </p>
+
+      <p className="muted" style={{ marginTop: 10 }}>만료 {fmtTime(token.expiresAt)}</p>
+    </Modal>
   );
 }
 
