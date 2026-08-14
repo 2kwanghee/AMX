@@ -2,6 +2,9 @@
 .amx-dev/
 .amx-agent/
 
+# ── 릴리스 산출물 (deploy/build-artifacts.sh) — 커밋하지 않음 ─
+/dist/
+
 # ── Python (tsamx, ams-server) ──────────────────────────────
 __pycache__/
 *.py[cod]
