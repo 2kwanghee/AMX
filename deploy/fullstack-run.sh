@@ -56,7 +56,7 @@ lan_ip() {
   if grep -qi microsoft /proc/version 2>/dev/null; then
     /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command \
       "(Get-NetIPConfiguration | Where-Object {\$_.IPv4DefaultGateway -ne \$null} | Select-Object -First 1).IPv4Address.IPAddress" \
-      2>/dev/null | tr -d '\r' | head -1
+      2>/dev/null | tr -d '\r' | head -1 || true
     return
   fi
   local ip=""
