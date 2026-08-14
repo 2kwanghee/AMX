@@ -19,6 +19,7 @@ from app.api.v1 import (
     billing,
     servers,
     tenants,
+    usage,
 )
 from app.config import get_settings
 from app.core.errors import install_error_handlers
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(assignments.router, prefix=API_PREFIX)
     app.include_router(alerts.router, prefix=API_PREFIX)
     app.include_router(billing.router, prefix=API_PREFIX)
+    app.include_router(usage.router, prefix=API_PREFIX)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:

@@ -14,6 +14,8 @@ import base64
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +34,10 @@ from app.models import (
     TenantDek,
     UsageSnapshot,
 )
+
+# "Field not supplied" for PATCH arguments whose None is itself a value the
+# caller can mean (update_account.monthly_price: None clears the price).
+UNSET: Any = object()
 
 _ACTIVE_ASSIGNMENT_STATES = (
     "pending",
@@ -170,6 +176,8 @@ def create_account(
     secret: str,
     provider: str = "claude",
     owner: str | None = None,
+    monthly_price: Decimal | None = None,
+    currency: str | None = None,
 ) -> Account:
     get_tenant(db, tenant_id)
     if provider == "codex":
@@ -188,7 +196,13 @@ def create_account(
         encrypted_secret=crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db),
         secret_masked=crypto.mask_secret(credential_type, secret),
         status="available",
+        monthly_price=monthly_price,
     )
+    # currency is NOT NULL with a server-side 'USD' default; leaving the
+    # attribute unset (rather than assigning None) is what lets that default
+    # apply when the caller said nothing.
+    if currency is not None:
+        account.currency = currency
     _apply_credential_metadata(account, secret)
     db.add(account)
     try:
@@ -410,6 +424,8 @@ def update_account(
     status: str | None,
     secret: str | None,
     owner: str | None = None,
+    monthly_price: Decimal | None | Any = UNSET,
+    currency: str | None = None,
 ) -> Account:
     account = get_account(db, tenant_id, account_id)
     if (
@@ -433,6 +449,13 @@ def update_account(
         account.status = status
     if owner is not None:
         account.owner = owner
+    if monthly_price is not UNSET:
+        # None here is a real value — "clear the price" — which is why this one
+        # field needs the sentinel instead of the None-means-absent convention
+        # the fields above use.
+        account.monthly_price = monthly_price
+    if currency is not None:
+        account.currency = currency
     if secret is not None:
         # A rotated credential re-enters through the same door as the first one,
         # so it faces the same check — otherwise PATCH would be a way to park an

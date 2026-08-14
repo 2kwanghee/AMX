@@ -62,6 +62,8 @@ def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSess
         credential_type=body.credential_type,
         secret=body.secret,
         owner=body.owner,
+        monthly_price=body.monthly_price,
+        currency=body.currency,
     )
     return schemas.Account.model_validate(account)
 
@@ -83,6 +85,15 @@ def update_account(
         status=body.status,
         secret=body.secret,
         owner=body.owner,
+        # An explicit `"monthlyPrice": null` clears the price, while omitting the
+        # key leaves it alone — the two are only distinguishable through
+        # model_fields_set, since both arrive as None.
+        monthly_price=(
+            body.monthly_price
+            if "monthly_price" in body.model_fields_set
+            else inventory.UNSET
+        ),
+        currency=body.currency,
     )
     return schemas.Account.model_validate(account)
 
