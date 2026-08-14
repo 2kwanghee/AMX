@@ -121,7 +121,7 @@ echo
 echo "──────────────────────────────────────────────────────────────"
 echo "노트북에서 아래를 그대로 실행하세요 (저장소 clone이 되어 있어야 합니다):"
 echo
-printf '%scd ~/AMX && git pull && bash deploy/agent-setup.sh install \\\n'    "$c_grn"
+printf '%scd ~/AMX-agent && git pull && bash deploy/agent-setup.sh install \\\n'    "$c_grn"
 printf '  --ams %s:%s \\\n'   "$LAN_IP" "$GRPC_PORT"
 printf '  --token %s \\\n'    "$TOKEN"
 printf '  --pubkey %s \\\n'   "$AMX_AMS_PUBKEY"

@@ -203,6 +203,9 @@ class EnrollTokenResponse(Wire):
     token: str
     expires_at: datetime
     ams_endpoint: str | None = None
+    # Standard-base64 Ed25519 public key the agent pins (--pubkey). NULL when the
+    # server has no signing key configured to derive it from.
+    ams_pubkey: str | None = None
 
 
 class SwitchModeRequest(Wire):

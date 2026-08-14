@@ -1552,8 +1552,17 @@ components:
           type: string
           format: date-time
         amsEndpoint:
-          description: gRPC endpoint the agent should dial (outbound only, TLS/443).
+          description: >-
+            Advertised gRPC endpoint (host:port) the agent should dial. Null when
+            no advertise host is configured; the console then shows a placeholder.
           type: string
+          nullable: true
+        amsPubkey:
+          description: >-
+            Standard-base64 Ed25519 public key the agent pins (--pubkey). Null when
+            the server has no signing key configured to derive it from.
+          type: string
+          nullable: true
 
     SwitchModeRequest:
       type: object

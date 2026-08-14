@@ -100,7 +100,7 @@ bash deploy/fullstack-run.sh bootstrap-admin admin@example.com 'DevPass123!'
 | Go | `go version` | 1.24+. 에이전트 빌드 |
 | uv | `uv --version` | tsamx 설치에 사용 (없으면 설치 스크립트가 안내) |
 
-저장소를 `git clone` 해 둡니다 (예: `~/AMX`).
+저장소를 `git clone` 해 둡니다 (예: `~/AMX-agent`).
 
 ## B-2. 원클릭 설치 (권장)
 
@@ -113,7 +113,7 @@ bash deploy/agent-install-cmd.sh --server-name "이광희 노트북"
 **② 노트북에서** ①이 출력한 명령을 그대로 붙여넣기 (형태 예시):
 
 ```sh
-cd ~/AMX && git pull && bash deploy/agent-setup.sh install \
+cd ~/AMX-agent && git pull && bash deploy/agent-setup.sh install \
   --ams 10.60.1.15:50051 \
   --token <자동 발급됨> \
   --pubkey <자동 채워짐> \
@@ -169,7 +169,7 @@ A·B트랙이 끝난 상태(서버 온라인)에서, 실제 Claude 계정을 한
 # C-2 — 에이전트 자기 업데이트 (self-update)
 
 C트랙이 끝난 상태에서, 원격으로 에이전트를 최신 커밋으로 올리는 경로를 확인합니다.
-에이전트는 **자기 노트북의 클론**(`~/AMX`)만 당겨서 자기를 다시 빌드합니다. 명령에는
+에이전트는 **자기 노트북의 클론**(`~/AMX-agent`)만 당겨서 자기를 다시 빌드합니다. 명령에는
 저장소 주소도 브랜치도 실리지 않으니, PC에서 코드를 밀어 넣는 게 아니라 노트북이 스스로
 `git pull`을 하는 것으로 이해하면 됩니다.
 
@@ -180,7 +180,7 @@ curl -X POST -H "Authorization: Bearer $AMX_ADMIN_TOKEN" \
   http://localhost:8080/api/v1/tenants/<TEN>/servers/<SRV>:self-update    # 202
 ```
 
-**시험 1 — 정상 왕복.** 노트북 `~/AMX`가 최신보다 뒤처진 상태를 만들고(`git -C ~/AMX reset
+**시험 1 — 정상 왕복.** 노트북 `~/AMX-agent`가 최신보다 뒤처진 상태를 만들고(`git -C ~/AMX-agent reset
 --hard HEAD~1` 후 `deploy/agent-run.sh up`) 위 명령을 부릅니다.
 
 - **성공 판정**: 30초~2분 뒤 `agent-run.sh logs`에 재기동 흔적이 남고, 화면의 서버 상세
@@ -198,7 +198,7 @@ curl -X POST -H "Authorization: Bearer $AMX_ADMIN_TOKEN" -H 'Content-Type: appli
 ```
 
 - **성공 판정**: 화면 `알림`에 `self_update_failed`(사유 `commit_mismatch`)가 뜨고, 노트북에서
-  `git -C ~/AMX rev-parse HEAD`가 **호출 전과 같습니다**. 핀 대조는 pull 앞에서 하므로 거부된
+  `git -C ~/AMX-agent rev-parse HEAD`가 **호출 전과 같습니다**. 핀 대조는 pull 앞에서 하므로 거부된
   요청은 작업 트리를 건드리지 않습니다. 에이전트는 계속 온라인이어야 합니다.
 - 같은 서버에 self-update가 이미 queued/sent면 두 번째 호출은 409
   `self_update_already_pending`으로 막힙니다(연타 방지). 앞 건이 ack되거나 실패해야 다시 됩니다.
@@ -207,12 +207,12 @@ curl -X POST -H "Authorization: Bearer $AMX_ADMIN_TOKEN" -H 'Content-Type: appli
 
 ```sh
 bash deploy/agent-run.sh down
-cp ~/AMX/.amx-agent/ama.bak ~/AMX/.amx-agent/ama   # 직전 바이너리로 되돌리기
+cp ~/AMX-agent/.amx-agent/ama.bak ~/AMX-agent/.amx-agent/ama   # 직전 바이너리로 되돌리기
 bash deploy/agent-run.sh up
 ```
 
 교체 직전 바이너리는 항상 `ama.bak`에 남습니다. 저장소까지 되돌려야 하면
-`git -C ~/AMX reset --hard origin/main && bash deploy/agent-run.sh up`.
+`git -C ~/AMX-agent reset --hard origin/main && bash deploy/agent-run.sh up`.
 
 - **성공 판정**: 서버가 다시 온라인이 되고 `agent_version`이 되돌린 커밋을 가리킵니다.
 
@@ -257,7 +257,7 @@ bash deploy/fullstack-run.sh down all
 
 1. 화면에서: `서버` 메뉴 → `서버 등록` → 그 행의 `등록 토큰` 버튼 → 토큰 복사(한 번만 표시).
 2. PC의 `.amx-dev/dev.env`에서 `AMX_AMS_PUBKEY=` 값 복사.
-3. 노트북에서 tsamx 설치: `uv tool install --editable ~/AMX/tsamx` (상세: `docs/TSAMX-GUIDE.md`)
+3. 노트북에서 tsamx 설치: `uv tool install --editable ~/AMX-agent/tsamx` (상세: `docs/TSAMX-GUIDE.md`)
 4. 노트북에서:
 
 ```sh

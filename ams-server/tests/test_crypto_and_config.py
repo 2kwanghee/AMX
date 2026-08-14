@@ -67,6 +67,61 @@ def test_missing_or_weak_configuration_refuses_to_load(app_env, monkeypatch, env
     assert message in str(exc.value)
 
 
+def _ed25519_seed_and_pubkey():
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    sk = Ed25519PrivateKey.generate()
+    seed = sk.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
+    )
+    pub = sk.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return base64.urlsafe_b64encode(seed).decode().rstrip("="), base64.b64encode(pub).decode()
+
+
+def test_ams_pubkey_is_null_without_seed_or_explicit(app_env, monkeypatch):
+    monkeypatch.delenv("AMX_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("AMX_AMS_PUBKEY", raising=False)
+    assert load_settings().ams_pubkey is None
+
+
+def test_ams_pubkey_derived_from_seed(app_env, monkeypatch):
+    seed_b64, expected_pub = _ed25519_seed_and_pubkey()
+    monkeypatch.setenv("AMX_SIGNING_KEY", seed_b64)
+    monkeypatch.delenv("AMX_AMS_PUBKEY", raising=False)
+    assert load_settings().ams_pubkey == expected_pub
+
+
+def test_explicit_pubkey_matching_seed_is_accepted(app_env, monkeypatch):
+    seed_b64, expected_pub = _ed25519_seed_and_pubkey()
+    monkeypatch.setenv("AMX_SIGNING_KEY", seed_b64)
+    monkeypatch.setenv("AMX_AMS_PUBKEY", expected_pub)
+    assert load_settings().ams_pubkey == expected_pub
+
+
+def test_explicit_pubkey_diverging_from_seed_refuses_to_load(app_env, monkeypatch):
+    seed_b64, _ = _ed25519_seed_and_pubkey()
+    _, other_pub = _ed25519_seed_and_pubkey()
+    monkeypatch.setenv("AMX_SIGNING_KEY", seed_b64)
+    monkeypatch.setenv("AMX_AMS_PUBKEY", other_pub)
+    with pytest.raises(ConfigError) as exc:
+        load_settings()
+    assert "does not match" in str(exc.value)
+
+
+def test_explicit_pubkey_without_seed_refuses_to_load(app_env, monkeypatch):
+    _, some_pub = _ed25519_seed_and_pubkey()
+    monkeypatch.delenv("AMX_SIGNING_KEY", raising=False)
+    monkeypatch.setenv("AMX_AMS_PUBKEY", some_pub)
+    with pytest.raises(ConfigError) as exc:
+        load_settings()
+    assert "AMX_SIGNING_KEY" in str(exc.value)
+
+
 def test_the_app_will_not_construct_without_an_admin_token(app_env):
     """Startup, not first request — an AMS with no admin token must not serve."""
     script = (

@@ -227,6 +227,72 @@ def test_server_round_trip_and_enroll_token(client):
     assert token not in fetched
 
 
+def test_enroll_token_carries_endpoint_and_pubkey(client, monkeypatch):
+    """With an advertise host and signing key configured, the enroll-token
+    response carries the endpoint and the standard-base64 Ed25519 public key."""
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from app.config import get_settings
+
+    seed = Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
+    )
+    seed_b64url = base64.urlsafe_b64encode(seed).decode().rstrip("=")
+    expected_pub = base64.b64encode(
+        Ed25519PrivateKey.from_private_bytes(seed)
+        .public_key()
+        .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    ).decode()
+
+    monkeypatch.setenv("AMX_ADVERTISE_HOST", "10.60.1.15")
+    monkeypatch.setenv("AMX_GRPC_PORT", "50051")
+    monkeypatch.setenv("AMX_SIGNING_KEY", seed_b64url)
+    monkeypatch.delenv("AMX_AMS_PUBKEY", raising=False)
+    get_settings.cache_clear()
+    try:
+        tenant_id = make_tenant(client)
+        server = make_server(client, tenant_id)
+        issued = client.post(
+            f"/api/v1/tenants/{tenant_id}/servers/{server['id']}/enroll-token",
+            json={"ttlSeconds": 600},
+        )
+        assert issued.status_code == 201, issued.text
+        body = issued.json()
+        assert body["amsEndpoint"] == "10.60.1.15:50051"
+        assert body["amsPubkey"] == expected_pub
+        # 32 raw bytes → standard base64, decodes cleanly.
+        assert len(base64.b64decode(body["amsPubkey"])) == 32
+    finally:
+        get_settings.cache_clear()
+
+
+def test_enroll_token_endpoint_null_without_advertise_host(client, monkeypatch):
+    """No advertise host → amsEndpoint stays null; the console shows a placeholder."""
+    from app.config import get_settings
+
+    monkeypatch.delenv("AMX_ADVERTISE_HOST", raising=False)
+    monkeypatch.delenv("AMX_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("AMX_AMS_PUBKEY", raising=False)
+    get_settings.cache_clear()
+    try:
+        tenant_id = make_tenant(client)
+        server = make_server(client, tenant_id)
+        issued = client.post(
+            f"/api/v1/tenants/{tenant_id}/servers/{server['id']}/enroll-token",
+            json={"ttlSeconds": 600},
+        )
+        assert issued.status_code == 201, issued.text
+        body = issued.json()
+        assert body["amsEndpoint"] is None
+        # No seed and no explicit key → pubkey stays null; the console shows a placeholder.
+        assert body["amsPubkey"] is None
+    finally:
+        get_settings.cache_clear()
+
+
 def test_assignment_creation_and_listing(client):
     tenant_id = make_tenant(client)
     account = make_account(client, tenant_id)

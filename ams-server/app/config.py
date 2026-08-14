@@ -41,6 +41,70 @@ class Settings:
     # real gap (agent offline / report loss) is clamped to this ceiling so a stale
     # observation cannot dominate the time-weighted utilization integral.
     usage_max_gap_seconds: int = 600
+    # Console install-command support. `advertise_host` is the host (or IP) the
+    # agent should dial; combined with `grpc_port` it forms the endpoint shown in
+    # the enroll-token modal. Absent host → no endpoint (the console renders a
+    # placeholder). `ams_pubkey` is the standard-base64 Ed25519 public key the
+    # agent pins; derived from AMX_SIGNING_KEY when set, or taken verbatim from
+    # AMX_AMS_PUBKEY, so the REST process advertises the same key the gRPC signer
+    # holds.
+    advertise_host: str | None = None
+    grpc_port: int = 50051
+    ams_pubkey: str | None = None
+
+    @property
+    def ams_endpoint(self) -> str | None:
+        if not self.advertise_host:
+            return None
+        return f"{self.advertise_host}:{self.grpc_port}"
+
+
+def _pubkey_from_seed(seed_b64: str) -> str:
+    """Standard-base64 Ed25519 public key derived from a url-safe base64 seed."""
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    padded = seed_b64 + "=" * (-len(seed_b64) % 4)
+    seed = base64.urlsafe_b64decode(padded.encode())
+    if len(seed) != 32:
+        raise ConfigError("AMX_SIGNING_KEY must be a url-safe base64 32-byte Ed25519 seed.")
+    pub = Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return base64.b64encode(pub).decode()
+
+
+def _derive_ams_pubkey() -> str | None:
+    """Standard-base64 Ed25519 public key for the enroll-token response.
+
+    The value must equal the key the gRPC signer actually holds, so:
+
+    * both AMX_AMS_PUBKEY and AMX_SIGNING_KEY set → they must agree, else the
+      console would advertise a key the signer never signs with;
+    * AMX_AMS_PUBKEY alone → refused: with no seed the signer generates a random
+      key at startup that is guaranteed to diverge from the advertised one;
+    * AMX_SIGNING_KEY alone → derive from it;
+    * neither → None (dev without a fixed key; the console shows a placeholder).
+    """
+    explicit = os.environ.get("AMX_AMS_PUBKEY", "").strip() or None
+    seed_b64 = os.environ.get("AMX_SIGNING_KEY", "").strip() or None
+    derived = _pubkey_from_seed(seed_b64) if seed_b64 else None
+    if explicit and seed_b64:
+        if explicit != derived:
+            raise ConfigError(
+                "AMX_AMS_PUBKEY does not match the key derived from AMX_SIGNING_KEY; "
+                "the console would advertise a public key the gRPC signer does not hold."
+            )
+        return explicit
+    if explicit and not seed_b64:
+        raise ConfigError(
+            "AMX_AMS_PUBKEY is set without AMX_SIGNING_KEY. The gRPC signer would "
+            "generate a random key that diverges from the advertised one; set "
+            "AMX_SIGNING_KEY (the 32-byte seed) so both sides share one key."
+        )
+    return derived
 
 
 def _require(name: str) -> str:
@@ -93,6 +157,9 @@ def load_settings() -> Settings:
         usage_max_gap_seconds=int(
             os.environ.get("AMX_USAGE_MAX_GAP_SECONDS", "600")
         ),
+        advertise_host=os.environ.get("AMX_ADVERTISE_HOST", "").strip() or None,
+        grpc_port=int(os.environ.get("AMX_GRPC_PORT", "50051")),
+        ams_pubkey=_derive_ams_pubkey(),
     )
 
 

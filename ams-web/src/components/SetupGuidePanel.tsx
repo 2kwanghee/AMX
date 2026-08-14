@@ -25,7 +25,7 @@ const GUIDE: Section[] = [
         cause:
           '그 서버의 에이전트가 아직 SelfUpdate 기능이 없는 구버전이다. 콘솔 버튼은 에이전트에 이미 그 기능이 깔려 있어야 동작한다 — 없는 버전에 원격 업데이트를 걸면 명령 자체를 못 알아듣는다.',
         fix: '해당 머신에서 최초 한 번만 손으로 받아 재빌드한다. 이 부트스트랩이 끝나면 그때부터 버튼이 동작한다. 대시보드 서버 표의 버전이 "p3"에서 "p3+커밋해시"로 바뀌면 성공이다.',
-        code: 'cd ~/AMX\nbash deploy/agent-run.sh down\ngit pull\nbash deploy/agent-run.sh up --insecure \\\n  --ams 10.60.1.15:50051 \\\n  --pubkey "<PC .amx-dev/dev.env 의 AMX_AMS_PUBKEY>" \\\n  --config-dir ~/.claude-amx --tsamx-bin ~/.local/bin/tsamx',
+        code: 'cd ~/AMX-agent\nbash deploy/agent-run.sh down\ngit pull\nbash deploy/agent-run.sh up --insecure \\\n  --ams 10.60.1.15:50051 \\\n  --pubkey "<PC .amx-dev/dev.env 의 AMX_AMS_PUBKEY>" \\\n  --config-dir ~/.claude-amx --tsamx-bin ~/.local/bin/tsamx',
       },
       {
         symptom: '버튼을 눌러도 버전이 그대로다 (계속 "p3")',
@@ -45,7 +45,7 @@ const GUIDE: Section[] = [
         cause:
           'GitHub는 비밀번호 인증을 없앴다. 비밀번호 자리에는 계정 암호가 아니라 토큰(PAT)을 넣어야 한다. 403은 Fine-grained 토큰이 이 저장소 권한을 못 받았을 때 나온다.',
         fix: 'Classic 토큰을 repo 스코프로 발급한다(Settings → Developer settings → Tokens classic). 원격 업데이트도 노트북에서 git pull을 돌리므로, 자격증명을 저장해두지 않으면 콘솔 버튼도 같은 지점에서 막힌다. 그래서 store에 한 번 저장해둔다.',
-        code: 'cd ~/AMX\nrm -f ~/.git-credentials\ngit config --global credential.helper store\ngit pull\n#   Username: <GitHub 계정>\n#   Password: ghp_...  (classic, repo 스코프)',
+        code: 'cd ~/AMX-agent\nrm -f ~/.git-credentials\ngit config --global credential.helper store\ngit pull\n#   Username: <GitHub 계정>\n#   Password: ghp_...  (classic, repo 스코프)',
       },
       {
         symptom: '"go가 없습니다 (1.24+ 필요)"로 빌드가 멈춘다',
@@ -58,7 +58,7 @@ const GUIDE: Section[] = [
         cause:
           'down이 옛 프로세스를 못 죽여서, up이 "이미 실행 중"으로 판단해 재빌드를 건너뛴 것이다.',
         fix: '프로세스와 옛 바이너리를 강제로 정리하고 다시 세운다. up이 "빌드: go build" 줄을 새로 출력해야 재빌드가 된 것이다.',
-        code: 'cd ~/AMX\nbash deploy/agent-run.sh down\npkill -f ".amx-agent/ama"\nrm -f .amx-agent/ama .amx-agent/ama.pid\nbash deploy/agent-run.sh up --insecure --ams 10.60.1.15:50051 \\\n  --pubkey "<AMX_AMS_PUBKEY>" \\\n  --config-dir ~/.claude-amx --tsamx-bin ~/.local/bin/tsamx',
+        code: 'cd ~/AMX-agent\nbash deploy/agent-run.sh down\npkill -f ".amx-agent/ama"\nrm -f .amx-agent/ama .amx-agent/ama.pid\nbash deploy/agent-run.sh up --insecure --ams 10.60.1.15:50051 \\\n  --pubkey "<AMX_AMS_PUBKEY>" \\\n  --config-dir ~/.claude-amx --tsamx-bin ~/.local/bin/tsamx',
       },
     ],
   },
@@ -81,14 +81,14 @@ const GUIDE: Section[] = [
         symptom: '재설치했더니 서버 등록이 무한히 거부된다',
         cause: 'DB 초기화나 재등록 뒤에도 옛 서버 자격증명이 새 토큰보다 우선 적용되는 것이다.',
         fix: '상태 디렉터리를 지우고 새 토큰으로 다시 설치한다.',
-        code: 'rm -rf ~/AMX/.amx-agent/state\n# 이후 새 enroll 토큰으로 재설치',
+        code: 'rm -rf ~/AMX-agent/.amx-agent/state\n# 이후 새 enroll 토큰으로 재설치',
       },
       {
         symptom: '에이전트를 어느 디렉터리에서 돌려야 하나',
         warn: true,
         cause:
           '원격 업데이트는 에이전트가 있는 폴더에서 git pull --ff-only를 실행한다. 개발 트리(/mnt/c/workspace/AMX)에는 커밋하지 않은 변경이 자주 있어 pull이 거부되고, 반대로 pull이 성공하면 개발 중이던 코드가 덮인다.',
-        fix: '에이전트는 전용 클론에서만 돌린다. PC는 ~/AMX-agent, 노트북은 ~/AMX처럼 개발과 분리된 깨끗한 클론을 쓴다. WSL 홈은 리눅스 디스크라 /mnt/c보다 빌드도 빠르다.',
+        fix: '에이전트는 전용 클론 ~/AMX-agent에서만 돌린다. 개발 트리와 분리된 깨끗한 클론을 쓴다. WSL 홈은 리눅스 디스크라 /mnt/c보다 빌드도 빠르다.',
         code: 'git clone https://github.com/2kwanghee/AMX.git ~/AMX-agent\ncd ~/AMX-agent && bash deploy/agent-run.sh up ...',
       },
     ],

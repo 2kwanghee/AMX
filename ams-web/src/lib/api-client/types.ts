@@ -147,7 +147,8 @@ export interface SwitchModeRequest {
 export interface EnrollTokenResponse {
   token: string;
   expiresAt: string;
-  amsEndpoint?: string;
+  amsEndpoint?: string | null;
+  amsPubkey?: string | null;
 }
 
 // Latest self_update command projection (GET …/servers/{id}/self-update-status).
