@@ -33,13 +33,16 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
       {act.error && <p className="err">{act.error}</p>}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>이메일</th><th>프로바이더</th><th>소유자</th><th>유형</th><th>상태</th><th>시크릿</th><th>만료</th><th></th></tr></thead>
+          <thead><tr><th>이메일</th><th>프로바이더</th><th>소유자</th><th>구독료</th><th>유형</th><th>상태</th><th>시크릿</th><th>만료</th><th></th></tr></thead>
           <tbody>
             {accounts.map((a) => (
               <tr key={a.id}>
                 <td><EmailChip email={a.email} sub={a.organizationName} /></td>
                 <td><ProviderTag value={a.provider} /></td>
                 <td>{a.owner ? a.owner : <span className="muted">—</span>}</td>
+                <td>
+                  {a.monthlyPrice ? `${a.monthlyPrice} ${a.currency ?? 'USD'}` : <span className="muted">—</span>}
+                </td>
                 <td>{krLabel(a.credentialType)}</td>
                 <td><Badge value={a.status} /></td>
                 <td><code>{a.secretMasked}</code></td>
@@ -59,7 +62,7 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
               </tr>
             ))}
             {accounts.length === 0 && (
-              <tr><td colSpan={8} className="muted">등록된 계정이 없습니다. '계정 등록'으로 Claude·Codex 계정을 연결하세요.</td></tr>
+              <tr><td colSpan={9} className="muted">등록된 계정이 없습니다. '계정 등록'으로 Claude·Codex 계정을 연결하세요.</td></tr>
             )}
           </tbody>
         </table>
@@ -190,7 +193,11 @@ function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () 
   const [email, setEmail] = useState('');
   const [secret, setSecret] = useState('');
   const [owner, setOwner] = useState('');
+  const [price, setPrice] = useState('');
+  const [currency, setCurrency] = useState('');
   const act = useAction();
+  const priceValid = price.trim() === '' || /^\d+(\.\d+)?$/.test(price.trim());
+  const currencyValid = currency.trim() === '' || /^[A-Za-z]{3}$/.test(currency.trim());
 
   return (
     <>
@@ -221,11 +228,29 @@ function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () 
         autoComplete="off"
         placeholder="담당자·팀 이름"
       />
+      <label>월 구독료 (선택)</label>
+      <input
+        value={price}
+        onChange={(e) => setPrice(e.target.value)}
+        inputMode="decimal"
+        autoComplete="off"
+        placeholder="예: 110.00"
+      />
+      {!priceValid && <p className="err">금액은 0 이상의 숫자만 입력하세요.</p>}
+      <label>통화 (선택 — 기본 USD)</label>
+      <input
+        value={currency}
+        onChange={(e) => setCurrency(e.target.value)}
+        autoComplete="off"
+        maxLength={3}
+        placeholder="USD"
+      />
+      {!currencyValid && <p className="err">통화는 세 글자 코드입니다(예: USD, KRW).</p>}
       {act.error && <p className="err">{act.error}</p>}
       <button
         className="primary"
         style={{ marginTop: 14 }}
-        disabled={act.busy || !email.trim() || !secret.trim()}
+        disabled={act.busy || !email.trim() || !secret.trim() || !priceValid || !currencyValid}
         onClick={() =>
           act.run(
             () =>
@@ -235,6 +260,8 @@ function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () 
                 credentialType: 'oauth',
                 secret,
                 owner: owner.trim() || undefined,
+                monthlyPrice: price.trim() === '' ? undefined : price.trim(),
+                currency: currency.trim() === '' ? undefined : currency.trim().toUpperCase(),
               }),
             () => {
               setSecret('');
@@ -266,11 +293,19 @@ function EditAccount({
   const [owner, setOwner] = useState(account.owner ?? '');
   const [email, setEmail] = useState(account.email);
   const [secret, setSecret] = useState('');
+  const [price, setPrice] = useState(account.monthlyPrice ?? '');
+  const [currency, setCurrency] = useState(account.currency ?? 'USD');
   const act = useAction();
   const isCodex = account.provider === 'codex';
   const emailChanged = email.trim() !== account.email;
   const ownerChanged = owner.trim() !== (account.owner ?? '');
-  const dirty = emailChanged || ownerChanged || secret.trim() !== '';
+  const priceChanged = price.trim() !== (account.monthlyPrice ?? '');
+  const currencyChanged = currency.trim().toUpperCase() !== (account.currency ?? 'USD');
+  // 금액은 문자열 그대로 전송하므로 Number로 파싱하지 않고 형태만 본다: 음수·비숫자 차단.
+  const priceValid = price.trim() === '' || /^\d+(\.\d+)?$/.test(price.trim());
+  const currencyValid = /^[A-Za-z]{3}$/.test(currency.trim());
+  const dirty =
+    emailChanged || ownerChanged || priceChanged || currencyChanged || secret.trim() !== '';
 
   return (
     <Modal title="계정 수정" onClose={onClose}>
@@ -286,6 +321,24 @@ function EditAccount({
       />
       <label>이메일</label>
       <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="off" />
+      <label>월 구독료 (비우면 미설정)</label>
+      <input
+        value={price}
+        onChange={(e) => setPrice(e.target.value)}
+        inputMode="decimal"
+        autoComplete="off"
+        placeholder="예: 110.00"
+      />
+      {!priceValid && <p className="err">금액은 0 이상의 숫자만 입력하세요.</p>}
+      <label>통화</label>
+      <input
+        value={currency}
+        onChange={(e) => setCurrency(e.target.value)}
+        autoComplete="off"
+        maxLength={3}
+        placeholder="USD"
+      />
+      {!currencyValid && <p className="err">통화는 세 글자 코드입니다(예: USD, KRW).</p>}
       {isCodex && (
         <>
           <label>auth.json 전문 {emailChanged ? '(이메일 변경 시 필수)' : '(선택 — 교체할 때만)'}</label>
@@ -302,7 +355,7 @@ function EditAccount({
       <button
         className="primary"
         style={{ marginTop: 14 }}
-        disabled={act.busy || !dirty || !email.trim()}
+        disabled={act.busy || !dirty || !email.trim() || !priceValid || !currencyValid}
         onClick={() =>
           act.run(
             () =>
@@ -310,6 +363,8 @@ function EditAccount({
                 owner: ownerChanged ? owner.trim() : undefined,
                 email: emailChanged ? email.trim() : undefined,
                 secret: secret.trim() ? secret : undefined,
+                monthlyPrice: priceChanged ? (price.trim() === '' ? null : price.trim()) : undefined,
+                currency: currencyChanged ? currency.trim().toUpperCase() : undefined,
               }),
             () => {
               setSecret('');
