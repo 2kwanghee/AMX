@@ -412,6 +412,30 @@ func TestRecallPurgeSingleAccountRemovesDirectly(t *testing.T) {
 	}
 }
 
+// TestRecallPurgeIdempotentWhenAlreadyAbsent: recalling an account that is no
+// longer in the pool (operator removed it in tsamx directly, or a prior recall
+// partially succeeded) must converge without calling `tsamx remove` — otherwise
+// the not-found remove error leaves the assignment stuck in `recalling` forever.
+func TestRecallPurgeIdempotentWhenAlreadyAbsent(t *testing.T) {
+	hn := newHarness(t)
+	// No deliver: the pool never held this account, so remove would 404.
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "r1",
+		Cmd: &amxv1.AmsCommand_Recall{Recall: &amxv1.RecallAccount{
+			Account:        &amxv1.AccountRef{AmsAccountId: "acc-1", Email: "gone@x.io"},
+			PurgeLocalCopy: true,
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("absent purge convergence = %v (want CONVERGED)", ack.Convergence)
+	}
+	for _, c := range hn.fake.CallLog() {
+		if len(c) >= 6 && c[:6] == "remove" {
+			t.Fatalf("remove called on already-absent account; calls=%v", hn.fake.CallLog())
+		}
+	}
+}
+
 // TestForgedSignatureRejected: a command signed by a foreign key is REJECTED and
 // has no effect.
 func TestForgedSignatureRejected(t *testing.T) {

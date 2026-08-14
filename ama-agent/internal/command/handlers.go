@@ -265,6 +265,24 @@ func (h *Handler) otherSwitchTarget(ctx context.Context, br provider.Bridge, exc
 	}
 	return fallback
 }
+
+// accountInPool reports whether the pool currently lists the account. Purge
+// recall uses it to stay idempotent: an account already gone from the pool
+// (operator removed it directly, or a prior recall partially succeeded) must
+// converge, not fail on a not-found `tsamx remove`. On a List error it returns
+// true so the removal is still attempted — List failure is a separate fault.
+func (h *Handler) accountInPool(ctx context.Context, br provider.Bridge, email string) bool {
+	list, err := br.List(ctx)
+	if err != nil || list == nil {
+		return true
+	}
+	for _, row := range list.Accounts {
+		if row.Email == email {
+			return true
+		}
+	}
+	return false
+}
 // handleRecall implements O2. Since the 2026-08-14 change AMS always sends
 // purge=true (recall = full detach): the account is removed from the pool and
 // its manifest record deleted, history living only in the AMS-side detached row.
@@ -316,10 +334,15 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 				}
 			}
 		}
-		if err := br.Remove(ctx, email); err != nil {
-			out := diverged(ack, "tsamx_remove", err)
-			h.record(out, "recall", amsID, "purge")
-			return out
+		// 멱등: 대상이 이미 풀에 없으면 remove를 건너뛴다. 회수의 목적은 부재이므로
+		// 이미 부재면(운영자가 tsamx에서 직접 지웠거나 이전 회수가 부분 성공한 경우)
+		// remove의 not-found 실패로 recalling에 갇히지 않고 성공으로 수렴해야 한다.
+		if h.accountInPool(ctx, br, email) {
+			if err := br.Remove(ctx, email); err != nil {
+				out := diverged(ack, "tsamx_remove", err)
+				h.record(out, "recall", amsID, "purge")
+				return out
+			}
 		}
 		if err := h.store.Remove(amsID); err != nil {
 			out := diverged(ack, "manifest_remove", err)
