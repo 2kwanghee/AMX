@@ -132,6 +132,7 @@ try {
   @(
     "# install.ps1(패키지 설치) 마커. 토큰 제외."
     "AMX_INSTALL_METHOD=package"
+    "AMX_INSTALL_ROOT=$InstallRoot"
     "AMX_AMS_ADDR=$Ams"
     "AMX_AMS_URL=$AmsUrl"
     "AMX_AMS_PUBKEY=$Pubkey"
@@ -145,7 +146,16 @@ try {
   # ── 7) enroll·기동 ────────────────────────────────────────────────────────────
   # TODO(v1): 서비스 등록(nssm/Register-ScheduledTask)으로 부팅 지속성 부여.
   #           지금은 현재 세션 백그라운드 프로세스로만 기동한다.
+  # 재설치 시 옛 인스턴스를 먼저 정리해 같은 state dir 에 두 데몬이 뜨지 않게 한다(H1).
+  $pidFile = "$InstallRoot\ama.pid"
+  if (Test-Path $pidFile) {
+    $oldPid = (Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($oldPid) { Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue; Warn "기존 ama 종료 (pid $oldPid)" }
+    Remove-Item $pidFile -ErrorAction SilentlyContinue
+  }
+  # PR4 self_update 분기용 키를 데몬 env 에도 싣는다(마커와 통일).
   $envVars = @{
+    AMX_INSTALL_METHOD = "package"; AMX_INSTALL_ROOT = $InstallRoot; AMX_AMS_URL = $AmsUrl
     AMX_AMS_ADDR = $Ams; AMX_AGENT_ID = $AgentId; AMX_STATE_DIR = $stateDir
     AMX_AMS_PUBKEY = $Pubkey; CLAUDE_CONFIG_DIR = $ConfigDir; AMX_TSAMX_BIN = $tsamx
   }
@@ -154,7 +164,7 @@ try {
   foreach ($k in $envVars.Keys) { Set-Item -Path "Env:$k" -Value $envVars[$k] }
   Step "ama 기동"
   $p = Start-Process -FilePath $bin -RedirectStandardOutput "$logDir\ama.log" -RedirectStandardError "$logDir\ama.err.log" -PassThru -WindowStyle Hidden
-  Set-Content -Path "$InstallRoot\ama.pid" -Value $p.Id
+  Set-Content -Path $pidFile -Value $p.Id
   Ok "ama 기동 (pid $($p.Id)) → AMS $Ams, 로그 $logDir\ama.log"
   Ok "설치 끝. 관리자 화면에서 이 서버가 '온라인'인지 확인하세요."
 }
