@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
+from app.config import get_settings
 from app.core.errors import not_found
 from app.models import AgentCommand
 from app.services import commands, inventory
@@ -101,8 +102,15 @@ def issue_enroll_token(
         db, tenant_id, server_id, ttl_seconds=request.ttl_seconds
     )
     # The only response in this service that returns a live secret. It is shown
-    # once and only its hash is kept (§7).
-    return schemas.EnrollTokenResponse(token=token, expires_at=expires_at)
+    # once and only its hash is kept (§7). The endpoint/pubkey come from process
+    # config so the console can render a paste-ready install command.
+    settings = get_settings()
+    return schemas.EnrollTokenResponse(
+        token=token,
+        expires_at=expires_at,
+        ams_endpoint=settings.ams_endpoint,
+        ams_pubkey=settings.ams_pubkey,
+    )
 
 
 @router.get("/servers/{server_id}/usage", response_model=schemas.UsageSnapshot)

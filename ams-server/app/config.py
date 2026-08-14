@@ -41,6 +41,50 @@ class Settings:
     # real gap (agent offline / report loss) is clamped to this ceiling so a stale
     # observation cannot dominate the time-weighted utilization integral.
     usage_max_gap_seconds: int = 600
+    # Console install-command support. `advertise_host` is the host (or IP) the
+    # agent should dial; combined with `grpc_port` it forms the endpoint shown in
+    # the enroll-token modal. Absent host → no endpoint (the console renders a
+    # placeholder). `ams_pubkey` is the standard-base64 Ed25519 public key the
+    # agent pins; derived from AMX_SIGNING_KEY when set, or taken verbatim from
+    # AMX_AMS_PUBKEY, so the REST process advertises the same key the gRPC signer
+    # holds.
+    advertise_host: str | None = None
+    grpc_port: int = 50051
+    ams_pubkey: str | None = None
+
+    @property
+    def ams_endpoint(self) -> str | None:
+        if not self.advertise_host:
+            return None
+        return f"{self.advertise_host}:{self.grpc_port}"
+
+
+def _derive_ams_pubkey() -> str | None:
+    """Standard-base64 Ed25519 public key for the enroll-token response.
+
+    Prefers an explicit AMX_AMS_PUBKEY; otherwise derives it from the same
+    AMX_SIGNING_KEY seed the gRPC signer loads (deploy/fullstack-run.sh keeps
+    both in sync). Returns None when neither is configured.
+    """
+    explicit = os.environ.get("AMX_AMS_PUBKEY", "").strip()
+    if explicit:
+        return explicit
+    seed_b64 = os.environ.get("AMX_SIGNING_KEY", "").strip()
+    if not seed_b64:
+        return None
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    padded = seed_b64 + "=" * (-len(seed_b64) % 4)
+    seed = base64.urlsafe_b64decode(padded.encode())
+    if len(seed) != 32:
+        raise ConfigError("AMX_SIGNING_KEY must be a url-safe base64 32-byte Ed25519 seed.")
+    pub = Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return base64.b64encode(pub).decode()
 
 
 def _require(name: str) -> str:
@@ -93,6 +137,9 @@ def load_settings() -> Settings:
         usage_max_gap_seconds=int(
             os.environ.get("AMX_USAGE_MAX_GAP_SECONDS", "600")
         ),
+        advertise_host=os.environ.get("AMX_ADVERTISE_HOST", "").strip() or None,
+        grpc_port=int(os.environ.get("AMX_GRPC_PORT", "50051")),
+        ams_pubkey=_derive_ams_pubkey(),
     )
 
 
