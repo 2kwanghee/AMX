@@ -50,6 +50,10 @@ export interface Account {
   credentialType: CredentialType;
   status: AccountStatus;
   secretMasked: string;
+  // 월 구독료. 서버가 Decimal을 JSON 문자열로 내려보내므로 문자열이며(부동소수
+  // 오차 방지), 미설정이면 null. 비용 배분의 held 근거가 된다.
+  monthlyPrice?: string | null;
+  currency?: string;
   accountUuid?: string;
   organizationName?: string;
   scopes?: string[];
@@ -65,12 +69,18 @@ export interface AccountCreate {
   // credential set, for api_key the raw key. Write-only, never echoed back.
   secret: string;
   owner?: string;
+  // 금액은 문자열 그대로 전송(숫자 변환 금지 — 정밀도). currency 미제공 시 서버 기본 USD.
+  monthlyPrice?: string;
+  currency?: string;
 }
 export interface AccountUpdate {
   email?: string;
   status?: AccountStatus;
   secret?: string;
   owner?: string;
+  // 명시 null = 지우기(clear), 미제공 = 유지(서버 model_fields_set 기준).
+  monthlyPrice?: string | null;
+  currency?: string;
 }
 
 export interface OauthStartRequest {
