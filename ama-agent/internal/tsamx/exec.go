@@ -9,10 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
-	"syscall"
 	"time"
 
+	"github.com/2kwanghee/AMX/ama-agent/internal/fslock"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
@@ -212,34 +213,21 @@ func (b *ExecBridge) DeliverLock(ctx context.Context) func() error {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return noop // fail-open: cannot create the home, proceed unlocked
 	}
-	f, err := os.OpenFile(filepath.Join(configDir, deliverLockName), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return noop
-	}
+	lockPath := filepath.Join(configDir, deliverLockName)
 	deadline := time.Now().Add(b.lockMaxWait())
 	for {
-		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		lock, lockErr := fslock.TryLock(lockPath)
 		if lockErr == nil {
-			return func() error {
-				unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-				closeErr := f.Close()
-				if unlockErr != nil {
-					return unlockErr
-				}
-				return closeErr
-			}
+			return lock.Unlock
 		}
-		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
-			_ = f.Close() // unexpected flock failure: fail-open
-			return noop
+		if !errors.Is(lockErr, fslock.ErrWouldBlock) {
+			return noop // unexpected lock failure: fail-open
 		}
 		if time.Now().After(deadline) {
-			_ = f.Close() // could not acquire within the bound: fail-open
-			return noop
+			return noop // could not acquire within the bound: fail-open
 		}
 		select {
 		case <-ctx.Done():
-			_ = f.Close()
 			return noop
 		case <-time.After(deliverLockRetryInterval):
 		}
@@ -333,6 +321,15 @@ func (b *ExecBridge) AutoStatePath() string {
 }
 
 func (b *ExecBridge) backupRoot() string {
+	// On Windows tsamx (paths.py get_backup_root) ignores XDG entirely and keeps
+	// its backup root at the legacy ~/.tsamx-backup; mirror that so AMA reads the
+	// same autoswitch_state.json the pool writes.
+	if runtime.GOOS == "windows" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, ".tsamx-backup")
+		}
+		return ""
+	}
 	dataHome := b.DataHome
 	if dataHome == "" {
 		dataHome = os.Getenv("XDG_DATA_HOME")

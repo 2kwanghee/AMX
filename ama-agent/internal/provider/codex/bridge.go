@@ -8,9 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
+	"github.com/2kwanghee/AMX/ama-agent/internal/fslock"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
@@ -326,34 +326,21 @@ func (b *Bridge) DeliverLock(ctx context.Context) func() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return noop
 	}
-	f, err := os.OpenFile(filepath.Join(dir, deliverLockName), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return noop
-	}
+	lockPath := filepath.Join(dir, deliverLockName)
 	deadline := time.Now().Add(b.lockMaxWait())
 	for {
-		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		lock, lockErr := fslock.TryLock(lockPath)
 		if lockErr == nil {
-			return func() error {
-				unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-				closeErr := f.Close()
-				if unlockErr != nil {
-					return unlockErr
-				}
-				return closeErr
-			}
+			return lock.Unlock
 		}
-		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
-			_ = f.Close()
+		if !errors.Is(lockErr, fslock.ErrWouldBlock) {
 			return noop
 		}
 		if time.Now().After(deadline) {
-			_ = f.Close()
 			return noop
 		}
 		select {
 		case <-ctx.Done():
-			_ = f.Close()
 			return noop
 		case <-time.After(deliverLockRetryInterval):
 		}

@@ -19,6 +19,13 @@
 #   --purge-tsamx   uv tool로 설치한 tsamx도 제거
 #   --purge-config  Claude 설정 홈(계정 자격증명 포함!)도 삭제 — 입력 확인을 요구한다
 #   --yes           확인 질문 생략(자동화용)
+#
+# Windows(Git Bash) 제약:
+#   - 계정 하달(deliver) 중 러너 기동을 막는 B1b 락 가드가 편측으로만 동작한다.
+#     에이전트는 LockFileEx로 락을 잡지만, 러너 래퍼(amx-claude/amx-codex)는
+#     flock(1)로 공유 락을 잡는데 Git Bash에는 flock(1)이 없어 조용히 통과한다.
+#     즉 Windows 네이티브에서는 러너가 하달 도중에도 기동될 수 있다. 잔여 노출은
+#     B1a(이전 active 복원 + 원자적 쓰기)가 1초 미만 스왑 창으로 제한한다.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -34,6 +34,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_DIR="$ROOT/.amx-agent"
 LOG_DIR="$DEV_DIR/logs"
 BIN="$DEV_DIR/ama"
+# Git Bash(MSYS/MinGW)에서는 go가 만든 실행파일이 Windows PE라 .exe 확장자가
+# 있어야 커널이 실행한다. `go build -o`는 이름을 그대로 쓰므로(자동 .exe 없음)
+# 여기서 붙여, build의 -o 대상과 기동 시 실행 경로가 동일하게 맞는다.
+case "$(uname -s)" in
+  MINGW*|MSYS*) BIN="$BIN.exe" ;;
+esac
 PIDFILE="$DEV_DIR/ama.pid"
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
