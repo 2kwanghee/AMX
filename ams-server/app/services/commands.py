@@ -134,24 +134,25 @@ def request_deliver(
 def recall_purges_local_copy(db: Session, assignment: Assignment) -> bool:
     """Whether this assignment's recall must wipe the agent's local copy.
 
-    O2's default is preservation: a Claude recall disables the credential and
-    keeps the manifest record, so re-assigning the same account later is cheap.
-    That default is wrong for Codex, and not merely suboptimal.
+    O2 결정 변경(2026-08-14, 사용자 지시): 회수 = 해당 서버에서 계정 완전
+    분리. 이력은 detached 할당 행과 이벤트로만 남기고, 로컬 복사본은 항상
+    제거한다. 따라서 provider 무관 항상 True.
 
-    A Codex config home holds one `auth.json` plus an identity sidecar naming
-    its account. A disabling recall leaves that sidecar in place, and the
-    bridge's Add refuses a DIFFERENT email while it is there
-    (codex_single_account, ama-agent bridge.go:131). The assignment meanwhile
-    reaches `detached`, so the server-side per-server cap lets the next
-    assignment through — AMS would create an assignment the agent can never
-    converge, and the host would be stuck on its first Codex account forever.
-    Purging routes the agent to Remove, which deletes the sidecar
-    (bridge.go:218) and frees the host.
+    이전 O2 기본값은 보존(preservation)이었다: Claude 회수는 자격증명을
+    disable만 하고 매니페스트 레코드를 INACTIVE로 남겨 재할당을 싸게 했다.
+    그러나 그 잔존이 usage 보고에 INACTIVE로 계속 실려 reconcile의
+    detached↔inactive 불일치와 비용의 옛 서버 배분을 유발했다. 회수의 계약을
+    "완전 분리, 이력만 보존"으로 통일하면서 disable 경로는 폐기한다.
 
-    Claude's behaviour is unchanged.
+    Codex는 애초에 purge가 필수였다: config home의 identity sidecar가 남으면
+    bridge의 Add가 다른 email을 거부(codex_single_account, bridge.go:131)해
+    호스트가 첫 계정에 영구히 묶인다. purge는 에이전트를 Remove로 라우팅해
+    sidecar를 삭제(bridge.go:218)하고 호스트를 해방한다. 이제 Claude도 동일.
+
+    함수 시그니처는 유지한다(호출부 commands.py request_recall,
+    reconcile.py가 그대로 사용).
     """
-    account = db.get(Account, assignment.account_id)
-    return account is not None and account.provider == "codex"
+    return True
 
 
 def request_recall(

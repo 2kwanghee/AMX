@@ -27,12 +27,15 @@ from tests.test_grpc_channel import _oauth_secret, _seed_tenant_account_server
 
 
 # -- payload builders ---------------------------------------------------------
-def _acc(account_id, *, current=False, absent=False, positional=None, windows=None):
+def _acc(account_id, *, current=False, absent=False, inactive=False, positional=None, windows=None):
     """One AccountUsage dict as MessageToDict(preserving_proto_field_name) renders it."""
     entry: dict = {"account": {"ams_account_id": str(account_id)}}
-    entry["allocation_status"] = (
-        "ALLOCATION_STATUS_ABSENT" if absent else "ALLOCATION_STATUS_ACTIVE"
-    )
+    if absent:
+        entry["allocation_status"] = "ALLOCATION_STATUS_ABSENT"
+    elif inactive:
+        entry["allocation_status"] = "ALLOCATION_STATUS_INACTIVE"
+    else:
+        entry["allocation_status"] = "ALLOCATION_STATUS_ACTIVE"
     if current:
         entry["is_current"] = True
     if positional is not None:  # (five_hour_pct, seven_day_pct); None omits that field
@@ -118,6 +121,27 @@ def test_absent_excluded():
     assert (held_a, obs_a, cnt_a) == (50.0 * 300, 300.0, 1)  # 15000, present only at tick0
     held_b, obs_b, cnt_b = out[(s, b)]
     assert (held_b, obs_b, cnt_b) == (70.0 * 600, 600.0, 1)  # 42000, present only at tick1
+
+
+# -- (4b) INACTIVE (deactivated, credential-resident) STILL allocates ---------
+def test_inactive_included():
+    # deactivate는 자격증명을 서버에 점유한 채 로테이션에서만 빠진 상태다. 그
+    # 구독료가 증발하지 않도록(전액 배분 불변식) INACTIVE는 ABSENT와 달리 적분에
+    # 포함된다. held는 is_current일 때만 쌓이므로 INACTIVE 구간의 held는 0이지만
+    # observed(=배분 근거 dt)는 정상 누적된다.
+    s, a = uuid.uuid4(), uuid.uuid4()
+    rows = _rows(
+        s,
+        (0, [_acc(a, current=True, positional=(50.0, 0.0))]),
+        (300, [_acc(a, inactive=True)]),  # deactivated but still reported/resident
+    )
+    out = integrate_day(rows, _DAY, _HORIZON, _GAP)
+    # tick0 dt=300 (ACTIVE, current) -> held 15000; tick1 dt=600 (INACTIVE, not
+    # current) -> held +0 but observed +600. Both intervals count toward observed.
+    held, observed, count = out[(s, a)]
+    assert held == 50.0 * 300      # 15000; INACTIVE interval adds no held (not current)
+    assert observed == 900.0       # 300 + 600: INACTIVE still observed (allocates)
+    assert count == 2
 
 
 # -- (5) codex windows[] path -------------------------------------------------

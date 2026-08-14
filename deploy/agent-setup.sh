@@ -92,6 +92,30 @@ do_install() {
     printf 'AMX_SETUP_ARGS=%q\n' "${pass[*]}"
   } > "$SETUP_ENV"
 
+  # tsclaude 래퍼: 이 설치의 설정 홈(config_dir)과 tsamx 경로를 각인해, 운영자가
+  # `tsclaude list` 만으로 `CLAUDE_CONFIG_DIR=<홈> tsamx list` 와 동일하게 이 서버의
+  # AMX 풀을 조회하도록 한다. 이미 있으면 덮어쓴다.
+  local wrapper_dir="$HOME/.local/bin"
+  local wrapper="$wrapper_dir/tsclaude"
+  if [ -n "$config_dir" ]; then
+    mkdir -p "$wrapper_dir"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf '# AMX tsclaude 래퍼 — deploy/agent-setup.sh install 시점에 각인됨.\n'
+      printf '# 이 서버의 Claude 설정 홈을 주입해 tsamx를 호출한다.\n'
+      printf '# 재생성: install 재실행 / 제거: uninstall.\n'
+      printf 'exec env CLAUDE_CONFIG_DIR=%q %q "$@"\n' "$config_dir" "$tsamx_bin"
+    } > "$wrapper"
+    chmod +x "$wrapper"
+    ok "tsclaude 래퍼 생성 ($wrapper → CLAUDE_CONFIG_DIR=$config_dir)"
+    case ":$PATH:" in
+      *":$wrapper_dir:"*) ;;
+      *) warn "$wrapper_dir 가 PATH에 없습니다 — tsclaude를 쓰려면 PATH에 추가하세요." ;;
+    esac
+  else
+    warn "config-dir가 비어 tsclaude 래퍼 생성을 건너뜁니다."
+  fi
+
   echo "── 4/4 성공 판정 ────────────────────────────"
   sleep 2
   bash "$ROOT/deploy/agent-run.sh" status || true
@@ -133,6 +157,17 @@ do_uninstall() {
   bash "$ROOT/deploy/agent-run.sh" down || true
   rm -rf "$DEV_DIR"
   ok "에이전트 종료·상태 삭제 완료"
+
+  # install이 각인한 tsclaude 래퍼만 제거. 동명의 사용자 스크립트를 지우지 않도록
+  # 우리 마커("# AMX tsclaude 래퍼")가 있을 때만 삭제한다.
+  local wrapper="$HOME/.local/bin/tsclaude"
+  if [ -f "$wrapper" ]; then
+    if grep -q '^# AMX tsclaude 래퍼' "$wrapper" 2>/dev/null; then
+      rm -f "$wrapper" && ok "tsclaude 래퍼 제거 완료 ($wrapper)"
+    else
+      warn "$wrapper 는 AMX 래퍼가 아니어서 건드리지 않았습니다."
+    fi
+  fi
 
   if [ "$purge_tsamx" = 1 ]; then
     if command -v uv >/dev/null 2>&1 && uv tool list 2>/dev/null | grep -q '^tsamx'; then

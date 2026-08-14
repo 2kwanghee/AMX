@@ -342,6 +342,76 @@ func TestRecallPurgeRemovesEverything(t *testing.T) {
 	}
 }
 
+// TestRecallPurgeSwitchesAwayBeforeRemovingActive: purging the account the runner
+// is live on must switch to another managed account FIRST, so Remove never leaves
+// the runner reading a deleted credential (§6.3).
+func TestRecallPurgeSwitchesAwayBeforeRemovingActive(t *testing.T) {
+	hn := newHarness(t)
+	// Two accounts; deliver leaves a@x.io active (b's deliver restores prevActive).
+	hn.apply(t, hn.deliverCmd(t, "d1", "acc-1", "a@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	hn.apply(t, hn.deliverCmd(t, "d2", "acc-2", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if hn.fake.ActiveEmail() != "a@x.io" {
+		t.Fatalf("precondition: active = %q, want a@x.io", hn.fake.ActiveEmail())
+	}
+
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "r1",
+		Cmd: &amxv1.AmsCommand_Recall{Recall: &amxv1.RecallAccount{
+			Account:        &amxv1.AccountRef{AmsAccountId: "acc-1", Email: "a@x.io"},
+			PurgeLocalCopy: true,
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("purge convergence = %v", ack.Convergence)
+	}
+	if hn.fake.Has("a@x.io") {
+		t.Fatal("purge kept the recalled account in the pool")
+	}
+	if hn.fake.ActiveEmail() != "b@x.io" {
+		t.Fatalf("runner left on %q, want switched to b@x.io before remove", hn.fake.ActiveEmail())
+	}
+	// The switch must precede the remove in the call log.
+	calls := hn.fake.CallLog()
+	switchIdx, removeIdx := -1, -1
+	for i, c := range calls {
+		if c == "switch b@x.io" && switchIdx == -1 {
+			switchIdx = i
+		}
+		if c == "remove a@x.io" && removeIdx == -1 {
+			removeIdx = i
+		}
+	}
+	if switchIdx == -1 || removeIdx == -1 || switchIdx > removeIdx {
+		t.Fatalf("expected switch before remove; calls=%v", calls)
+	}
+}
+
+// TestRecallPurgeSingleAccountRemovesDirectly: with no other account to move to,
+// purging the active account proceeds straight to Remove (the runner losing its
+// only account IS the meaning of recall on a single-account host).
+func TestRecallPurgeSingleAccountRemovesDirectly(t *testing.T) {
+	hn := newHarness(t)
+	hn.apply(t, hn.deliverCmd(t, "d1", "acc-1", "a@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	ack := hn.apply(t, hn.sign(t, &amxv1.AmsCommand{
+		CommandId: "r1",
+		Cmd: &amxv1.AmsCommand_Recall{Recall: &amxv1.RecallAccount{
+			Account:        &amxv1.AccountRef{AmsAccountId: "acc-1", Email: "a@x.io"},
+			PurgeLocalCopy: true,
+		}},
+	}))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("purge convergence = %v", ack.Convergence)
+	}
+	if hn.fake.Has("a@x.io") {
+		t.Fatal("purge kept the account in the pool")
+	}
+	for _, c := range hn.fake.CallLog() {
+		if len(c) >= 6 && c[:6] == "switch" {
+			t.Fatalf("unexpected switch on single-account purge; calls=%v", hn.fake.CallLog())
+		}
+	}
+}
+
 // TestForgedSignatureRejected: a command signed by a foreign key is REJECTED and
 // has no effect.
 func TestForgedSignatureRejected(t *testing.T) {

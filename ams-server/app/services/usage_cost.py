@@ -47,6 +47,14 @@ _logger = logging.getLogger("ams.usage_cost")
 ROLLUP_KIND = "usage_rollup"
 _ROLLUP_SWEEP_LOCK_KEY = 0x414D580F04
 
+# 적분에서 제외하는 상태는 ABSENT만이다. 회수(recall)는 항상 purge라(O2 변경,
+# 2026-08-14) 회수된 계정은 tsamx 풀에서 사라져 애초에 보고에 실리지 않으므로
+# 별도 제외가 필요 없다. INACTIVE는 '일시 비활성(deactivate)' — 자격증명을 그
+# 서버에 점유한 채 로테이션에서만 빠진 상태다. INACTIVE를 제외하면 그 구독료가
+# 어느 서버에도 배분되지 않고 증발해 '전액 배분' 불변식을 깨므로, INACTIVE는
+# 적분에 포함한다(배분 유지). 과도기 INACTIVE 잔재(구버전 에이전트·기왕의
+# disable)는 reconcile의 purge 재발행으로 청소되고, cap(재시도 3회) 소진분은
+# 수동 정리 대상이다(DEV-TEST-GUIDE 참고).
 _ABSENT_STATUS = "ALLOCATION_STATUS_ABSENT"
 # A healthy sweep advances the watermark one closed day per run; a larger jump is
 # an outage recovery or a forward wall-clock step, worth surfacing (log-only).
@@ -140,7 +148,8 @@ def integrate_day(
     same server's next snapshot; that interval is clamped to ``gap_seconds`` (so a
     long report gap cannot let a stale value dominate) and to ``horizon`` (so a
     day-boundary crossing is charged to whichever day owns it, and the still-open
-    tail stops at ``now``). ABSENT and un-reported intervals contribute nothing.
+    tail stops at ``now``). ABSENT and un-reported intervals contribute nothing;
+    INACTIVE (deactivated but credential-resident) still allocates.
     """
     by_server: dict[uuid.UUID, list[tuple[datetime, dict]]] = defaultdict(list)
     for reported_at, server_id, payload in rows:
@@ -281,9 +290,13 @@ def sweep_usage_rollup(db: Session) -> int:
                 }
             )
         if values:
-            # Sealed days are immutable, so the recomputed values equal any prior
-            # row's — ON CONFLICT DO UPDATE keeps the sweep idempotent (recompute-
-            # replace) rather than duplicating or drifting.
+            # A sealed day's INPUTS (snapshots) are immutable, so re-running the
+            # same integration logic reproduces the same row — ON CONFLICT DO
+            # UPDATE keeps the sweep idempotent (recompute-replace) rather than
+            # duplicating. Idempotence is over the code version, not absolute: a
+            # change to the integration rules (e.g. an allocation_status exclusion)
+            # intentionally REPLACES prior rows with values under the new logic on
+            # the next recompute of that day.
             stmt = pg_insert(UsageDailyRollup).values(values)
             db.execute(
                 stmt.on_conflict_do_update(

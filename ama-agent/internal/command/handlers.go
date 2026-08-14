@@ -242,9 +242,34 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	return ack
 }
 
-// handleRecall implements O2: default (purge_local_copy=false) disables the
-// account and KEEPS the manifest record (marked INACTIVE) for fast re-assignment;
-// purge=true removes it from the pool and deletes the record.
+// otherSwitchTarget picks another managed account to move the runner onto
+// before we remove the active one. Prefer an enabled (rotation-eligible) slot;
+// fall back to any other managed account. Empty string = nothing else to
+// switch to.
+func (h *Handler) otherSwitchTarget(ctx context.Context, br provider.Bridge, exclude string) string {
+	list, err := br.List(ctx)
+	if err != nil || list == nil {
+		return ""
+	}
+	fallback := ""
+	for _, row := range list.Accounts {
+		if row.Email == "" || row.Email == exclude {
+			continue
+		}
+		if !row.Disabled {
+			return row.Email
+		}
+		if fallback == "" {
+			fallback = row.Email
+		}
+	}
+	return fallback
+}
+// handleRecall implements O2. Since the 2026-08-14 change AMS always sends
+// purge=true (recall = full detach): the account is removed from the pool and
+// its manifest record deleted, history living only in the AMS-side detached row.
+// The purge=false branch (disable + keep INACTIVE record) is retained for
+// backward compatibility with any in-flight command from an older server.
 func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *amxv1.RecallAccount, ack *amxv1.CommandAck) *amxv1.CommandAck {
 	h.engine.Lock()
 	defer h.engine.Unlock()
@@ -275,6 +300,22 @@ func (h *Handler) handleRecall(ctx context.Context, cmd *amxv1.AmsCommand, r *am
 	}
 
 	if r.GetPurgeLocalCopy() {
+		// §6.3: if the account being purged is the one the runner is live on,
+		// switch away FIRST. Neither `tsamx remove` nor `tsamx disable`
+		// auto-switches (a disabled/removed slot stays live until switched away),
+		// so removing the active account without this would leave the runner
+		// reading a deleted credential. With no other account to move to
+		// (single-account host) we proceed to remove — the runner losing its
+		// account is the meaning of recall there.
+		if before, statusErr := br.Status(ctx); statusErr == nil && before != nil && before.ActiveEmail == email {
+			if target := h.otherSwitchTarget(ctx, br, email); target != "" {
+				if serr := br.Switch(ctx, target); serr != nil {
+					out := diverged(ack, "tsamx_switch_before_purge", serr)
+					h.record(out, "recall", amsID, "purge")
+					return out
+				}
+			}
+		}
 		if err := br.Remove(ctx, email); err != nil {
 			out := diverged(ack, "tsamx_remove", err)
 			h.record(out, "recall", amsID, "purge")
