@@ -89,6 +89,10 @@ func (f *fakeRunner) Run(ctx context.Context, spec RunSpec) (string, error) {
 
 func (f *fakeRunner) Rename(o, n string) error { return os.Rename(o, n) }
 
+func (f *fakeRunner) WriteFile(n string, d []byte, p os.FileMode) error {
+	return os.WriteFile(n, d, p)
+}
+
 func (f *fakeRunner) Remove(n string) error {
 	if err := os.Remove(n); err != nil && !os.IsNotExist(err) {
 		return err

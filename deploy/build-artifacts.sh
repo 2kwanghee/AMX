@@ -80,7 +80,7 @@ for t in $TARGETS; do
   [ "$goos" = "windows" ] && out="$out.exe"
   step "빌드 ama $t"
   ( cd "$ROOT/ama-agent" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-      go build -trimpath -ldflags "-X main.commit=$SHA" -o "$out" ./cmd/ama ) \
+      go build -trimpath -ldflags "-X main.commit=$SHA -X main.builtAt=$BUILT_AT" -o "$out" ./cmd/ama ) \
     || die "go build 실패: $t"
   record_artifact "$out"
   ok "ama-$t"

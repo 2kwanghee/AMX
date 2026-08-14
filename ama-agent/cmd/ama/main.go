@@ -61,6 +61,12 @@ const selfUpdateAckWait = 2 * time.Second
 var (
 	version = "p3"
 	commit  = ""
+	// builtAt is the build timestamp (RFC3339), stamped with
+	// `-ldflags "-X main.builtAt=<ts>"` by deploy/build-artifacts.sh. It is NOT
+	// part of --version (that stays commit-only so the self_update smoke check is
+	// unchanged); it is the monotonicity floor binary-mode self_update uses to
+	// refuse a replayed older manifest. Empty for a plain `go build`.
+	builtAt = ""
 )
 
 // agentVersion renders "<version>+<shortsha>", or just the version when the
@@ -197,13 +203,25 @@ func run() error {
 		Logf:     log.Printf,
 	})
 
-	// self_update (§6.3): rebuild from the agent's OWN working tree and restart.
-	// AMX_REPO_DIR names that tree (deploy/agent-run.sh sets it); with no repo
-	// configured the command is rejected as unsupported rather than guessing a
-	// path. AckSender is filled in below, once the transport client exists — the
-	// ack has to go out before the exec replaces this process.
+	// self_update (§6.3). The install method decides how a new binary is
+	// acquired, and it is a marker in the daemon env — not a fallback chain:
+	//   - package install (install.sh/ps1): AMX_INSTALL_METHOD=package plus
+	//     AMX_AMS_URL — download a signed prebuilt binary from AMS and verify it.
+	//   - git install (deploy/agent-run.sh): AMX_REPO_DIR — rebuild that tree.
+	// With neither marker the command is rejected as unsupported rather than
+	// guessing. AckSender is filled in below, once the transport client exists —
+	// the ack has to go out before the exec replaces this process.
 	var selfUpdate *command.SelfUpdateConfig
-	if repoDir := os.Getenv("AMX_REPO_DIR"); repoDir != "" {
+	if os.Getenv("AMX_INSTALL_METHOD") == "package" {
+		if amsURL := os.Getenv("AMX_AMS_URL"); amsURL != "" {
+			selfUpdate = &command.SelfUpdateConfig{
+				AMSURL:         amsURL,
+				InstallRoot:    os.Getenv("AMX_INSTALL_ROOT"),
+				PubKey:         pub,
+				CurrentBuiltAt: builtAt,
+			}
+		}
+	} else if repoDir := os.Getenv("AMX_REPO_DIR"); repoDir != "" {
 		selfUpdate = &command.SelfUpdateConfig{RepoDir: repoDir}
 	}
 
