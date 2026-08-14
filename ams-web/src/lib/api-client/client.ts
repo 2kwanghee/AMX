@@ -28,6 +28,7 @@ import type {
   Tenant,
   TenantCreate,
   TenantPage,
+  UsageCostResponse,
   UsageSnapshot,
 } from './types';
 
@@ -122,6 +123,14 @@ export const api = {
     bff<Assignment>('POST', `tenants/${t}/assignments`, b),
   assignmentAction: (t: string, id: string, verb: AssignmentActionVerb, body?: unknown) =>
     bff<Assignment | CommandAccepted>('POST', `tenants/${t}/assignments/${id}:${verb}`, body),
+
+  // Usage cost — month is YYYY-MM; omitted means the current UTC month
+  // (ams-server fills it in). The caller only ever builds valid months.
+  getUsageCost: (t: string, month?: string) =>
+    bff<UsageCostResponse>(
+      'GET',
+      `tenants/${t}/usage/cost${month ? `?month=${encodeURIComponent(month)}` : ''}`,
+    ),
 
   // Alerts (Track A backend; UI ready)
   listAlerts: (t: string, status?: string) =>
