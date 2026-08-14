@@ -10,7 +10,7 @@ credential material.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -403,3 +403,61 @@ class Admin(Wire):
 class AdminPage(Wire):
     items: list[Admin]
     page_info: PageInfo | None = None
+
+
+# -- Usage cost (usage-cost PR3) ----------------------------------------------
+# Response shape for GET /tenants/{id}/usage/cost. The service
+# (services/usage_cost.compute_month_cost) answers account-first; the wire is
+# server-first, because the console reads per-server. Money keeps its Decimal
+# type and therefore serialises as a JSON string, exact to the cent.
+class UsageCostAccountLine(Wire):
+    account_id: uuid.UUID
+    email: str | None = None
+    provider: str | None = None
+    monthly_price: Decimal | None = None
+    currency: str
+    # "held" | "observed" | "unallocated" | "no_price" — how the account's price
+    # was placed (see services/usage_cost). "no_price"/"unallocated" lines carry
+    # cost 0; the unallocated money shows up in the subtotal, not here.
+    basis: str
+    # Mean utilization this account held on this server over the observed time,
+    # i.e. held_util_seconds / observed_seconds. 0 when nothing was observed.
+    utilization_pct: Decimal
+    # This server's share of the account's allocation basis, in percent (0..100).
+    share_pct: Decimal
+    cost: Decimal
+
+
+class UsageCostAmount(Wire):
+    currency: str
+    amount: Decimal
+
+
+class UsageCostServerLine(Wire):
+    server_id: uuid.UUID
+    name: str | None = None
+    utilization_pct: Decimal
+    # Per-currency, never a single number: one server can host accounts priced
+    # in different currencies, and those are never summed.
+    costs: list[UsageCostAmount]
+    accounts: list[UsageCostAccountLine]
+
+
+class UsageCostSubtotal(Wire):
+    currency: str
+    allocated_cost: Decimal
+    # Price of accounts that were observed but could not be placed on any
+    # server (no held and no observed time to weight by).
+    unallocated_cost: Decimal
+
+
+class UsageCostResponse(Wire):
+    month: str  # YYYY-MM
+    as_of: datetime
+    # Days strictly before this UTC date are sealed (immutable rollup); null
+    # when the rollup sweep has not run yet.
+    watermark: date | None = None
+    # True when the figure still includes an unsealed live tail and can move.
+    is_partial: bool
+    servers: list[UsageCostServerLine]
+    subtotals: list[UsageCostSubtotal]
