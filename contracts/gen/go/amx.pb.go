@@ -287,7 +287,7 @@ func (x SwitchNow_SwitchStrategy) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SwitchNow_SwitchStrategy.Descriptor instead.
 func (SwitchNow_SwitchStrategy) EnumDescriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{13, 0}
+	return file_amx_proto_rawDescGZIP(), []int{14, 0}
 }
 
 type RequestReport_ReportType int32
@@ -333,7 +333,7 @@ func (x RequestReport_ReportType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RequestReport_ReportType.Descriptor instead.
 func (RequestReport_ReportType) EnumDescriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{16, 0}
+	return file_amx_proto_rawDescGZIP(), []int{17, 0}
 }
 
 type UsageReport_Trigger int32
@@ -385,7 +385,7 @@ func (x UsageReport_Trigger) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UsageReport_Trigger.Descriptor instead.
 func (UsageReport_Trigger) EnumDescriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{21, 0}
+	return file_amx_proto_rawDescGZIP(), []int{22, 0}
 }
 
 type CommandAck_Convergence int32
@@ -447,7 +447,7 @@ func (x CommandAck_Convergence) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CommandAck_Convergence.Descriptor instead.
 func (CommandAck_Convergence) EnumDescriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{23, 0}
+	return file_amx_proto_rawDescGZIP(), []int{24, 0}
 }
 
 type AccountEvent_Kind int32
@@ -499,7 +499,7 @@ func (x AccountEvent_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AccountEvent_Kind.Descriptor instead.
 func (AccountEvent_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{24, 0}
+	return file_amx_proto_rawDescGZIP(), []int{25, 0}
 }
 
 type AccountEvent_Trigger int32
@@ -551,7 +551,7 @@ func (x AccountEvent_Trigger) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AccountEvent_Trigger.Descriptor instead.
 func (AccountEvent_Trigger) EnumDescriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{24, 1}
+	return file_amx_proto_rawDescGZIP(), []int{25, 1}
 }
 
 // Stable identity of an account across AMS and AMA.
@@ -806,6 +806,10 @@ type QuotaWindow struct {
 	Pct           float64                `protobuf:"fixed64,2,opt,name=pct,proto3" json:"pct,omitempty"` // 0.0 – 100.0
 	ResetsAt      *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=resets_at,json=resetsAt,proto3" json:"resets_at,omitempty"`
 	WindowMinutes int32                  `protobuf:"varint,4,opt,name=window_minutes,json=windowMinutes,proto3" json:"window_minutes,omitempty"` // window span in minutes
+	// Model identity for a per-model scoped weekly window (carried in
+	// AccountUsage.scoped_windows). Empty for the positional windows[] entries,
+	// which are not model-scoped. tsamx emits it as the scoped item's `name`.
+	Model         string `protobuf:"bytes,5,opt,name=model,proto3" json:"model,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -868,6 +872,93 @@ func (x *QuotaWindow) GetWindowMinutes() int32 {
 	return 0
 }
 
+func (x *QuotaWindow) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+// Pay-as-you-go spend against a monthly cap (tsamx `spend`). Distinct from the
+// quota windows: it tracks credits/currency, not a rate-limit percentage, and is
+// never consulted by the switch driver. Present only for accounts with extra
+// usage enabled and all three numbers returned.
+type Spend struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Used          float64                `protobuf:"fixed64,1,opt,name=used,proto3" json:"used,omitempty"`                       // amount consumed this cycle
+	Limit         float64                `protobuf:"fixed64,2,opt,name=limit,proto3" json:"limit,omitempty"`                     // monthly cap
+	Pct           float64                `protobuf:"fixed64,3,opt,name=pct,proto3" json:"pct,omitempty"`                         // 0.0 – 100.0
+	Currency      string                 `protobuf:"bytes,4,opt,name=currency,proto3" json:"currency,omitempty"`                 // ISO currency, e.g. "USD"
+	ResetsAt      *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=resets_at,json=resetsAt,proto3" json:"resets_at,omitempty"` // cycle reset (optional)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Spend) Reset() {
+	*x = Spend{}
+	mi := &file_amx_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Spend) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Spend) ProtoMessage() {}
+
+func (x *Spend) ProtoReflect() protoreflect.Message {
+	mi := &file_amx_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Spend.ProtoReflect.Descriptor instead.
+func (*Spend) Descriptor() ([]byte, []int) {
+	return file_amx_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Spend) GetUsed() float64 {
+	if x != nil {
+		return x.Used
+	}
+	return 0
+}
+
+func (x *Spend) GetLimit() float64 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *Spend) GetPct() float64 {
+	if x != nil {
+		return x.Pct
+	}
+	return 0
+}
+
+func (x *Spend) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *Spend) GetResetsAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ResetsAt
+	}
+	return nil
+}
+
 type AccountUsage struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Account          *AccountRef            `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
@@ -881,14 +972,23 @@ type AccountUsage struct {
 	UsageFetchedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=usage_fetched_at,json=usageFetchedAt,proto3" json:"usage_fetched_at,omitempty"` // freshness of the tsamx cache entry
 	// Generalized window list. For claude this carries the same data as
 	// five_hour/seven_day (dual-recorded), ordered by window_minutes ascending.
-	Windows       []*QuotaWindow `protobuf:"bytes,7,rep,name=windows,proto3" json:"windows,omitempty"`
+	Windows []*QuotaWindow `protobuf:"bytes,7,rep,name=windows,proto3" json:"windows,omitempty"`
+	// Pay-as-you-go spend (tsamx `spend`). Additive, informational: it never
+	// feeds the switch decision or PoolSummary. Absent when the account has no
+	// extra-usage spend to report.
+	Spend *Spend `protobuf:"bytes,8,opt,name=spend,proto3" json:"spend,omitempty"`
+	// Per-model scoped weekly windows (tsamx `scoped`). Kept SEPARATE from
+	// windows[] on purpose: windows[] drives the reporter's max-utilization and
+	// eligible/all_exhausted switch decision, and a per-model weekly limit must
+	// never move that. Each entry carries its model in QuotaWindow.model.
+	ScopedWindows []*QuotaWindow `protobuf:"bytes,9,rep,name=scoped_windows,json=scopedWindows,proto3" json:"scoped_windows,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AccountUsage) Reset() {
 	*x = AccountUsage{}
-	mi := &file_amx_proto_msgTypes[4]
+	mi := &file_amx_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -900,7 +1000,7 @@ func (x *AccountUsage) String() string {
 func (*AccountUsage) ProtoMessage() {}
 
 func (x *AccountUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[4]
+	mi := &file_amx_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -913,7 +1013,7 @@ func (x *AccountUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccountUsage.ProtoReflect.Descriptor instead.
 func (*AccountUsage) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{4}
+	return file_amx_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *AccountUsage) GetAccount() *AccountRef {
@@ -965,6 +1065,20 @@ func (x *AccountUsage) GetWindows() []*QuotaWindow {
 	return nil
 }
 
+func (x *AccountUsage) GetSpend() *Spend {
+	if x != nil {
+		return x.Spend
+	}
+	return nil
+}
+
+func (x *AccountUsage) GetScopedWindows() []*QuotaWindow {
+	if x != nil {
+		return x.ScopedWindows
+	}
+	return nil
+}
+
 // Aggregate pool health (§6.5 poolSummary).
 type PoolSummary struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
@@ -980,7 +1094,7 @@ type PoolSummary struct {
 
 func (x *PoolSummary) Reset() {
 	*x = PoolSummary{}
-	mi := &file_amx_proto_msgTypes[5]
+	mi := &file_amx_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -992,7 +1106,7 @@ func (x *PoolSummary) String() string {
 func (*PoolSummary) ProtoMessage() {}
 
 func (x *PoolSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[5]
+	mi := &file_amx_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1005,7 +1119,7 @@ func (x *PoolSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PoolSummary.ProtoReflect.Descriptor instead.
 func (*PoolSummary) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{5}
+	return file_amx_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PoolSummary) GetTotal() uint32 {
@@ -1063,7 +1177,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_amx_proto_msgTypes[6]
+	mi := &file_amx_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1075,7 +1189,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[6]
+	mi := &file_amx_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1088,7 +1202,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{6}
+	return file_amx_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Ack) GetAccepted() bool {
@@ -1149,7 +1263,7 @@ type AmsCommand struct {
 
 func (x *AmsCommand) Reset() {
 	*x = AmsCommand{}
-	mi := &file_amx_proto_msgTypes[7]
+	mi := &file_amx_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1161,7 +1275,7 @@ func (x *AmsCommand) String() string {
 func (*AmsCommand) ProtoMessage() {}
 
 func (x *AmsCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[7]
+	mi := &file_amx_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1174,7 +1288,7 @@ func (x *AmsCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AmsCommand.ProtoReflect.Descriptor instead.
 func (*AmsCommand) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{7}
+	return file_amx_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *AmsCommand) GetCommandId() string {
@@ -1385,7 +1499,7 @@ type SessionSetup struct {
 
 func (x *SessionSetup) Reset() {
 	*x = SessionSetup{}
-	mi := &file_amx_proto_msgTypes[8]
+	mi := &file_amx_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1397,7 +1511,7 @@ func (x *SessionSetup) String() string {
 func (*SessionSetup) ProtoMessage() {}
 
 func (x *SessionSetup) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[8]
+	mi := &file_amx_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1410,7 +1524,7 @@ func (x *SessionSetup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionSetup.ProtoReflect.Descriptor instead.
 func (*SessionSetup) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{8}
+	return file_amx_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SessionSetup) GetServerCredential() string {
@@ -1478,7 +1592,7 @@ type DeliverAccount struct {
 
 func (x *DeliverAccount) Reset() {
 	*x = DeliverAccount{}
-	mi := &file_amx_proto_msgTypes[9]
+	mi := &file_amx_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1490,7 +1604,7 @@ func (x *DeliverAccount) String() string {
 func (*DeliverAccount) ProtoMessage() {}
 
 func (x *DeliverAccount) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[9]
+	mi := &file_amx_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1503,7 +1617,7 @@ func (x *DeliverAccount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeliverAccount.ProtoReflect.Descriptor instead.
 func (*DeliverAccount) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{9}
+	return file_amx_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DeliverAccount) GetAssignmentId() string {
@@ -1571,7 +1685,7 @@ type RecallAccount struct {
 
 func (x *RecallAccount) Reset() {
 	*x = RecallAccount{}
-	mi := &file_amx_proto_msgTypes[10]
+	mi := &file_amx_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1583,7 +1697,7 @@ func (x *RecallAccount) String() string {
 func (*RecallAccount) ProtoMessage() {}
 
 func (x *RecallAccount) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[10]
+	mi := &file_amx_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1596,7 +1710,7 @@ func (x *RecallAccount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecallAccount.ProtoReflect.Descriptor instead.
 func (*RecallAccount) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{10}
+	return file_amx_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RecallAccount) GetAssignmentId() string {
@@ -1634,7 +1748,7 @@ type SetAccountActive struct {
 
 func (x *SetAccountActive) Reset() {
 	*x = SetAccountActive{}
-	mi := &file_amx_proto_msgTypes[11]
+	mi := &file_amx_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1646,7 +1760,7 @@ func (x *SetAccountActive) String() string {
 func (*SetAccountActive) ProtoMessage() {}
 
 func (x *SetAccountActive) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[11]
+	mi := &file_amx_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1659,7 +1773,7 @@ func (x *SetAccountActive) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAccountActive.ProtoReflect.Descriptor instead.
 func (*SetAccountActive) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{11}
+	return file_amx_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SetAccountActive) GetAssignmentId() string {
@@ -1701,7 +1815,7 @@ type SetSwitchMode struct {
 
 func (x *SetSwitchMode) Reset() {
 	*x = SetSwitchMode{}
-	mi := &file_amx_proto_msgTypes[12]
+	mi := &file_amx_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1713,7 +1827,7 @@ func (x *SetSwitchMode) String() string {
 func (*SetSwitchMode) ProtoMessage() {}
 
 func (x *SetSwitchMode) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[12]
+	mi := &file_amx_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1726,7 +1840,7 @@ func (x *SetSwitchMode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetSwitchMode.ProtoReflect.Descriptor instead.
 func (*SetSwitchMode) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{12}
+	return file_amx_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SetSwitchMode) GetMode() SwitchMode {
@@ -1754,7 +1868,7 @@ type SwitchNow struct {
 
 func (x *SwitchNow) Reset() {
 	*x = SwitchNow{}
-	mi := &file_amx_proto_msgTypes[13]
+	mi := &file_amx_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1766,7 +1880,7 @@ func (x *SwitchNow) String() string {
 func (*SwitchNow) ProtoMessage() {}
 
 func (x *SwitchNow) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[13]
+	mi := &file_amx_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1779,7 +1893,7 @@ func (x *SwitchNow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SwitchNow.ProtoReflect.Descriptor instead.
 func (*SwitchNow) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{13}
+	return file_amx_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SwitchNow) GetAssignmentId() string {
@@ -1855,7 +1969,7 @@ type SetPolicy struct {
 
 func (x *SetPolicy) Reset() {
 	*x = SetPolicy{}
-	mi := &file_amx_proto_msgTypes[14]
+	mi := &file_amx_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1867,7 +1981,7 @@ func (x *SetPolicy) String() string {
 func (*SetPolicy) ProtoMessage() {}
 
 func (x *SetPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[14]
+	mi := &file_amx_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1880,7 +1994,7 @@ func (x *SetPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPolicy.ProtoReflect.Descriptor instead.
 func (*SetPolicy) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{14}
+	return file_amx_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SetPolicy) GetThresholdPct() float64 {
@@ -1934,7 +2048,7 @@ type SelfUpdate struct {
 
 func (x *SelfUpdate) Reset() {
 	*x = SelfUpdate{}
-	mi := &file_amx_proto_msgTypes[15]
+	mi := &file_amx_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1946,7 +2060,7 @@ func (x *SelfUpdate) String() string {
 func (*SelfUpdate) ProtoMessage() {}
 
 func (x *SelfUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[15]
+	mi := &file_amx_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1959,7 +2073,7 @@ func (x *SelfUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SelfUpdate.ProtoReflect.Descriptor instead.
 func (*SelfUpdate) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{15}
+	return file_amx_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SelfUpdate) GetExpectedCommit() string {
@@ -1981,7 +2095,7 @@ type RequestReport struct {
 
 func (x *RequestReport) Reset() {
 	*x = RequestReport{}
-	mi := &file_amx_proto_msgTypes[16]
+	mi := &file_amx_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1993,7 +2107,7 @@ func (x *RequestReport) String() string {
 func (*RequestReport) ProtoMessage() {}
 
 func (x *RequestReport) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[16]
+	mi := &file_amx_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2006,7 +2120,7 @@ func (x *RequestReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestReport.ProtoReflect.Descriptor instead.
 func (*RequestReport) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{16}
+	return file_amx_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RequestReport) GetReportType() RequestReport_ReportType {
@@ -2040,7 +2154,7 @@ type AmaMessage struct {
 
 func (x *AmaMessage) Reset() {
 	*x = AmaMessage{}
-	mi := &file_amx_proto_msgTypes[17]
+	mi := &file_amx_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2052,7 +2166,7 @@ func (x *AmaMessage) String() string {
 func (*AmaMessage) ProtoMessage() {}
 
 func (x *AmaMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[17]
+	mi := &file_amx_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2065,7 +2179,7 @@ func (x *AmaMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AmaMessage.ProtoReflect.Descriptor instead.
 func (*AmaMessage) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{17}
+	return file_amx_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *AmaMessage) GetMsg() isAmaMessage_Msg {
@@ -2195,7 +2309,7 @@ type CredentialUpdate struct {
 
 func (x *CredentialUpdate) Reset() {
 	*x = CredentialUpdate{}
-	mi := &file_amx_proto_msgTypes[18]
+	mi := &file_amx_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2207,7 +2321,7 @@ func (x *CredentialUpdate) String() string {
 func (*CredentialUpdate) ProtoMessage() {}
 
 func (x *CredentialUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[18]
+	mi := &file_amx_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2220,7 +2334,7 @@ func (x *CredentialUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CredentialUpdate.ProtoReflect.Descriptor instead.
 func (*CredentialUpdate) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{18}
+	return file_amx_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *CredentialUpdate) GetAccount() *AccountRef {
@@ -2289,7 +2403,7 @@ type Register struct {
 
 func (x *Register) Reset() {
 	*x = Register{}
-	mi := &file_amx_proto_msgTypes[19]
+	mi := &file_amx_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2301,7 +2415,7 @@ func (x *Register) String() string {
 func (*Register) ProtoMessage() {}
 
 func (x *Register) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[19]
+	mi := &file_amx_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2314,7 +2428,7 @@ func (x *Register) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Register.ProtoReflect.Descriptor instead.
 func (*Register) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{19}
+	return file_amx_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Register) GetAgentId() string {
@@ -2442,7 +2556,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_amx_proto_msgTypes[20]
+	mi := &file_amx_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2454,7 +2568,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[20]
+	mi := &file_amx_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2467,7 +2581,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{20}
+	return file_amx_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Heartbeat) GetAgentId() string {
@@ -2539,7 +2653,7 @@ type UsageReport struct {
 
 func (x *UsageReport) Reset() {
 	*x = UsageReport{}
-	mi := &file_amx_proto_msgTypes[21]
+	mi := &file_amx_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2551,7 +2665,7 @@ func (x *UsageReport) String() string {
 func (*UsageReport) ProtoMessage() {}
 
 func (x *UsageReport) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[21]
+	mi := &file_amx_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2564,7 +2678,7 @@ func (x *UsageReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UsageReport.ProtoReflect.Descriptor instead.
 func (*UsageReport) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{21}
+	return file_amx_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *UsageReport) GetSchemaVersion() uint32 {
@@ -2643,7 +2757,7 @@ type ReportEnvelope struct {
 
 func (x *ReportEnvelope) Reset() {
 	*x = ReportEnvelope{}
-	mi := &file_amx_proto_msgTypes[22]
+	mi := &file_amx_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2655,7 +2769,7 @@ func (x *ReportEnvelope) String() string {
 func (*ReportEnvelope) ProtoMessage() {}
 
 func (x *ReportEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[22]
+	mi := &file_amx_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2668,7 +2782,7 @@ func (x *ReportEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportEnvelope.ProtoReflect.Descriptor instead.
 func (*ReportEnvelope) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{22}
+	return file_amx_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ReportEnvelope) GetServerCredential() string {
@@ -2711,7 +2825,7 @@ type CommandAck struct {
 
 func (x *CommandAck) Reset() {
 	*x = CommandAck{}
-	mi := &file_amx_proto_msgTypes[23]
+	mi := &file_amx_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2723,7 +2837,7 @@ func (x *CommandAck) String() string {
 func (*CommandAck) ProtoMessage() {}
 
 func (x *CommandAck) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[23]
+	mi := &file_amx_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2736,7 +2850,7 @@ func (x *CommandAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandAck.ProtoReflect.Descriptor instead.
 func (*CommandAck) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{23}
+	return file_amx_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CommandAck) GetCommandId() string {
@@ -2823,7 +2937,7 @@ type AccountEvent struct {
 
 func (x *AccountEvent) Reset() {
 	*x = AccountEvent{}
-	mi := &file_amx_proto_msgTypes[24]
+	mi := &file_amx_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2835,7 +2949,7 @@ func (x *AccountEvent) String() string {
 func (*AccountEvent) ProtoMessage() {}
 
 func (x *AccountEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[24]
+	mi := &file_amx_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2848,7 +2962,7 @@ func (x *AccountEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccountEvent.ProtoReflect.Descriptor instead.
 func (*AccountEvent) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{24}
+	return file_amx_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *AccountEvent) GetSchemaVersion() uint32 {
@@ -2938,7 +3052,7 @@ type SessionSetup_WrappedKey struct {
 
 func (x *SessionSetup_WrappedKey) Reset() {
 	*x = SessionSetup_WrappedKey{}
-	mi := &file_amx_proto_msgTypes[25]
+	mi := &file_amx_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2950,7 +3064,7 @@ func (x *SessionSetup_WrappedKey) String() string {
 func (*SessionSetup_WrappedKey) ProtoMessage() {}
 
 func (x *SessionSetup_WrappedKey) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[25]
+	mi := &file_amx_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2963,7 +3077,7 @@ func (x *SessionSetup_WrappedKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionSetup_WrappedKey.ProtoReflect.Descriptor instead.
 func (*SessionSetup_WrappedKey) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{8, 0}
+	return file_amx_proto_rawDescGZIP(), []int{9, 0}
 }
 
 func (x *SessionSetup_WrappedKey) GetKeyId() string {
@@ -3006,7 +3120,7 @@ type Heartbeat_SystemMetrics struct {
 
 func (x *Heartbeat_SystemMetrics) Reset() {
 	*x = Heartbeat_SystemMetrics{}
-	mi := &file_amx_proto_msgTypes[26]
+	mi := &file_amx_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3018,7 +3132,7 @@ func (x *Heartbeat_SystemMetrics) String() string {
 func (*Heartbeat_SystemMetrics) ProtoMessage() {}
 
 func (x *Heartbeat_SystemMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_amx_proto_msgTypes[26]
+	mi := &file_amx_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3031,7 +3145,7 @@ func (x *Heartbeat_SystemMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat_SystemMetrics.ProtoReflect.Descriptor instead.
 func (*Heartbeat_SystemMetrics) Descriptor() ([]byte, []int) {
-	return file_amx_proto_rawDescGZIP(), []int{20, 0}
+	return file_amx_proto_rawDescGZIP(), []int{21, 0}
 }
 
 func (x *Heartbeat_SystemMetrics) GetCpuPct() float64 {
@@ -3078,12 +3192,19 @@ const file_amx_proto_rawDesc = "" +
 	"aadAgentId\"X\n" +
 	"\vUsageWindow\x12\x10\n" +
 	"\x03pct\x18\x01 \x01(\x01R\x03pct\x127\n" +
-	"\tresets_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\bresetsAt\"\x8f\x01\n" +
+	"\tresets_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\bresetsAt\"\xa5\x01\n" +
 	"\vQuotaWindow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
 	"\x03pct\x18\x02 \x01(\x01R\x03pct\x127\n" +
 	"\tresets_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bresetsAt\x12%\n" +
-	"\x0ewindow_minutes\x18\x04 \x01(\x05R\rwindowMinutes\"\xfb\x02\n" +
+	"\x0ewindow_minutes\x18\x04 \x01(\x05R\rwindowMinutes\x12\x14\n" +
+	"\x05model\x18\x05 \x01(\tR\x05model\"\x98\x01\n" +
+	"\x05Spend\x12\x12\n" +
+	"\x04used\x18\x01 \x01(\x01R\x04used\x12\x14\n" +
+	"\x05limit\x18\x02 \x01(\x01R\x05limit\x12\x10\n" +
+	"\x03pct\x18\x03 \x01(\x01R\x03pct\x12\x1a\n" +
+	"\bcurrency\x18\x04 \x01(\tR\bcurrency\x127\n" +
+	"\tresets_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\bresetsAt\"\xdc\x03\n" +
 	"\fAccountUsage\x12,\n" +
 	"\aaccount\x18\x01 \x01(\v2\x12.amx.v1.AccountRefR\aaccount\x12E\n" +
 	"\x11allocation_status\x18\x02 \x01(\x0e2\x18.amx.v1.AllocationStatusR\x10allocationStatus\x12\x1d\n" +
@@ -3092,7 +3213,9 @@ const file_amx_proto_rawDesc = "" +
 	"\tfive_hour\x18\x04 \x01(\v2\x13.amx.v1.UsageWindowR\bfiveHour\x120\n" +
 	"\tseven_day\x18\x05 \x01(\v2\x13.amx.v1.UsageWindowR\bsevenDay\x12D\n" +
 	"\x10usage_fetched_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x0eusageFetchedAt\x12-\n" +
-	"\awindows\x18\a \x03(\v2\x13.amx.v1.QuotaWindowR\awindows\"\xce\x01\n" +
+	"\awindows\x18\a \x03(\v2\x13.amx.v1.QuotaWindowR\awindows\x12#\n" +
+	"\x05spend\x18\b \x01(\v2\r.amx.v1.SpendR\x05spend\x12:\n" +
+	"\x0escoped_windows\x18\t \x03(\v2\x13.amx.v1.QuotaWindowR\rscopedWindows\"\xce\x01\n" +
 	"\vPoolSummary\x12\x14\n" +
 	"\x05total\x18\x01 \x01(\rR\x05total\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\rR\x06active\x12\x1a\n" +
@@ -3329,7 +3452,7 @@ func file_amx_proto_rawDescGZIP() []byte {
 }
 
 var file_amx_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
-var file_amx_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_amx_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_amx_proto_goTypes = []any{
 	(CredentialType)(0),             // 0: amx.v1.CredentialType
 	(AllocationStatus)(0),           // 1: amx.v1.AllocationStatus
@@ -3345,108 +3468,112 @@ var file_amx_proto_goTypes = []any{
 	(*EncryptedCredential)(nil),     // 11: amx.v1.EncryptedCredential
 	(*UsageWindow)(nil),             // 12: amx.v1.UsageWindow
 	(*QuotaWindow)(nil),             // 13: amx.v1.QuotaWindow
-	(*AccountUsage)(nil),            // 14: amx.v1.AccountUsage
-	(*PoolSummary)(nil),             // 15: amx.v1.PoolSummary
-	(*Ack)(nil),                     // 16: amx.v1.Ack
-	(*AmsCommand)(nil),              // 17: amx.v1.AmsCommand
-	(*SessionSetup)(nil),            // 18: amx.v1.SessionSetup
-	(*DeliverAccount)(nil),          // 19: amx.v1.DeliverAccount
-	(*RecallAccount)(nil),           // 20: amx.v1.RecallAccount
-	(*SetAccountActive)(nil),        // 21: amx.v1.SetAccountActive
-	(*SetSwitchMode)(nil),           // 22: amx.v1.SetSwitchMode
-	(*SwitchNow)(nil),               // 23: amx.v1.SwitchNow
-	(*SetPolicy)(nil),               // 24: amx.v1.SetPolicy
-	(*SelfUpdate)(nil),              // 25: amx.v1.SelfUpdate
-	(*RequestReport)(nil),           // 26: amx.v1.RequestReport
-	(*AmaMessage)(nil),              // 27: amx.v1.AmaMessage
-	(*CredentialUpdate)(nil),        // 28: amx.v1.CredentialUpdate
-	(*Register)(nil),                // 29: amx.v1.Register
-	(*Heartbeat)(nil),               // 30: amx.v1.Heartbeat
-	(*UsageReport)(nil),             // 31: amx.v1.UsageReport
-	(*ReportEnvelope)(nil),          // 32: amx.v1.ReportEnvelope
-	(*CommandAck)(nil),              // 33: amx.v1.CommandAck
-	(*AccountEvent)(nil),            // 34: amx.v1.AccountEvent
-	(*SessionSetup_WrappedKey)(nil), // 35: amx.v1.SessionSetup.WrappedKey
-	(*Heartbeat_SystemMetrics)(nil), // 36: amx.v1.Heartbeat.SystemMetrics
-	(*timestamppb.Timestamp)(nil),   // 37: google.protobuf.Timestamp
+	(*Spend)(nil),                   // 14: amx.v1.Spend
+	(*AccountUsage)(nil),            // 15: amx.v1.AccountUsage
+	(*PoolSummary)(nil),             // 16: amx.v1.PoolSummary
+	(*Ack)(nil),                     // 17: amx.v1.Ack
+	(*AmsCommand)(nil),              // 18: amx.v1.AmsCommand
+	(*SessionSetup)(nil),            // 19: amx.v1.SessionSetup
+	(*DeliverAccount)(nil),          // 20: amx.v1.DeliverAccount
+	(*RecallAccount)(nil),           // 21: amx.v1.RecallAccount
+	(*SetAccountActive)(nil),        // 22: amx.v1.SetAccountActive
+	(*SetSwitchMode)(nil),           // 23: amx.v1.SetSwitchMode
+	(*SwitchNow)(nil),               // 24: amx.v1.SwitchNow
+	(*SetPolicy)(nil),               // 25: amx.v1.SetPolicy
+	(*SelfUpdate)(nil),              // 26: amx.v1.SelfUpdate
+	(*RequestReport)(nil),           // 27: amx.v1.RequestReport
+	(*AmaMessage)(nil),              // 28: amx.v1.AmaMessage
+	(*CredentialUpdate)(nil),        // 29: amx.v1.CredentialUpdate
+	(*Register)(nil),                // 30: amx.v1.Register
+	(*Heartbeat)(nil),               // 31: amx.v1.Heartbeat
+	(*UsageReport)(nil),             // 32: amx.v1.UsageReport
+	(*ReportEnvelope)(nil),          // 33: amx.v1.ReportEnvelope
+	(*CommandAck)(nil),              // 34: amx.v1.CommandAck
+	(*AccountEvent)(nil),            // 35: amx.v1.AccountEvent
+	(*SessionSetup_WrappedKey)(nil), // 36: amx.v1.SessionSetup.WrappedKey
+	(*Heartbeat_SystemMetrics)(nil), // 37: amx.v1.Heartbeat.SystemMetrics
+	(*timestamppb.Timestamp)(nil),   // 38: google.protobuf.Timestamp
 }
 var file_amx_proto_depIdxs = []int32{
 	3,  // 0: amx.v1.EncryptedCredential.algorithm:type_name -> amx.v1.EncryptionAlgorithm
-	37, // 1: amx.v1.UsageWindow.resets_at:type_name -> google.protobuf.Timestamp
-	37, // 2: amx.v1.QuotaWindow.resets_at:type_name -> google.protobuf.Timestamp
-	10, // 3: amx.v1.AccountUsage.account:type_name -> amx.v1.AccountRef
-	1,  // 4: amx.v1.AccountUsage.allocation_status:type_name -> amx.v1.AllocationStatus
-	12, // 5: amx.v1.AccountUsage.five_hour:type_name -> amx.v1.UsageWindow
-	12, // 6: amx.v1.AccountUsage.seven_day:type_name -> amx.v1.UsageWindow
-	37, // 7: amx.v1.AccountUsage.usage_fetched_at:type_name -> google.protobuf.Timestamp
-	13, // 8: amx.v1.AccountUsage.windows:type_name -> amx.v1.QuotaWindow
-	37, // 9: amx.v1.Ack.received_at:type_name -> google.protobuf.Timestamp
-	37, // 10: amx.v1.AmsCommand.issued_at:type_name -> google.protobuf.Timestamp
-	19, // 11: amx.v1.AmsCommand.deliver:type_name -> amx.v1.DeliverAccount
-	20, // 12: amx.v1.AmsCommand.recall:type_name -> amx.v1.RecallAccount
-	21, // 13: amx.v1.AmsCommand.set_active:type_name -> amx.v1.SetAccountActive
-	22, // 14: amx.v1.AmsCommand.set_mode:type_name -> amx.v1.SetSwitchMode
-	23, // 15: amx.v1.AmsCommand.switch_now:type_name -> amx.v1.SwitchNow
-	26, // 16: amx.v1.AmsCommand.req_report:type_name -> amx.v1.RequestReport
-	18, // 17: amx.v1.AmsCommand.session_setup:type_name -> amx.v1.SessionSetup
-	24, // 18: amx.v1.AmsCommand.set_policy:type_name -> amx.v1.SetPolicy
-	25, // 19: amx.v1.AmsCommand.self_update:type_name -> amx.v1.SelfUpdate
-	35, // 20: amx.v1.SessionSetup.keys:type_name -> amx.v1.SessionSetup.WrappedKey
-	10, // 21: amx.v1.DeliverAccount.account:type_name -> amx.v1.AccountRef
-	0,  // 22: amx.v1.DeliverAccount.credential_type:type_name -> amx.v1.CredentialType
-	11, // 23: amx.v1.DeliverAccount.encrypted_credential:type_name -> amx.v1.EncryptedCredential
-	1,  // 24: amx.v1.DeliverAccount.desired_status:type_name -> amx.v1.AllocationStatus
-	37, // 25: amx.v1.DeliverAccount.credential_expires_at:type_name -> google.protobuf.Timestamp
-	10, // 26: amx.v1.RecallAccount.account:type_name -> amx.v1.AccountRef
-	10, // 27: amx.v1.SetAccountActive.account:type_name -> amx.v1.AccountRef
-	2,  // 28: amx.v1.SetSwitchMode.mode:type_name -> amx.v1.SwitchMode
-	10, // 29: amx.v1.SwitchNow.account:type_name -> amx.v1.AccountRef
-	4,  // 30: amx.v1.SwitchNow.strategy:type_name -> amx.v1.SwitchNow.SwitchStrategy
-	4,  // 31: amx.v1.SetPolicy.default_strategy:type_name -> amx.v1.SwitchNow.SwitchStrategy
-	5,  // 32: amx.v1.RequestReport.report_type:type_name -> amx.v1.RequestReport.ReportType
-	29, // 33: amx.v1.AmaMessage.register:type_name -> amx.v1.Register
-	30, // 34: amx.v1.AmaMessage.hb:type_name -> amx.v1.Heartbeat
-	31, // 35: amx.v1.AmaMessage.usage:type_name -> amx.v1.UsageReport
-	33, // 36: amx.v1.AmaMessage.ack:type_name -> amx.v1.CommandAck
-	34, // 37: amx.v1.AmaMessage.event:type_name -> amx.v1.AccountEvent
-	28, // 38: amx.v1.AmaMessage.cred_update:type_name -> amx.v1.CredentialUpdate
-	10, // 39: amx.v1.CredentialUpdate.account:type_name -> amx.v1.AccountRef
-	11, // 40: amx.v1.CredentialUpdate.encrypted_credential:type_name -> amx.v1.EncryptedCredential
-	37, // 41: amx.v1.CredentialUpdate.observed_at:type_name -> google.protobuf.Timestamp
-	2,  // 42: amx.v1.Register.switch_mode:type_name -> amx.v1.SwitchMode
-	14, // 43: amx.v1.Register.accounts:type_name -> amx.v1.AccountUsage
-	37, // 44: amx.v1.Heartbeat.sent_at:type_name -> google.protobuf.Timestamp
-	10, // 45: amx.v1.Heartbeat.active_account:type_name -> amx.v1.AccountRef
-	2,  // 46: amx.v1.Heartbeat.switch_mode:type_name -> amx.v1.SwitchMode
-	36, // 47: amx.v1.Heartbeat.metrics:type_name -> amx.v1.Heartbeat.SystemMetrics
-	37, // 48: amx.v1.UsageReport.generated_at:type_name -> google.protobuf.Timestamp
-	6,  // 49: amx.v1.UsageReport.trigger:type_name -> amx.v1.UsageReport.Trigger
-	10, // 50: amx.v1.UsageReport.active_account:type_name -> amx.v1.AccountRef
-	15, // 51: amx.v1.UsageReport.pool_summary:type_name -> amx.v1.PoolSummary
-	14, // 52: amx.v1.UsageReport.accounts:type_name -> amx.v1.AccountUsage
-	31, // 53: amx.v1.ReportEnvelope.report:type_name -> amx.v1.UsageReport
-	37, // 54: amx.v1.CommandAck.observed_at:type_name -> google.protobuf.Timestamp
-	7,  // 55: amx.v1.CommandAck.convergence:type_name -> amx.v1.CommandAck.Convergence
-	14, // 56: amx.v1.CommandAck.account_state:type_name -> amx.v1.AccountUsage
-	2,  // 57: amx.v1.CommandAck.switch_mode:type_name -> amx.v1.SwitchMode
-	15, // 58: amx.v1.CommandAck.pool_summary:type_name -> amx.v1.PoolSummary
-	37, // 59: amx.v1.AccountEvent.occurred_at:type_name -> google.protobuf.Timestamp
-	8,  // 60: amx.v1.AccountEvent.kind:type_name -> amx.v1.AccountEvent.Kind
-	9,  // 61: amx.v1.AccountEvent.trigger:type_name -> amx.v1.AccountEvent.Trigger
-	10, // 62: amx.v1.AccountEvent.from:type_name -> amx.v1.AccountRef
-	10, // 63: amx.v1.AccountEvent.to:type_name -> amx.v1.AccountRef
-	15, // 64: amx.v1.AccountEvent.pool_summary:type_name -> amx.v1.PoolSummary
-	3,  // 65: amx.v1.SessionSetup.WrappedKey.algorithm:type_name -> amx.v1.EncryptionAlgorithm
-	37, // 66: amx.v1.SessionSetup.WrappedKey.not_after:type_name -> google.protobuf.Timestamp
-	27, // 67: amx.v1.AmxControlPlane.Session:input_type -> amx.v1.AmaMessage
-	32, // 68: amx.v1.AmxControlPlane.ReportUsage:input_type -> amx.v1.ReportEnvelope
-	17, // 69: amx.v1.AmxControlPlane.Session:output_type -> amx.v1.AmsCommand
-	16, // 70: amx.v1.AmxControlPlane.ReportUsage:output_type -> amx.v1.Ack
-	69, // [69:71] is the sub-list for method output_type
-	67, // [67:69] is the sub-list for method input_type
-	67, // [67:67] is the sub-list for extension type_name
-	67, // [67:67] is the sub-list for extension extendee
-	0,  // [0:67] is the sub-list for field type_name
+	38, // 1: amx.v1.UsageWindow.resets_at:type_name -> google.protobuf.Timestamp
+	38, // 2: amx.v1.QuotaWindow.resets_at:type_name -> google.protobuf.Timestamp
+	38, // 3: amx.v1.Spend.resets_at:type_name -> google.protobuf.Timestamp
+	10, // 4: amx.v1.AccountUsage.account:type_name -> amx.v1.AccountRef
+	1,  // 5: amx.v1.AccountUsage.allocation_status:type_name -> amx.v1.AllocationStatus
+	12, // 6: amx.v1.AccountUsage.five_hour:type_name -> amx.v1.UsageWindow
+	12, // 7: amx.v1.AccountUsage.seven_day:type_name -> amx.v1.UsageWindow
+	38, // 8: amx.v1.AccountUsage.usage_fetched_at:type_name -> google.protobuf.Timestamp
+	13, // 9: amx.v1.AccountUsage.windows:type_name -> amx.v1.QuotaWindow
+	14, // 10: amx.v1.AccountUsage.spend:type_name -> amx.v1.Spend
+	13, // 11: amx.v1.AccountUsage.scoped_windows:type_name -> amx.v1.QuotaWindow
+	38, // 12: amx.v1.Ack.received_at:type_name -> google.protobuf.Timestamp
+	38, // 13: amx.v1.AmsCommand.issued_at:type_name -> google.protobuf.Timestamp
+	20, // 14: amx.v1.AmsCommand.deliver:type_name -> amx.v1.DeliverAccount
+	21, // 15: amx.v1.AmsCommand.recall:type_name -> amx.v1.RecallAccount
+	22, // 16: amx.v1.AmsCommand.set_active:type_name -> amx.v1.SetAccountActive
+	23, // 17: amx.v1.AmsCommand.set_mode:type_name -> amx.v1.SetSwitchMode
+	24, // 18: amx.v1.AmsCommand.switch_now:type_name -> amx.v1.SwitchNow
+	27, // 19: amx.v1.AmsCommand.req_report:type_name -> amx.v1.RequestReport
+	19, // 20: amx.v1.AmsCommand.session_setup:type_name -> amx.v1.SessionSetup
+	25, // 21: amx.v1.AmsCommand.set_policy:type_name -> amx.v1.SetPolicy
+	26, // 22: amx.v1.AmsCommand.self_update:type_name -> amx.v1.SelfUpdate
+	36, // 23: amx.v1.SessionSetup.keys:type_name -> amx.v1.SessionSetup.WrappedKey
+	10, // 24: amx.v1.DeliverAccount.account:type_name -> amx.v1.AccountRef
+	0,  // 25: amx.v1.DeliverAccount.credential_type:type_name -> amx.v1.CredentialType
+	11, // 26: amx.v1.DeliverAccount.encrypted_credential:type_name -> amx.v1.EncryptedCredential
+	1,  // 27: amx.v1.DeliverAccount.desired_status:type_name -> amx.v1.AllocationStatus
+	38, // 28: amx.v1.DeliverAccount.credential_expires_at:type_name -> google.protobuf.Timestamp
+	10, // 29: amx.v1.RecallAccount.account:type_name -> amx.v1.AccountRef
+	10, // 30: amx.v1.SetAccountActive.account:type_name -> amx.v1.AccountRef
+	2,  // 31: amx.v1.SetSwitchMode.mode:type_name -> amx.v1.SwitchMode
+	10, // 32: amx.v1.SwitchNow.account:type_name -> amx.v1.AccountRef
+	4,  // 33: amx.v1.SwitchNow.strategy:type_name -> amx.v1.SwitchNow.SwitchStrategy
+	4,  // 34: amx.v1.SetPolicy.default_strategy:type_name -> amx.v1.SwitchNow.SwitchStrategy
+	5,  // 35: amx.v1.RequestReport.report_type:type_name -> amx.v1.RequestReport.ReportType
+	30, // 36: amx.v1.AmaMessage.register:type_name -> amx.v1.Register
+	31, // 37: amx.v1.AmaMessage.hb:type_name -> amx.v1.Heartbeat
+	32, // 38: amx.v1.AmaMessage.usage:type_name -> amx.v1.UsageReport
+	34, // 39: amx.v1.AmaMessage.ack:type_name -> amx.v1.CommandAck
+	35, // 40: amx.v1.AmaMessage.event:type_name -> amx.v1.AccountEvent
+	29, // 41: amx.v1.AmaMessage.cred_update:type_name -> amx.v1.CredentialUpdate
+	10, // 42: amx.v1.CredentialUpdate.account:type_name -> amx.v1.AccountRef
+	11, // 43: amx.v1.CredentialUpdate.encrypted_credential:type_name -> amx.v1.EncryptedCredential
+	38, // 44: amx.v1.CredentialUpdate.observed_at:type_name -> google.protobuf.Timestamp
+	2,  // 45: amx.v1.Register.switch_mode:type_name -> amx.v1.SwitchMode
+	15, // 46: amx.v1.Register.accounts:type_name -> amx.v1.AccountUsage
+	38, // 47: amx.v1.Heartbeat.sent_at:type_name -> google.protobuf.Timestamp
+	10, // 48: amx.v1.Heartbeat.active_account:type_name -> amx.v1.AccountRef
+	2,  // 49: amx.v1.Heartbeat.switch_mode:type_name -> amx.v1.SwitchMode
+	37, // 50: amx.v1.Heartbeat.metrics:type_name -> amx.v1.Heartbeat.SystemMetrics
+	38, // 51: amx.v1.UsageReport.generated_at:type_name -> google.protobuf.Timestamp
+	6,  // 52: amx.v1.UsageReport.trigger:type_name -> amx.v1.UsageReport.Trigger
+	10, // 53: amx.v1.UsageReport.active_account:type_name -> amx.v1.AccountRef
+	16, // 54: amx.v1.UsageReport.pool_summary:type_name -> amx.v1.PoolSummary
+	15, // 55: amx.v1.UsageReport.accounts:type_name -> amx.v1.AccountUsage
+	32, // 56: amx.v1.ReportEnvelope.report:type_name -> amx.v1.UsageReport
+	38, // 57: amx.v1.CommandAck.observed_at:type_name -> google.protobuf.Timestamp
+	7,  // 58: amx.v1.CommandAck.convergence:type_name -> amx.v1.CommandAck.Convergence
+	15, // 59: amx.v1.CommandAck.account_state:type_name -> amx.v1.AccountUsage
+	2,  // 60: amx.v1.CommandAck.switch_mode:type_name -> amx.v1.SwitchMode
+	16, // 61: amx.v1.CommandAck.pool_summary:type_name -> amx.v1.PoolSummary
+	38, // 62: amx.v1.AccountEvent.occurred_at:type_name -> google.protobuf.Timestamp
+	8,  // 63: amx.v1.AccountEvent.kind:type_name -> amx.v1.AccountEvent.Kind
+	9,  // 64: amx.v1.AccountEvent.trigger:type_name -> amx.v1.AccountEvent.Trigger
+	10, // 65: amx.v1.AccountEvent.from:type_name -> amx.v1.AccountRef
+	10, // 66: amx.v1.AccountEvent.to:type_name -> amx.v1.AccountRef
+	16, // 67: amx.v1.AccountEvent.pool_summary:type_name -> amx.v1.PoolSummary
+	3,  // 68: amx.v1.SessionSetup.WrappedKey.algorithm:type_name -> amx.v1.EncryptionAlgorithm
+	38, // 69: amx.v1.SessionSetup.WrappedKey.not_after:type_name -> google.protobuf.Timestamp
+	28, // 70: amx.v1.AmxControlPlane.Session:input_type -> amx.v1.AmaMessage
+	33, // 71: amx.v1.AmxControlPlane.ReportUsage:input_type -> amx.v1.ReportEnvelope
+	18, // 72: amx.v1.AmxControlPlane.Session:output_type -> amx.v1.AmsCommand
+	17, // 73: amx.v1.AmxControlPlane.ReportUsage:output_type -> amx.v1.Ack
+	72, // [72:74] is the sub-list for method output_type
+	70, // [70:72] is the sub-list for method input_type
+	70, // [70:70] is the sub-list for extension type_name
+	70, // [70:70] is the sub-list for extension extendee
+	0,  // [0:70] is the sub-list for field type_name
 }
 
 func init() { file_amx_proto_init() }
@@ -3454,7 +3581,7 @@ func file_amx_proto_init() {
 	if File_amx_proto != nil {
 		return
 	}
-	file_amx_proto_msgTypes[7].OneofWrappers = []any{
+	file_amx_proto_msgTypes[8].OneofWrappers = []any{
 		(*AmsCommand_Deliver)(nil),
 		(*AmsCommand_Recall)(nil),
 		(*AmsCommand_SetActive)(nil),
@@ -3465,11 +3592,11 @@ func file_amx_proto_init() {
 		(*AmsCommand_SetPolicy)(nil),
 		(*AmsCommand_SelfUpdate)(nil),
 	}
-	file_amx_proto_msgTypes[13].OneofWrappers = []any{
+	file_amx_proto_msgTypes[14].OneofWrappers = []any{
 		(*SwitchNow_Account)(nil),
 		(*SwitchNow_Strategy)(nil),
 	}
-	file_amx_proto_msgTypes[17].OneofWrappers = []any{
+	file_amx_proto_msgTypes[18].OneofWrappers = []any{
 		(*AmaMessage_Register)(nil),
 		(*AmaMessage_Hb)(nil),
 		(*AmaMessage_Usage)(nil),
@@ -3477,7 +3604,7 @@ func file_amx_proto_init() {
 		(*AmaMessage_Event)(nil),
 		(*AmaMessage_CredUpdate)(nil),
 	}
-	file_amx_proto_msgTypes[19].OneofWrappers = []any{
+	file_amx_proto_msgTypes[20].OneofWrappers = []any{
 		(*Register_EnrollToken)(nil),
 		(*Register_ServerCredential)(nil),
 	}
@@ -3487,7 +3614,7 @@ func file_amx_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_amx_proto_rawDesc), len(file_amx_proto_rawDesc)),
 			NumEnums:      10,
-			NumMessages:   27,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

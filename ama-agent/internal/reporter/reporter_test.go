@@ -2,6 +2,7 @@ package reporter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -309,6 +310,122 @@ func TestBuildUsageReportConsumesNeutralWindows(t *testing.T) {
 	}
 	if c.GetFiveHour() != nil || c.GetSevenDay() != nil {
 		t.Fatalf("codex account must leave five_hour/seven_day nil, got five_hour=%+v seven_day=%+v", c.GetFiveHour(), c.GetSevenDay())
+	}
+}
+
+// TestUsageJSONCarriesSpendAndScoped pins the bridge.Usage JSON tags against the
+// real tsamx camelCase `list --json` shape: `spend` (used/limit/pct/currency,
+// optional resetsAt) and `scoped[]` (per-model weekly windows keyed by `name`)
+// must survive json.Unmarshal instead of being dropped as before.
+func TestUsageJSONCarriesSpendAndScoped(t *testing.T) {
+	const row = `{
+	  "fiveHour": {"pct": 10, "resetsAt": "2026-08-15T00:00:00Z"},
+	  "sevenDay": {"pct": 20, "resetsAt": "2026-08-20T00:00:00Z"},
+	  "spend": {"used": 12.5, "limit": 50, "pct": 25, "currency": "USD",
+	            "resetsAt": "2026-09-01T00:00:00Z", "countdown": "16d", "clock": "x"},
+	  "scoped": [
+	    {"name": "Fable", "pct": 33, "resetsAt": "2026-08-20T00:00:00Z", "aheadOfPace": true},
+	    {"name": "Opus", "pct": 44}
+	  ]
+	}`
+	var u provider.Usage
+	if err := json.Unmarshal([]byte(row), &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Spend == nil {
+		t.Fatal("spend dropped on unmarshal")
+	}
+	if u.Spend.Used != 12.5 || u.Spend.Limit != 50 || u.Spend.Pct != 25 || u.Spend.Currency != "USD" {
+		t.Fatalf("spend = %+v", *u.Spend)
+	}
+	if u.Spend.ResetsAt != "2026-09-01T00:00:00Z" {
+		t.Fatalf("spend resetsAt = %q", u.Spend.ResetsAt)
+	}
+	if len(u.Scoped) != 2 {
+		t.Fatalf("scoped = %d, want 2", len(u.Scoped))
+	}
+	if u.Scoped[0].Name != "Fable" || u.Scoped[0].Pct != 33 || u.Scoped[0].ResetsAt != "2026-08-20T00:00:00Z" {
+		t.Fatalf("scoped[0] = %+v", u.Scoped[0])
+	}
+	if u.Scoped[1].Name != "Opus" || u.Scoped[1].Pct != 44 {
+		t.Fatalf("scoped[1] = %+v", u.Scoped[1])
+	}
+}
+
+// TestBuildUsageReportCarriesSpendAndScoped: spend and per-model scoped windows
+// flow through to the proto AccountUsage, while the switch/pool math (windows[],
+// maxUtilizationPct, eligible, allExhausted) stays exactly what it is without
+// them. The scoped 99% below would flip allExhausted if it leaked into windows[].
+func TestBuildUsageReportCarriesSpendAndScoped(t *testing.T) {
+	f := tsamx.NewFake()
+	ctx := context.Background()
+	_ = f.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true})
+	_ = f.Switch(ctx, "a@x.io")
+	f.SetUsage("a@x.io", &provider.Usage{
+		FiveHour: &provider.Window{Pct: 44},
+		SevenDay: &provider.Window{Pct: 61.2},
+		Spend:    &provider.Spend{Used: 12.5, Limit: 50, Pct: 25, Currency: "USD", ResetsAt: "2026-09-01T00:00:00Z"},
+		Scoped: []provider.ScopedWindow{
+			{Name: "Fable", Pct: 99, ResetsAt: "2026-08-20T00:00:00Z"},
+			{Name: "Opus", Pct: 10},
+		},
+	})
+
+	r := New("ama_test", bridgeMap(f), func() time.Time { return time.Unix(1700000000, 0) })
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a *amxv1.AccountUsage
+	for _, au := range rep.GetAccounts() {
+		if au.GetAccount().GetEmail() == "a@x.io" {
+			a = au
+		}
+	}
+	if a == nil {
+		t.Fatal("account a missing from report")
+	}
+
+	// Spend forwarded.
+	if a.GetSpend() == nil {
+		t.Fatal("spend not carried into proto")
+	}
+	if a.GetSpend().GetUsed() != 12.5 || a.GetSpend().GetLimit() != 50 || a.GetSpend().GetPct() != 25 || a.GetSpend().GetCurrency() != "USD" {
+		t.Fatalf("spend = %+v", a.GetSpend())
+	}
+	if a.GetSpend().GetResetsAt() == nil {
+		t.Fatal("spend resetsAt not parsed")
+	}
+	// Scoped forwarded in scoped_windows, carrying the model, NOT in windows[].
+	if got := len(a.GetScopedWindows()); got != 2 {
+		t.Fatalf("scopedWindows = %d, want 2", got)
+	}
+	if a.GetScopedWindows()[0].GetModel() != "Fable" || a.GetScopedWindows()[0].GetPct() != 99 {
+		t.Fatalf("scopedWindows[0] = %+v", a.GetScopedWindows()[0])
+	}
+	if a.GetScopedWindows()[0].GetResetsAt() == nil {
+		t.Fatal("scoped resetsAt not parsed")
+	}
+	if a.GetScopedWindows()[1].GetModel() != "Opus" || a.GetScopedWindows()[1].GetPct() != 10 {
+		t.Fatalf("scopedWindows[1] = %+v", a.GetScopedWindows()[1])
+	}
+
+	// windows[] untouched: only the two positional windows, no scoped leak.
+	if got := len(a.GetWindows()); got != 2 {
+		t.Fatalf("windows = %d, want 2 (scoped must not join windows[])", got)
+	}
+	for _, w := range a.GetWindows() {
+		if w.GetModel() != "" {
+			t.Fatalf("positional window carries a model: %+v", w)
+		}
+	}
+	// Switch/pool math is the pre-spend/scoped result: max over windows[] = 61.2,
+	// the 99% scoped window did NOT raise it, and the single account stays eligible.
+	if got := rep.PoolSummary.MaxUtilizationPct; got != 61.2 {
+		t.Fatalf("maxUtilizationPct = %v, want 61.2 (scoped 99 must not count)", got)
+	}
+	if rep.PoolSummary.Eligible != 1 || rep.PoolSummary.AllExhausted {
+		t.Fatalf("pool summary changed by scoped/spend: %+v", rep.PoolSummary)
 	}
 }
 

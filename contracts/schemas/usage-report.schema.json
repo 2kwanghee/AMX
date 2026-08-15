@@ -123,6 +123,36 @@
         "windowMinutes": {
           "type": "integer",
           "minimum": 0
+        },
+        "model": {
+          "description": "Model identity for a per-model scoped weekly window (usage.scopedWindows). Empty/absent for the positional windows entries. tsamx emits it as the scoped item's name.",
+          "type": "string"
+        }
+      }
+    },
+    "spend": {
+      "description": "Pay-as-you-go spend against a monthly cap (tsamx spend). Additive and informational; it never feeds the switch decision or poolSummary.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used", "limit", "pct", "currency"],
+      "properties": {
+        "used": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        },
+        "pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resetsAt": {
+          "$ref": "common.schema.json#/$defs/timestamp"
         }
       }
     },
@@ -166,6 +196,16 @@
             },
             "windows": {
               "description": "Generalized window list (P2b). Dual-recorded alongside fiveHour/sevenDay during migration; ordered by windowMinutes ascending.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/quotaWindow"
+              }
+            },
+            "spend": {
+              "$ref": "#/$defs/spend"
+            },
+            "scopedWindows": {
+              "description": "Per-model scoped weekly windows (tsamx scoped). Kept separate from windows so a per-model limit never feeds the switch/poolSummary math; each entry names its model in quotaWindow.model.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/quotaWindow"

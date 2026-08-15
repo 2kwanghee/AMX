@@ -130,6 +130,33 @@ type Usage struct {
 	FiveHour *Window  `json:"fiveHour"`
 	SevenDay *Window  `json:"sevenDay"`
 	Windows  []Window `json:"windows,omitempty"`
+	// Spend is the pay-as-you-go spend (tsamx `spend`), carried through to the
+	// report untouched. It is informational and never enters the switch/pool math.
+	Spend *Spend `json:"spend,omitempty"`
+	// Scoped is the per-model weekly windows (tsamx `scoped`). Kept out of Windows
+	// so it can never influence maxWindowPct / eligible / allExhausted; each entry
+	// names its model in ScopedWindow.Name (tsamx camelCase key `name`).
+	Scoped []ScopedWindow `json:"scoped,omitempty"`
+}
+
+// Spend mirrors the tsamx `spend` object (pool usage_to_json): pay-as-you-go
+// consumption against a monthly cap. Only the fields AMA forwards are modeled;
+// countdown/clock and any other keys are ignored.
+type Spend struct {
+	Used     float64 `json:"used"`
+	Limit    float64 `json:"limit"`
+	Pct      float64 `json:"pct"`
+	Currency string  `json:"currency"`
+	ResetsAt string  `json:"resetsAt,omitempty"`
+}
+
+// ScopedWindow mirrors one entry of the tsamx `scoped` array: a per-model weekly
+// window. Name is the model display name (tsamx key `name`). Pace/countdown keys
+// are ignored — only the model, pct, and reset are forwarded.
+type ScopedWindow struct {
+	Name     string  `json:"name"`
+	Pct      float64 `json:"pct"`
+	ResetsAt string  `json:"resetsAt,omitempty"`
 }
 
 // Window is one binding window's utilization. Id and WindowMinutes are set only

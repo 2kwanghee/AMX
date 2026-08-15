@@ -188,6 +188,43 @@ def test_report_drift_is_per_account_on_autoresolve(app_env):
     assert len(still_open) == 1 and still_open[0].account_id == account_b
 
 
+def test_report_persists_spend_and_scoped_in_snapshot_payload(app_env):
+    # spend and per-model scoped windows are additive fields on AccountUsage; the
+    # snapshot must carry them through to usage_snapshots.payload untouched (the
+    # persist path is a generic MessageToDict, so a proto field that is set lands
+    # in the JSONB). Switch/pool fields are unrelated here.
+    from app.models import UsageSnapshot
+
+    tenant_id, account_id, server_id = _seed_tenant_account_server("spend@ex.com")
+    report = pb.UsageReport(schema_version=1, agent_id=AGENT_ID)
+    report.pool_summary.all_exhausted = False
+    au = report.accounts.add()
+    au.account.ams_account_id = str(account_id)
+    au.allocation_status = pb.ALLOCATION_STATUS_ACTIVE
+    au.spend.used = 12.5
+    au.spend.limit = 50.0
+    au.spend.pct = 25.0
+    au.spend.currency = "USD"
+    sw = au.scoped_windows.add()
+    sw.model = "Fable"
+    sw.pct = 99.0
+
+    _servicer()._store_usage(server_id, tenant_id, report, report_type="usage")
+
+    with get_sessionmaker()() as db:
+        snap = db.scalars(
+            select(UsageSnapshot).where(UsageSnapshot.server_id == server_id)
+        ).one()
+    acc = snap.payload["accounts"][0]
+    assert acc["spend"]["used"] == 12.5
+    assert acc["spend"]["limit"] == 50.0
+    assert acc["spend"]["currency"] == "USD"
+    assert acc["scoped_windows"][0]["model"] == "Fable"
+    assert acc["scoped_windows"][0]["pct"] == 99.0
+    # The scoped window must NOT have leaked into windows[] (switch/pool input).
+    assert not acc.get("windows")
+
+
 # -- unary ReportUsage fallback: same effects as the streaming path -----------
 def _bind_credential(server_id) -> str:
     """Give a seeded server a known server_credential and return it."""
