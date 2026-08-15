@@ -119,8 +119,7 @@ AMX/
 | `design-notes/` | 아래 별도 설명 | 특정 기능의 "왜 이렇게 만들었나"가 궁금할 때 |
 | `DEPLOYMENT-RUNNER.md` | 작업 서버에 Claude Code 껍데기(amx-claude)를 설치하는 절차 | 배포할 때 |
 | `DEPLOYMENT-TLS.md` | 통신 암호화 인증서 발급·설치 절차 | 배포할 때 |
-| `DEPLOYMENT-TSAMX.md` | 사설 저장소에서 tsamx를 설치할 때의 인증 절차 | 배포할 때 |
-| `TSAMX-GUIDE.md` | tsamx 도구 자체의 사용법과 개조 내역 | tsamx를 만질 때 |
+| `TSAMX-GUIDE.md` | tsamx 도구의 사용법·개조 내역 + 사설 저장소 설치 인증 절차(§6) | tsamx를 만지거나 배포할 때 |
 | `UPSTREAM-SYNC.md` | tsamx의 원본(claude-swap)이 업데이트됐을 때 우리 개조판에 반영하는 절차 | 원본 업데이트 시 |
 
 ### design-notes/ 는 무엇인가
@@ -189,7 +188,7 @@ npm run build && npm start          # http://localhost:3000
 
 ### 실제 서버에 배포하기
 
-순서대로: ① `DEPLOYMENT-TLS.md`(통신 암호화) → ② `DEPLOYMENT-TSAMX.md`(tsamx 설치)
+순서대로: ① `DEPLOYMENT-TLS.md`(통신 암호화) → ② `TSAMX-GUIDE.md` §6(tsamx 설치 인증)
 → ③ `DEPLOYMENT-RUNNER.md`(Claude Code 껍데기 강제) → ④ 에이전트 등록(웹에서 등록 토큰 발급).
 
 ## 6. 지금까지 구현된 것 (단계별, 쉬운 말로)
