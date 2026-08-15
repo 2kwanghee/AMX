@@ -108,8 +108,11 @@ services:
       LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
     # 마이그레이션 완료 후 준비되면 healthy → worker 기동 조건.
+    # langfuse-web 은 localhost 가 아니라 $HOSTNAME(eth0 IP)에 바인딩하므로
+    # 반드시 $(hostname) 으로 접속한다. compose test 문자열에서 리터럴 $ 는
+    # $$ 로 이스케이프한다.
     healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:3000/api/public/health || exit 1
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider \"http://$$(hostname):3000/api/public/health\" || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
