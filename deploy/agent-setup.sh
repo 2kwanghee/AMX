@@ -106,7 +106,9 @@ do_install() {
   # 만들며 개인 프로필은 읽기만 한다(deploy/bootstrap-profile.sh 참고).
   # 개인 프로필이 없거나 자산이 없으면 완전 무동작. 실패는 경고만 —
   # 에이전트 설치를 막지 않는다.
-  if [ -d "$HOME/.claude" ] \
+  if [ "${AMX_NO_BOOTSTRAP:-}" = 1 ]; then
+    echo "   겸용 PC 프로필 부트스트랩 건너뜀 (AMX_NO_BOOTSTRAP=1)"
+  elif [ -d "$HOME/.claude" ] \
      && { [ -e "$HOME/.claude/CLAUDE.md" ] || [ -d "$HOME/.claude/skills" ] || [ -d "$HOME/.claude/projects" ]; }; then
     echo "   겸용 PC 프로필 부트스트랩 (개인 프로필 감지)…"
     if sh "$ROOT/deploy/bootstrap-profile.sh" --personal-dir "$HOME/.claude" --config-dir "$config_dir"; then

@@ -14,7 +14,12 @@
 
 set -eu
 
-CLAUDE_CONFIG_DIR="${AMX_CONFIG_DIR:-$HOME/.claude-amx}"
+# 러너 프로필 기본 경로. bootstrap-profile.sh가 이 사본을 bin에 설치할 때, 그
+# 서버가 실제로 쓰는 config dir(agent-setup의 --config-dir 값)로 아래 한 줄을
+# 치환한다. 비기본 홈을 써도 amx가 그 홈을 열도록 하기 위함이다. 런타임에는
+# AMX_CONFIG_DIR 환경변수로 언제든 덮어쓸 수 있다.
+AMX_DEFAULT_CONFIG_DIR="$HOME/.claude-amx"
+CLAUDE_CONFIG_DIR="${AMX_CONFIG_DIR:-$AMX_DEFAULT_CONFIG_DIR}"
 export CLAUDE_CONFIG_DIR
 
 # amx-claude 위치: 이 스크립트와 같은 디렉터리를 우선하고, 없으면 PATH에서 찾는다.

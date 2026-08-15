@@ -12,11 +12,21 @@
 #
 # 안전 규약 (설계 제약 — 위반 금지)
 # ---------------------------------
-#   1. 링크는 러너 홈(--config-dir) 안에만 만든다. tsamx가 만드는 세션 프로필이나
-#      개인 프로필(--personal-dir) 내부에는 어떤 파일도 만들지 않는다. 개인 프로필은
-#      링크 원본으로 "읽기만" 한다. 이유: tsamx의 history 병합이 shutil.move로
-#      프로필 projects/ 를 옮기므로, 그 경로 안에 심링크가 있으면 원본이 유실될 수
-#      있다. 러너 홈은 그 이관 경로 밖이라 안전하다.
+#   1. 이 스크립트는 러너 홈(--config-dir) 안에만 파일(링크)을 만든다. tsamx가
+#      만드는 세션 프로필이나 개인 프로필(--personal-dir) 내부에는 어떤 파일도
+#      쓰지 않는다 — 개인 프로필은 스크립트 실행 시점 기준으로는 읽기 전용이다.
+#      이유: tsamx의 history 병합이 shutil.move로 프로필 projects/ 를 옮기므로,
+#      그 경로 안에 심링크가 있으면 원본이 유실될 수 있다. 러너 홈은 그 이관
+#      경로 밖이라 안전하다.
+#
+#      단, 이 "읽기 전용"은 설치 시점 이야기일 뿐이다. 링크가 걸린 뒤 런타임
+#      동작은 다르다:
+#        - 프로젝트 메모리 링크는 양방향 write 공유다. 러너의 자동화 세션이
+#          projects/<slug>/memory 에 쓰면 그 내용이 개인 프로필의 실제
+#          메모리 파일에 그대로 반영된다(오염 가능). 개인·러너를 격리하려면
+#          해당 slug는 링크에서 빼거나 uninstall로 끊어야 한다.
+#        - 링크된 개인 지침(CLAUDE.md)·스킬은 러너 세션의 실제 동작에 적용된다.
+#        - 개인 메모리 내용은 러너 세션이 읽어 Langfuse 트레이스로 나갈 수 있다.
 #   2. settings.json 은 링크하지 않는다(AMX Langfuse 훅이 이 파일에 병합 기록을
 #      남겨 개인 원본을 오염시킨다). 러너 쪽에 없을 때만 복사하고, 있으면 무변경.
 #   3. 러너 쪽에 이미 실파일/실디렉(사용자 데이터)이 있으면 건드리지 않고 경고만
@@ -41,7 +51,7 @@ while [ $# -gt 0 ]; do
 		--personal-dir) shift; PERSONAL_DIR="${1:-}" ;;
 		--config-dir)   shift; CONFIG_DIR="${1:-}" ;;
 		--uninstall)    UNINSTALL=1 ;;
-		-h|--help)      sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help)      sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) echo "bootstrap-profile: 알 수 없는 인자: $1 (--help 참고)" >&2; exit 1 ;;
 	esac
 	shift
@@ -138,8 +148,9 @@ link_memory() {
 	fi
 
 	if [ -d "$_dst" ]; then
-		# 비어 있으면 교체, 비어 있지 않으면 보호.
-		if [ -z "$(ls -A "$_dst" 2>/dev/null)" ]; then
+		# 비어 있으면 교체, 비어 있지 않으면 보호. ls -A는 비POSIX라 find로 판정
+		# (숨김 파일 포함, 첫 항목에서 멈춤).
+		if [ -z "$(find "$_dst" -mindepth 1 -print -quit 2>/dev/null)" ]; then
 			rmdir "$_dst" && ln -s "$_src" "$_dst"
 			info "linked $_rel (빈 디렉터리 교체)"
 		else
@@ -187,9 +198,13 @@ install_amx_cmd() {
 		info "skipped amx (~/.local/bin 없음) — 직접 PATH에 두려면: cp $_src <bin>"
 		return 0
 	fi
-	cp "$_src" "$_bin/amx"
+	# 설치 사본에 이 서버의 config dir을 각인한다(비기본 홈 디커플링). sed 치환
+	# 안전을 위해 CONFIG_DIR의 sed 특수문자(& | \)를 이스케이프한다. 런타임
+	# AMX_CONFIG_DIR override는 amx 원본에 그대로 남아 있어 유지된다.
+	_esc="$(printf '%s' "$CONFIG_DIR" | sed 's/[&|\\]/\\&/g')"
+	sed "s|^AMX_DEFAULT_CONFIG_DIR=.*|AMX_DEFAULT_CONFIG_DIR=\"$_esc\"|" "$_src" > "$_bin/amx"
 	chmod +x "$_bin/amx"
-	info "copied amx ($_bin/amx)"
+	info "copied amx ($_bin/amx, config dir=$CONFIG_DIR)"
 	case ":$PATH:" in
 		*":$_bin:"*) ;;
 		*) info "안내: $_bin 이 PATH에 없습니다 — 추가하면 어디서든 'amx'로 실행됩니다." ;;
