@@ -12,8 +12,13 @@ decisions 1/5/7; `docs/AMX-DESIGN.md` §5.6, §7).
 ```bash
 cp .env.example .env.local   # fill AMX_API_BASE, AMX_ADMIN_TOKEN, AMX_SESSION_SECRET
 npm install
-npm run dev                  # http://localhost:3000  -> /login
+npm run build && npm start   # http://localhost:3000  -> /login
 ```
+
+> `npm run dev` does not work: the production CSP forbids the `unsafe-eval` that
+> Next's dev server needs, so the console renders blank. Always run the
+> production build (`build` + `start`), as `deploy/fullstack-run.sh` does — see
+> OVERVIEW §5.
 
 ## Verify (single command gate)
 
@@ -59,5 +64,4 @@ REST surface, so it is not imported here: its shapes are proto codecs unsuited
 to the REST DTOs, and it declares no `@bufbuild/protobuf` runtime dependency, so
 importing it — even type-only — fails the typecheck (and `contracts/` is not
 editable from this track). The alerts endpoints (`GET /alerts`,
-`POST /alerts/{id}:ack`) follow design §5.6 and are delivered by Track A — the
-BFF allowlist and UI are wired and degrade cleanly until that backend lands.
+`POST /alerts/{id}:ack`) follow design §5.6.

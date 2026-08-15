@@ -83,7 +83,7 @@ const GUIDE: Section[] = [
         symptom: 'AMX가 배분한 계정으로 claude를 띄우려면 — 기존 claude 명령을 바꿔야 하나',
         cause:
           '기존 claude 명령은 개인 프로필(~/.claude)을 읽으므로 그대로 두면 본인 계정으로만 동작한다. AMX는 ~/.claude-amx라는 별도 프로필에만 계정을 넣고 빼기 때문에, 콘솔에서 활성화한 계정으로 작업하려면 CLAUDE_CONFIG_DIR을 AMX 프로필로 지정해야 한다. 이때 맨 claude 대신 deploy/amx-claude 래퍼를 거쳐야 하는데, 계정 교체(deliver) 순간에 claude가 뜨면 엉뚱한 계정으로 과금될 수 있는 찰나를 래퍼의 잠금이 막아주기 때문이다.',
-        fix: '용도별 별칭을 한 번만 등록해 둔다. 이후 claude는 개인 계정, amx-claude는 AMX 배분 계정, amx-list는 배분 계정 조회로 나뉜다. 래퍼 경로는 에이전트 클론 위치(~/AMX-agent 기준)에 맞춘다. 순수 패키지 설치(git 클론 없는 장비)에는 amx-claude가 없으므로 중앙 서버 저장소의 deploy/amx-claude 한 파일만 복사해 두면 된다.',
+        fix: '용도별 별칭을 한 번만 등록해 둔다. 이후 claude는 개인 계정, amx-claude는 AMX 배분 계정, amx-list는 배분 계정 조회로 나뉜다. 래퍼 경로는 에이전트 클론 위치(~/AMX-agent 기준)에 맞춘다. 순수 패키지 설치(git 클론 없는 장비)에는 amx-claude가 없으므로 중앙 서버 저장소의 deploy/amx-claude 한 파일만 복사해 두면 된다. 겸용 PC를 bootstrap-profile.sh(#81)로 구성했다면 러너는 설치된 amx 명령을 그대로 쓰므로 이 별칭 없이 amx로 띄운다(개인 claude는 그대로).',
         code: "# ~/.bashrc에 한 번만 등록\ncat >> ~/.bashrc <<'EOF'\nalias amx-claude='CLAUDE_CONFIG_DIR=~/.claude-amx ~/AMX-agent/deploy/amx-claude'\nalias amx-list='CLAUDE_CONFIG_DIR=~/.claude-amx tsamx list'\nEOF\nsource ~/.bashrc\n\n# 확인\namx-list        # 배분 계정 목록 + (active) 표시\namx-claude      # 활성 계정으로 claude 실행 (개인용은 그대로 claude)",
       },
       {
@@ -177,6 +177,7 @@ export function SetupGuidePanel() {
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
         PC와 노트북 설치·연결에서 자주 나오는 문제를 증상으로 찾아 해결합니다. 각 항목을 눌러 펼치세요.
+        설치 절차의 원본은 docs/PROD-GUIDE.md입니다 — 아래는 그 과정에서 실제로 겪은 문제 모음입니다.
       </p>
       <input
         value={q}

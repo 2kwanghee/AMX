@@ -1,5 +1,7 @@
 # AMX P2 "채널" 아키텍처 설계서
 
+> 이 문서는 설계 시점 기록(as-designed)이며, 현행 동작의 기준은 `docs/AMX-DESIGN.md`다.
+
 > REASONER 산출(2026-08-08). 구현 브리핑의 근거. SSOT는 `docs/AMX-DESIGN.md` —
 > 상충 시 SSOT 우선. 확정 결정: O1 메모리 전용 KEK · O2 recall=disable(보존) · P2 전체 왕복.
 

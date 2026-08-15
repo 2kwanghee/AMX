@@ -1,5 +1,7 @@
 # F2 봉투암호화 설계서 (P5 S3)
 
+> 이 문서는 설계 시점 기록(as-designed)이며, 현행 동작의 기준은 `docs/AMX-DESIGN.md`다.
+
 > REASONER 산출(2026-08-09). KMS 벤더 미정 → KEK provider 추상화(로컬 MVP + KMS 어댑터 자리).
 > SSOT는 `docs/AMX-DESIGN.md`. proto 무변경(at-rest 전용, 와이어 세션 KEK는 별개).
 

@@ -1,5 +1,7 @@
 # 운영 안정화 회복 설계서 (D1·D2·C1)
 
+> 이 문서는 설계 시점 기록(as-designed)이며, 현행 동작의 기준은 `docs/AMX-DESIGN.md`다.
+
 > REASONER 산출(2026-08-09). 구현 브리핑 근거. SSOT는 `docs/AMX-DESIGN.md` — 상충 시 SSOT 우선.
 > **proto 변경 불필요.** C1 완전무손실(b2, AMS 앱-ack)만 proto를 건드리므로 이번 범위 제외·이월.
 

@@ -23,7 +23,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | # | 항목 | 출처 | 내용 | 시점 |
 |---|---|---|---|---|
 | B1 | **O5 러너 무중단 / deliver 오과금** | §8 O5 · P2·P3 | deliver 크리티컬 섹션(§6.3) 동안 `~/.claude/.credentials.json`이 순간 신규 계정으로 바뀜 → 그 창에 러너(Claude Code)가 요청 시 오과금. 러너 일시정지/파일락 + 같은 `~/.claude` 공유 보장 | 배포 설계 |
-| B2 | **O10 tsamx 설치 인증 (D11 파급)** | §8 O10 · P2 | 프라이빗 레포 git 설치 서버측 인증. 1차 읽기전용 deploy key → 서버 증가 시 서버별 키/machine user → AMS wheel 아티팩트 서빙으로 GitHub 의존 제거. 절차: `DEPLOYMENT-TSAMX.md` | 배포 설계 |
+| B2 | **O10 tsamx 설치 인증 (D11 파급)** | §8 O10 · P2 | 프라이빗 레포 git 설치 서버측 인증. 1차 읽기전용 deploy key → 서버 증가 시 서버별 키/machine user → AMS wheel 아티팩트 서빙으로 GitHub 의존 제거. 절차: `TSAMX-GUIDE.md` §6 | 배포 설계 |
 | B3 | **O6 tsamx 업스트림 동기화 절차** | §8 O6 · P1 | claude-swap 업스트림 갱신을 `vendor/claude-swap-upstream` 3-way 비교로 수동 병합. CLI/JSON 호환성 체크리스트 + 소유자 지정. 절차: `UPSTREAM-SYNC.md` | 운영 |
 | B4 | **TLS 종단 (D9)** | P2 | gRPC 서버는 현재 cert/key 제공 시 `add_secure_port`, 미제공 시 `AMX_GRPC_ALLOW_INSECURE=1` opt-in fail-closed. 실배포 cert/CA 발급·mTLS 구성 | 배포 설계 |
 
@@ -104,6 +104,11 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G38 | **미지 usageType 로그 반복** — usageByType 매핑에 없는 `usageType` 값은 경고 로그만 남기고 무시한다(§5.6.1). Langfuse가 새 usageType를 내면 매 스윕마다 경고가 반복돼 로그 노이즈가 될 수 있음 — 매핑 확장 또는 1회성 억제 검토 | #80 |
 | G39 | **사라진 key의 stale 롤업 행 미삭제** — `langfuse_usage_rollup` upsert는 이번 fetch에 있는 key만 갱신하고 사라진 key의 과거 행은 남긴다. observations가 append-only라 실무 위험은 낮음 | #78 · Langfuse 인수인계 결함 |
 | G40 | **러너 자동화의 개인 메모리 write 오염 표면** — 겸용 PC 부트스트랩이 개인 프로필 `projects/<slug>/memory`를 러너 홈에 **양방향** 링크하므로, 러너 자동화 세션의 write가 개인 메모리에 반영되고 개인 메모리 내용이 Langfuse 트레이스로 나갈 수 있다(DEPLOYMENT-RUNNER §9 "공유의 대가"에 문서화, slug 제외로 회피 가능). 러너 자동화 정책 차원의 검토 필요 | #81 |
+| G41 | **P5 — Langfuse Monitors 알림 통합** — Langfuse Monitors(비용·지연 임계값 → 웹훅)와 AMX 자체 경보 외부 채널(p4-architecture.md:66 확장점)을 하나의 알림 경로로 묶는 단계. 착수 전 결정 필요: 알림 채널(Slack/사내 메신저)·임계값. 기획안 2.5절 | Langfuse 인수인계 남은작업1 |
+| G42 | **Langfuse 운영 환경 반영 미완** — 스윕·REST는 머지됐으나 운영 AMS에 `AMX_LANGFUSE_*`(BASE_URL/PUBLIC_KEY/SECRET_KEY/TENANT_ID, 선택 UI_URL/POLL_SECONDS/WINDOW_DAYS/MAX_ACCOUNTS)가 없으면 비활성. alembic 0021 적용 필요. 시험 장비 상시 기동(ClickHouse 포함 스택) 여부 미결 | Langfuse 인수인계 남은작업2 |
+| G43 | **Langfuse 훅 파일럿 확대** — 훅이 현재 이 PC 한 대뿐. 노트북·운영 서버 확대 시 `deploy/fleet-langfuse.sh on`(운영 호스트 기본 `~/AMX`, dev 호스트 `--remote-repo ~/AMX-agent`). 노트북 접근은 10.60.1.15:3100 portproxy·방화벽 선행(WSL IP 변동 주의) | Langfuse 인수인계 남은작업3 |
+| G44 | **amx-codex Langfuse 미추적** — Langfuse 훅은 Claude Code 전용이라 codex 러너는 관측 공백. 멀티 프로바이더 계획(리서치 완료, 결정 3건 대기)에 종속 | Langfuse 인수인계 남은작업4 |
+| G45 | **e2e recall 단언이 구 O2 결정에 고착(테스트 실행 확인 우선)** — `e2e/README.md`의 "What it asserts"와 `test_p2_channel_e2e.py:205,208`이 O2 구 결정(회수 시 로컬 보존: `disabled=True`·`ALLOCATION_INACTIVE`·ciphertext 보존)을 단언한다. 그러나 `commands.py:134` `recall_purges_local_copy`가 08-14 O2 변경으로 provider 무관 항상 purge(True)를 반환해, 회수가 로컬 복사본을 남기지 않는다 → 이 e2e가 현재 실패할 가능성. **문서 정정보다 e2e 실행으로 실제 실패 여부 확인이 먼저** | 문서 감사(08-15) |
 
 ---
 

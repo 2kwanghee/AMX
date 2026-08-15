@@ -1,5 +1,7 @@
 # AMX P5 SaaS 아키텍처 설계
 
+> 이 문서는 설계 시점 기록(as-designed)이며, 현행 동작의 기준은 `docs/AMX-DESIGN.md`다.
+
 > REASONER 산출(2026-08-09). SSOT는 `docs/AMX-DESIGN.md`. P5는 여러 독립 항목의 묶음 — 단계 분할.
 
 ## 결론 — 우선순위·첫 단계

@@ -1,5 +1,7 @@
 # Langfuse 모니터링 트랙 인수인계 (2026-08-15)
 
+> 2026-08-15 세션 종료 시점의 스냅샷이다. 현행 추적은 `docs/BACKLOG.md`를 본다 — 남은 작업 1~4는 G41~G44로 이관, 5(G27 후속)는 G26/G27, 6(tsamx run 세션 프로필 추적 공백)은 G36과 DEPLOYMENT-RUNNER §9가 담는다. 아래 "발견물"은 당시 조치 불요로 판정한 기록이다.
+
 이 문서는 Langfuse 기반 모니터링 보강 작업(기획 → P1~P4)의 종료 시점 상태를 다음 세션에 넘기기 위한 것이다. 기획안 원문: https://claude.ai/code/artifact/d3776829-d97a-4d57-95c3-94114f48bb4e · 진행 메모리: `~/.claude/projects/-mnt-c-workspace-AMX/memory/amx-langfuse-plan.md` (러너 프로필 `~/.claude-amx`에도 심볼릭 링크로 연결됨).
 
 ## 완료된 것
