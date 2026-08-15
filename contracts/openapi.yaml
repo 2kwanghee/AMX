@@ -2076,3 +2076,8 @@ components:
           type: string
           nullable: true
           description: Console deep-link base (AMX_LANGFUSE_UI_URL, else the API base, else null).
+        lastSyncedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Newest roll-up updated_at for this tenant; null before any sync.

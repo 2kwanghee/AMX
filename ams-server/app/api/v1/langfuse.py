@@ -76,4 +76,5 @@ def get_langfuse_usage(
         model_rows=model_rows,
         user_rows=user_rows,
         ui_url=langfuse_metrics.ui_url(),
+        last_synced_at=langfuse_metrics.last_synced_at(db, tenant_id),
     )

@@ -86,7 +86,21 @@ class Settings:
     langfuse_secret_key: str | None = None
     langfuse_tenant_id: str | None = None
     langfuse_ui_url: str | None = None
+    # Re-aggregation window. Clamped to a floor of 2 at the sweep: a window of 1
+    # rolls only today (still partial), so a UTC day's finalised total would never
+    # be re-fetched after it closed and its last live value would be stored
+    # forever — covering today+yesterday guarantees each day is re-rolled once
+    # closed. Default 3 leaves extra slack for late-settling Langfuse data.
     langfuse_metrics_window_days: int = 3
+    # The metrics sweep runs on its own cadence, independent of the 30s offline
+    # sweeper tick that drives it: a tick sooner than this many seconds since the
+    # last run returns immediately (process-local state; the advisory lock still
+    # coordinates across instances). Clamped to a floor of 60 at the sweep.
+    langfuse_poll_seconds: int = 300
+    # The user axis issues one Metrics API call per account email; a tenant with
+    # thousands of accounts would make the sweep unbounded, so it is capped — past
+    # this many accounts the sweep warns and rolls only the first N (sorted).
+    langfuse_max_accounts: int = 100
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -228,6 +242,8 @@ def load_settings() -> Settings:
         langfuse_metrics_window_days=int(
             os.environ.get("AMX_LANGFUSE_METRICS_WINDOW_DAYS", "3")
         ),
+        langfuse_poll_seconds=int(os.environ.get("AMX_LANGFUSE_POLL_SECONDS", "300")),
+        langfuse_max_accounts=int(os.environ.get("AMX_LANGFUSE_MAX_ACCOUNTS", "100")),
     )
 
 

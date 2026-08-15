@@ -3,14 +3,27 @@
 A periodic sweep polls the external Langfuse Metrics API and compacts recent UTC
 days into ``langfuse_usage_rollup`` so the console reads a local aggregate instead
 of proxying every console request to Langfuse. It mirrors the F5/usage-cost sweeps'
-shape — its own advisory-lock key (…07) lives in ``grpc/server.py`` — but the input
-is an HTTP API rather than the local ledger, so there is no watermark/cursor:
+shape — its own advisory-lock key (…07) — but the input is an HTTP API rather than
+the local ledger, so there is no watermark/cursor:
 
 * the roll-up re-aggregates a fixed sliding window of the most recent
-  ``langfuse_metrics_window_days`` (default 3) days every tick. Each row is an
+  ``langfuse_metrics_window_days`` (default 3, floor 2) days. Each row is an
   idempotent upsert on ``(tenant_id, day, dimension, key)``, so re-rolling recent
   days (whose Langfuse totals are still settling) is a recompute-replace, never a
-  duplicate.
+  duplicate. The floor of 2 is a correctness bound: a window of 1 rolls only today
+  (always partial), so a day's finalised total would never be re-fetched after it
+  closed — covering today+yesterday guarantees each day is re-rolled once closed.
+
+Cadence and locking are two stages, deliberately decoupled:
+
+* the sweep is driven by the shared 30s offline-sweeper tick, but runs its own work
+  only every ``langfuse_poll_seconds`` (default 300, floor 60) — a process-local
+  monotonic gate returns immediately on an under-cadence tick, so the external API
+  is not hammered every 30s.
+* all HTTP GETs run FIRST, outside any lock or transaction, collecting rows into
+  memory; only then is the …07 advisory lock taken for a short upsert+commit. This
+  keeps a slow/blocked Langfuse from holding a DB transaction or the cross-instance
+  lock open. The lock still makes exactly one instance apply the write per cadence.
 
 Two axes per day, both from the ``observations`` view:
 
@@ -37,11 +50,12 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -53,10 +67,15 @@ _logger = logging.getLogger("ams.langfuse")
 
 # Sweep advisory-lock key, the seventh sibling after offline (…01), sent-ack (…02),
 # billing (…03), rollup (…04), snapshot-retention (…05) and watermark-future (…06).
-# Transaction-scoped: released on the final commit/rollback below.
+# Transaction-scoped: released on the upsert commit below.
 _LANGFUSE_SWEEP_LOCK_KEY = 0x414D580F07
 
 _METRICS_PATH = "/api/public/v2/metrics"
+
+# Process-local cadence gate: the monotonic time of the last run that passed the
+# gate, or None before the first. Shared across instances is unnecessary — the
+# advisory lock already coordinates the write; this only throttles one process.
+_LAST_POLL_MONOTONIC: float | None = None
 
 # observations-view measures the sweep pulls. Response keys are "<aggregation>_<measure>";
 # count uses the "count" aggregation, so its key is "count_count".
@@ -66,6 +85,11 @@ _TOKEN_MEASURES = ("inputTokens", "outputTokens", "totalTokens")
 def _now() -> datetime:
     # Indirected so tests can pin the sliding window.
     return datetime.now(UTC)
+
+
+def _monotonic() -> float:
+    # Indirected so tests can drive the cadence gate.
+    return time.monotonic()
 
 
 def _floor_day(dt: datetime) -> datetime:
@@ -137,15 +161,18 @@ def _has_activity(values: dict) -> bool:
     )
 
 
-def _rollup_one_day(
-    db: Session,
+def _fetch_one_day(
     client: httpx.Client,
     settings,
     tenant_id: uuid.UUID,
     day: datetime,
     emails: list[str],
-) -> int:
-    """Aggregate one UTC day (model + user axes) and stage the upserts. No commit."""
+) -> list[dict]:
+    """Fetch one UTC day (model + user axes) from the Metrics API into row dicts.
+
+    Pure I/O — no DB. Raises ``httpx.HTTPError`` on transport/status failure or
+    ``ValueError`` (incl. ``json.JSONDecodeError``) on an unparseable body.
+    """
     from_ts = _iso(day)
     to_ts = _iso(day + timedelta(days=1))
     day_date = day.date()
@@ -172,9 +199,13 @@ def _rollup_one_day(
         if _has_activity(v):
             values.append(v)
 
+    return values
+
+
+def _upsert(db: Session, values: list[dict]) -> int:
+    """Idempotent recompute-replace of the collected rows. Caller owns the txn."""
     if not values:
         return 0
-
     now = _now()
     stmt = pg_insert(LangfuseUsageRollup).values(
         [{**v, "updated_at": now} for v in values]
@@ -199,18 +230,28 @@ def _rollup_one_day(
 def sweep_langfuse_metrics(db: Session, *, client: httpx.Client | None = None) -> int:
     """Re-roll the recent Langfuse window into ``langfuse_usage_rollup``. Returns rows upserted.
 
-    A no-op (returns 0) unless all four Langfuse settings are present. One
-    transaction guarded by the …07 advisory lock: at most one instance runs the
-    sweep per tick, and the lock releases on the final commit. An HTTP failure
-    aborts the remaining days without propagating; the days already staged are
-    still committed (idempotent, so a partial tick is re-rolled next tick).
+    A no-op (returns 0) unless all four Langfuse settings are present and the
+    process-local cadence gate (``langfuse_poll_seconds``) has elapsed. Two stages:
+    every HTTP GET runs first, outside any lock/transaction, into memory; then the
+    …07 advisory lock guards a short upsert+commit (one instance applies the write
+    per cadence). A fetch failure (HTTP or bad JSON) aborts the remaining days
+    without propagating; the days already fetched are still upserted (idempotent, so
+    a partial tick is re-rolled next cadence).
     """
+    global _LAST_POLL_MONOTONIC
+
     settings = get_settings()
     if not settings.langfuse_enabled:
         return 0
 
-    if not _try_advisory_xact_lock(db, _LANGFUSE_SWEEP_LOCK_KEY):
+    # Cadence gate (process-local): skip a tick that arrives sooner than the poll
+    # interval since the last run, so the shared 30s sweeper does not re-poll every
+    # tick. Recorded on entry (when due), independent of the run's outcome.
+    poll_seconds = max(60, settings.langfuse_poll_seconds)
+    now_m = _monotonic()
+    if _LAST_POLL_MONOTONIC is not None and now_m - _LAST_POLL_MONOTONIC < poll_seconds:
         return 0
+    _LAST_POLL_MONOTONIC = now_m
 
     try:
         tenant_id = uuid.UUID(settings.langfuse_tenant_id)
@@ -220,37 +261,55 @@ def sweep_langfuse_metrics(db: Session, *, client: httpx.Client | None = None) -
         )
         return 0
 
-    window = max(1, settings.langfuse_metrics_window_days)
+    # Floor of 2 (see module docstring): a window of 1 never re-rolls a closed day.
+    window = max(2, settings.langfuse_metrics_window_days)
     today = _floor_day(_now())
     days = [today - timedelta(days=i) for i in range(window)]
 
     emails = sorted(
         set(db.scalars(select(Account.email).where(Account.tenant_id == tenant_id)))
     )
+    cap = settings.langfuse_max_accounts
+    if len(emails) > cap:
+        _logger.warning(
+            "langfuse metrics sweep: tenant has %d accounts, exceeding the cap of "
+            "%d; rolling only the first %d (sorted)",
+            len(emails),
+            cap,
+            cap,
+        )
+        emails = emails[:cap]
 
+    # Stage 1 — all HTTP, no lock, no transaction. Collect into memory.
     owns_client = client is None
     client = client or httpx.Client(timeout=settings.http_timeout_seconds)
-    upserted = 0
+    collected: list[dict] = []
     try:
         for day in days:
             try:
-                upserted += _rollup_one_day(db, client, settings, tenant_id, day, emails)
-            except httpx.HTTPError as exc:
+                collected.extend(_fetch_one_day(client, settings, tenant_id, day, emails))
+            except (httpx.HTTPError, ValueError) as exc:
                 # Bare class name: an httpx error string can echo the request URL,
-                # and the request carries the Basic-auth secret key (§7). The day
-                # that failed never reached its insert (values are staged only after
-                # the whole day is fetched), so committing here persists exactly the
-                # days that fully succeeded.
+                # and the request carries the Basic-auth secret key (§7). The days
+                # already fetched are kept; the rest of this cadence is skipped.
                 _logger.warning(
-                    "langfuse metrics sweep: HTTP error on %s (%s); aborting tick",
+                    "langfuse metrics sweep: fetch error on %s (%s); aborting tick",
                     day.date(),
                     type(exc).__name__,
                 )
                 break
-        db.commit()
     finally:
         if owns_client:
             client.close()
+
+    if not collected:
+        return 0
+
+    # Stage 2 — short lock + upsert + commit. The lock releases on commit.
+    if not _try_advisory_xact_lock(db, _LANGFUSE_SWEEP_LOCK_KEY):
+        return 0
+    upserted = _upsert(db, collected)
+    db.commit()
     return upserted
 
 
@@ -276,6 +335,19 @@ def read_rollup(
                 LangfuseUsageRollup.dimension,
                 LangfuseUsageRollup.key,
             )
+        )
+    )
+
+
+def last_synced_at(db: Session, tenant_id: uuid.UUID) -> datetime | None:
+    """Freshness signal: the newest ``updated_at`` across this tenant's roll-up rows.
+
+    ``None`` when the sweep has never written a row for the tenant — the console
+    reads it as "not yet synced" rather than a hard error.
+    """
+    return db.scalar(
+        select(func.max(LangfuseUsageRollup.updated_at)).where(
+            LangfuseUsageRollup.tenant_id == tenant_id
         )
     )
 

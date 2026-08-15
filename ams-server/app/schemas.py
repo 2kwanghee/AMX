@@ -501,3 +501,5 @@ class LangfuseUsageResponse(Wire):
     user_rows: list[LangfuseUserRow]
     # Console deep-link base (AMX_LANGFUSE_UI_URL, else the API base, else null).
     ui_url: str | None = None
+    # Freshness: newest roll-up updated_at for this tenant; null before any sync.
+    last_synced_at: datetime | None = None

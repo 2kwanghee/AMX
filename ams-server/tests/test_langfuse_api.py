@@ -74,6 +74,8 @@ def test_response_splits_model_and_user_rows(client, app_env):
     assert body["userRows"][0]["totalTokens"] == 50
     # No AMX_LANGFUSE_* configured in the test env -> uiUrl null.
     assert body["uiUrl"] is None
+    # Rows exist -> a freshness timestamp is reported.
+    assert body["lastSyncedAt"] is not None
 
 
 def test_range_filter_is_inclusive(client, app_env):
@@ -97,6 +99,8 @@ def test_other_tenant_is_empty(client, app_env):
     assert r.status_code == 200
     assert r.json()["modelRows"] == []
     assert r.json()["userRows"] == []
+    # No rows for this tenant -> not yet synced.
+    assert r.json()["lastSyncedAt"] is None
 
 
 def test_ui_url_falls_back_to_base_url(client, app_env, monkeypatch):
