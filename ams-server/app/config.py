@@ -101,6 +101,21 @@ class Settings:
     # thousands of accounts would make the sweep unbounded, so it is capped — past
     # this many accounts the sweep warns and rolls only the first N (sorted).
     langfuse_max_accounts: int = 100
+    # P5 경보 웹훅(BACKLOG G41). AMS의 모든 경보 open/resolve 전이를 범용 웹훅으로
+    # 내보낸다. URL과 시크릿이 **둘 다** 설정돼야 활성(webhook_enabled); 하나라도
+    # 없으면 아웃박스 스테이징 자체를 건너뛰어 완전 무부작용이다. 시크릿은 발송
+    # 서명(HMAC)에만 쓰이고 로그에 남기지 않는다.
+    alert_webhook_url: str | None = None
+    alert_webhook_secret: str | None = None
+    # P5 Langfuse 실측 임계값 경보(langfuse_alerts 스윕, langfuse 활성 게이트 공유).
+    # usage_spike: 당일 총 토큰이 전일 대비 이 배수를 초과하면 open. 전일이 0이면
+    # 배수가 무의미하므로 절대 하한(spike_min_tokens)을 초과할 때만 open.
+    alert_spike_factor: float = 3.0
+    alert_spike_min_tokens: int = 1_000_000
+    # stale: 롤업 max(updated_at)이 이 분(minute)을 넘겨 정체되면 open.
+    alert_stale_minutes: int = 60
+    # latency: Metrics API latency p95(최근 1시간)가 이 밀리초를 초과하면 open.
+    alert_latency_p95_ms: float = 60_000.0
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -116,6 +131,10 @@ class Settings:
             and self.langfuse_secret_key
             and self.langfuse_tenant_id
         )
+
+    @property
+    def alert_webhook_enabled(self) -> bool:
+        return bool(self.alert_webhook_url and self.alert_webhook_secret)
 
 
 def _pubkey_from_seed(seed_b64: str) -> str:
@@ -244,6 +263,14 @@ def load_settings() -> Settings:
         ),
         langfuse_poll_seconds=int(os.environ.get("AMX_LANGFUSE_POLL_SECONDS", "300")),
         langfuse_max_accounts=int(os.environ.get("AMX_LANGFUSE_MAX_ACCOUNTS", "100")),
+        alert_webhook_url=os.environ.get("AMX_ALERT_WEBHOOK_URL", "").strip() or None,
+        alert_webhook_secret=os.environ.get("AMX_ALERT_WEBHOOK_SECRET", "").strip() or None,
+        alert_spike_factor=float(os.environ.get("AMX_ALERT_SPIKE_FACTOR", "3.0")),
+        alert_spike_min_tokens=int(
+            os.environ.get("AMX_ALERT_SPIKE_MIN_TOKENS", "1000000")
+        ),
+        alert_stale_minutes=int(os.environ.get("AMX_ALERT_STALE_MINUTES", "60")),
+        alert_latency_p95_ms=float(os.environ.get("AMX_ALERT_LATENCY_P95_MS", "60000")),
     )
 
 
