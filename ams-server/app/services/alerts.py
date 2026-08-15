@@ -393,6 +393,7 @@ def open_system_alert(
     kind: str,
     severity: str,
     detail: dict | None = None,
+    stage_webhook: bool = True,
 ) -> None:
     """Open/refresh a system-scoped alert (``server_id`` NULL, tenant-scoped key).
 
@@ -400,6 +401,10 @@ def open_system_alert(
     전체를 대상으로 하는 경보용. ``_open_watermark_future``와 같은 구조(acked-aware,
     부분 유니크 인덱스에 대한 ``INSERT ... ON CONFLICT``)이며, 신규 open 전이면 웹훅
     아웃박스에 스테이징한다. caller가 커밋한다.
+
+    ``stage_webhook=False``는 웹훅 발송 실패로 폐기될 때 여는 ``alert_webhook_dropped``
+    셀프 경보 전용이다 — 그 경보까지 웹훅 아웃박스에 실으면 발송 실패→셀프 경보→발송
+    실패의 무한 재귀가 되므로 스테이징을 끊는다.
     """
     key = _system_dedupe_key(tenant_id, kind)
     acked = db.scalar(
@@ -424,7 +429,7 @@ def open_system_alert(
         set_={"detail": stmt.excluded.detail},
     )
     row = db.execute(stmt.returning(Alert.id, text("xmax = 0"))).first()
-    if row is not None and row[1]:
+    if stage_webhook and row is not None and row[1]:
         _stage_webhook(
             db,
             alert_id=row[0],

@@ -107,6 +107,11 @@ class Settings:
     # 서명(HMAC)에만 쓰이고 로그에 남기지 않는다.
     alert_webhook_url: str | None = None
     alert_webhook_secret: str | None = None
+    # 웹훅 드레인은 offline 스위퍼와 분리된 전용 태스크로 돈다 — 불량 수신자가 오프라인
+    # 탐지·명령 복구를 지연시키지 못하게. 자체 주기(기본 30초, 최소 5로 클램프)와, 발송
+    # POST에만 쓰는 짧은 타임아웃(http_timeout과 분리, 기본 5초)을 둔다.
+    alert_webhook_drain_seconds: int = 30
+    alert_webhook_timeout_seconds: float = 5.0
     # P5 Langfuse 실측 임계값 경보(langfuse_alerts 스윕, langfuse 활성 게이트 공유).
     # usage_spike: 당일 총 토큰이 전일 대비 이 배수를 초과하면 open. 전일이 0이면
     # 배수가 무의미하므로 절대 하한(spike_min_tokens)을 초과할 때만 open.
@@ -265,6 +270,12 @@ def load_settings() -> Settings:
         langfuse_max_accounts=int(os.environ.get("AMX_LANGFUSE_MAX_ACCOUNTS", "100")),
         alert_webhook_url=os.environ.get("AMX_ALERT_WEBHOOK_URL", "").strip() or None,
         alert_webhook_secret=os.environ.get("AMX_ALERT_WEBHOOK_SECRET", "").strip() or None,
+        alert_webhook_drain_seconds=int(
+            os.environ.get("AMX_ALERT_WEBHOOK_DRAIN_SECONDS", "30")
+        ),
+        alert_webhook_timeout_seconds=float(
+            os.environ.get("AMX_ALERT_WEBHOOK_TIMEOUT_SECONDS", "5")
+        ),
         alert_spike_factor=float(os.environ.get("AMX_ALERT_SPIKE_FACTOR", "3.0")),
         alert_spike_min_tokens=int(
             os.environ.get("AMX_ALERT_SPIKE_MIN_TOKENS", "1000000")

@@ -75,6 +75,8 @@ ALERT_KINDS = (
     "langfuse_usage_spike",
     "langfuse_stale",
     "langfuse_latency",
+    # 웹훅 발송이 재시도 상한을 넘겨 폐기될 때 여는 셀프 경보(관측용, system 범위).
+    "alert_webhook_dropped",
 )
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")
@@ -719,6 +721,10 @@ class AlertWebhookOutbox(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # 리스 소유 토큰: 드레인 스윕이 만기 행을 예약할 때 부여한다. finalize는 이 토큰이
+    # 자신이 부여한 값과 일치하는 행만 삭제/백오프한다 — 리스가 만료돼 다른 인스턴스가
+    # 재예약(새 토큰)했다면 소유가 아니므로 no-op이 되어 이중 처리를 막는다.
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     # 발송 시도 횟수와 다음 시도 가능 시각(지수 백오프의 앵커). 신규 행은 즉시 발송
     # 대상이 되도록 next_attempt_at 기본값을 now()로 둔다.
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))

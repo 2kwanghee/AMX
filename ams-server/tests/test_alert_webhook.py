@@ -57,11 +57,14 @@ def _outbox() -> list[AlertWebhookOutbox]:
         )
 
 
-def _insert_outbox(*, attempt=0, next_attempt_at=None, status="open", kind="all_exhausted"):
+def _insert_outbox(
+    *, attempt=0, next_attempt_at=None, status="open", kind="all_exhausted",
+    tenant_id=None, lease_token=None,
+):
     with _sm() as db:
         row = AlertWebhookOutbox(
             alert_id=uuid.uuid4(),
-            tenant_id=uuid.uuid4(),
+            tenant_id=tenant_id or uuid.uuid4(),
             server_id=None,
             kind=kind,
             status=status,
@@ -69,11 +72,23 @@ def _insert_outbox(*, attempt=0, next_attempt_at=None, status="open", kind="all_
             occurred_at=datetime.now(UTC),
             attempt=attempt,
             next_attempt_at=next_attempt_at or datetime.now(UTC),
+            lease_token=lease_token,
         )
         db.add(row)
         db.commit()
         db.refresh(row)
         return row.id
+
+
+def _dropped_open(tenant_id):
+    with _sm() as db:
+        return db.scalar(
+            select(Alert).where(
+                Alert.tenant_id == tenant_id,
+                Alert.kind == "alert_webhook_dropped",
+                Alert.status == "open",
+            )
+        )
 
 
 # -- staging: open/resolve 전이에서만 -----------------------------------------
@@ -190,11 +205,12 @@ def test_drain_failure_backoff(app_env, monkeypatch):
     assert rows[0].next_attempt_at > before  # 뒤로 미뤄짐
 
 
-# -- drain: 상한 초과 폐기 ----------------------------------------------------
-def test_drain_discards_over_cap(app_env, monkeypatch):
+# -- drain: 상한 초과 폐기 + 셀프 경보 ----------------------------------------
+def test_drain_discards_over_cap_and_self_alerts(app_env, monkeypatch):
     _enable(monkeypatch)
+    tenant_id = uuid.uuid4()
     # 다음 실패면 attempt가 상한에 도달 → 폐기.
-    _insert_outbox(attempt=alert_webhook._MAX_ATTEMPTS - 1,
+    _insert_outbox(attempt=alert_webhook._MAX_ATTEMPTS - 1, tenant_id=tenant_id,
                    next_attempt_at=datetime.now(UTC) - timedelta(seconds=1))
 
     def handler(request):
@@ -204,7 +220,56 @@ def test_drain_discards_over_cap(app_env, monkeypatch):
         n = alert_webhook.sweep_alert_webhook(db, client=_mock_client(handler))
 
     assert n == 0
-    assert _outbox() == []  # 폐기됨(무한 적재 금지)
+    assert _outbox() == []  # 폐기됨(무한 적재 금지) — 셀프 경보도 웹훅으로 재귀하지 않음
+    dropped = _dropped_open(tenant_id)
+    assert dropped is not None  # 관측용 alert_webhook_dropped 셀프 경보 open
+    assert dropped.server_id is None
+
+
+# -- drain: 리스 소유 검증(소유 아니면 no-op) --------------------------------
+def test_finalize_respects_lease_ownership(app_env, monkeypatch):
+    _enable(monkeypatch)
+    token_a, token_b = uuid.uuid4(), uuid.uuid4()
+    row_id = _insert_outbox(lease_token=token_a)
+
+    # 다른 토큰(재예약된 것처럼)으로 finalize → 소유 아님 → 삭제하지 않음.
+    with _sm() as db:
+        alert_webhook._finalize(db, [row_id], [], token_b)
+    assert len(_outbox()) == 1
+
+    # 자신이 부여한 토큰으로 finalize → 삭제.
+    with _sm() as db:
+        alert_webhook._finalize(db, [row_id], [], token_a)
+    assert _outbox() == []
+
+
+# -- 전용 드레인 태스크: 틱 후 취소 정리 -------------------------------------
+def test_drainer_task_ticks_and_cancels(monkeypatch):
+    import asyncio
+
+    from app.grpc import server as grpc_server
+
+    calls = []
+
+    def _stub(session_factory):
+        calls.append(1)
+        return 0
+
+    monkeypatch.setattr(grpc_server, "_sweep_alert_webhook_once", _stub)
+
+    async def _run():
+        task = asyncio.create_task(
+            grpc_server._alert_webhook_drainer(None, interval=0.01)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert len(calls) >= 1  # 전용 루프가 자체 주기로 최소 한 번 드레인 시도
 
 
 # -- drain: 비활성 무부작용 ---------------------------------------------------

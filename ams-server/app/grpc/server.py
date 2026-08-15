@@ -1229,19 +1229,42 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("langfuse alert sweep iteration failed", exc_info=False)
-        # P5 경보 웹훅(BACKLOG G41): 아홉 번째 형제 스윕이 alert_webhook_outbox를 HTTP
-        # POST로 드레인한다. HTTP는 자체 락(…08) 밖에서 하고, 격리 try/except로
-        # 독립적이다(URL/시크릿 미설정 시 no-op).
+        # NOTE: 경보 웹훅 드레인은 이 공유 루프에 두지 않는다 — 불량 수신자로 인한 HTTP
+        # 지연이 오프라인 탐지·명령 복구를 밀어내지 못하게, 전용 백그라운드 태스크
+        # (_alert_webhook_drainer, 자체 주기)로 분리했다. 락 …08은 그대로 유지한다.
+
+
+ALERT_WEBHOOK_DRAIN_MIN_SECONDS = 5.0
+
+
+async def _alert_webhook_drainer(
+    session_factory: sessionmaker[Session],
+    *,
+    interval: float | None = None,
+) -> None:
+    """경보 웹훅 아웃박스를 드레인하는 전용 루프(offline 스위퍼와 분리).
+
+    자체 주기(``AMX_ALERT_WEBHOOK_DRAIN_SECONDS``, 최소 5초 클램프)로 돌며, 불량 수신자의
+    느린 POST가 오프라인 탐지·명령 복구 같은 다른 배경 작업을 지연시키지 못하게 한다.
+    드레인은 전용 락 …08을 잡아 다중 인스턴스에서 한 인스턴스만 발송한다(무설정 시 no-op).
+    한 반복의 실패는 로그만 남기고 루프를 계속한다.
+    """
+    if interval is None:
+        from app.config import get_settings
+
+        interval = max(
+            ALERT_WEBHOOK_DRAIN_MIN_SECONDS, get_settings().alert_webhook_drain_seconds
+        )
+    while True:
+        await asyncio.sleep(interval)
         try:
-            webhooks_sent = await asyncio.to_thread(
-                _sweep_alert_webhook_once, session_factory
-            )
-            if webhooks_sent:
-                _logger.info("alert webhook sweeper delivered %d event(s)", webhooks_sent)
+            sent = await asyncio.to_thread(_sweep_alert_webhook_once, session_factory)
+            if sent:
+                _logger.info("alert webhook drainer delivered %d event(s)", sent)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
-            _logger.warning("alert webhook sweep iteration failed", exc_info=False)
+        except Exception:  # noqa: BLE001 - a drain failure must not kill the process
+            _logger.warning("alert webhook drain iteration failed", exc_info=False)
 
 
 # F3 multi-instance: the sweeps below are idempotent, but running them from every
@@ -1341,10 +1364,13 @@ async def serve(port: int = DEFAULT_PORT) -> None:
     await server.start()
     _logger.info("AMS gRPC control plane listening on :%s (%s)", port, mode)
     sweeper = asyncio.create_task(_offline_sweeper(servicer._sm))
+    # 웹훅 드레인은 offline 스위퍼와 독립된 전용 태스크로 돈다(불량 수신자 격리).
+    webhook_drainer = asyncio.create_task(_alert_webhook_drainer(servicer._sm))
     try:
         await server.wait_for_termination()
     finally:
         sweeper.cancel()
+        webhook_drainer.cancel()
 
 
 def main() -> None:
