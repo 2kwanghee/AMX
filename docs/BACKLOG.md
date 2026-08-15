@@ -2,7 +2,7 @@
 
 > P0~P4 각 PR·리뷰에서 이월한 항목과 §8 미해결 결정을 한 곳에 정리한 운영 백로그.
 > 각 항목은 **출처 Phase · 심각도 · 처리 시점/의존성**을 명시한다. §8(설계 결정)과 상호참조.
-> 최종 갱신: 2026-08-08 (P4 병합 직후).
+> 최종 갱신: 2026-08-15 (Langfuse 모니터링 트랙 #69~#81 병합 직후). G27 해소 반영, G36~G40 이월.
 
 ## 진행 현황
 P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완료·병합**. P5 SaaS = 미착수(장기).
@@ -99,6 +99,11 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G33 | **openapi.yaml drift 일괄 해소** — `:recall` force/403(D1)·billing 경로(F5)·alerts 경로(P4)가 openapi 미반영. 계약 문서 일괄 동기화 필요 | D1 리뷰 B · F5 · P4 |
 | G34 | D1 이월 — force recall 감사 기록 부재(감사 테이블 자체 없음, 상용 전 검토) · alerts.py docstring recall_failed 미반영 · 0011 downgrade는 recall_failed 행 존재 시 CHECK 재생성 실패 가능 · stale ack이 pending_command_id/last_error clobber(D1 이전부터, deliver 포함 공통) · alerts.resolve tenant 필터 부재 · 경보 ack 후 재실패 미재부상(기존 설계) | D1 리뷰 A·B |
 | G35 | D2 이월 — switch_now 최종 실패의 last_error 기록 vs `_revert_assignment_on_send_failure` docstring 문구 불일치(경미) · switch_now 실패에 account-scoped 경보를 여는 시맨틱 검토 여지(다음 명령 CONVERGED로 해소돼 결함 아님) | D2 리뷰 B |
+| G36 | **tsamx run 세션 프로필 Langfuse 추적 공백** — 프로필 부트스트랩(#81)은 러너 홈(`~/.claude-amx`)에만 Stop 훅을 심는다. tsamx가 세션마다 만드는 임시 세션 프로필은 `~/.claude` 심링크 `settings.json`을 쓰고 Langfuse env도 공유하지 않아 그 경로로 직접 뜬 세션은 추적에서 빠진다(DEPLOYMENT-RUNNER §9 문서화). `amx` 경유는 해당 없음. 세션 생성 훅 개입은 별도 설계 | #81 · Langfuse 인수인계 남은작업6 |
+| G37 | **Langfuse Metrics API grouped 행 상한 미확인** — 모델 종수가 매우 많은 날 grouped 결과가 캡되면 일부 모델이 조용히 누락될 수 있음(미검증 가설) | #78 · Langfuse 인수인계 결함 |
+| G38 | **미지 usageType 로그 반복** — usageByType 매핑에 없는 `usageType` 값은 경고 로그만 남기고 무시한다(§5.6.1). Langfuse가 새 usageType를 내면 매 스윕마다 경고가 반복돼 로그 노이즈가 될 수 있음 — 매핑 확장 또는 1회성 억제 검토 | #80 |
+| G39 | **사라진 key의 stale 롤업 행 미삭제** — `langfuse_usage_rollup` upsert는 이번 fetch에 있는 key만 갱신하고 사라진 key의 과거 행은 남긴다. observations가 append-only라 실무 위험은 낮음 | #78 · Langfuse 인수인계 결함 |
+| G40 | **러너 자동화의 개인 메모리 write 오염 표면** — 겸용 PC 부트스트랩이 개인 프로필 `projects/<slug>/memory`를 러너 홈에 **양방향** 링크하므로, 러너 자동화 세션의 write가 개인 메모리에 반영되고 개인 메모리 내용이 Langfuse 트레이스로 나갈 수 있다(DEPLOYMENT-RUNNER §9 "공유의 대가"에 문서화, slug 제외로 회피 가능). 러너 자동화 정책 차원의 검토 필요 | #81 |
 
 ---
 
