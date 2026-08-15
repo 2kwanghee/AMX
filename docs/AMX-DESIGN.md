@@ -634,22 +634,34 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
 - **훅**: Bash 실행 직전 stdin으로 받은 payload의 `tool_input.command`를 보수적인 위험
   패턴 목록과 대조한다. 감지·통보 전용이라 **차단하지 않고 항상 `exit 0`**으로 끝나므로
   Claude 동작은 불변이다. 통보 실패도 조용히 삼켜(2초 타임아웃) 세션을 느리게/실패하게
-  하지 않는다. `AMX_DANGER_INGEST_URL`/`AMX_DANGER_INGEST_TOKEN`이 없으면 즉시 무동작.
-  vendored `langfuse_hook.py`와 무관한 자체 파일이며 표준 라이브러리만 쓴다.
+  하지 않는다. 통보 POST는 데몬 스레드+`join(2초)`로 감싸 DNS 지연까지 포함해 하드
+  2초로 경계한다(스레드는 데몬이라 방치돼도 무해). `AMX_DANGER_INGEST_URL`/
+  `AMX_DANGER_INGEST_TOKEN`이 없으면 즉시 무동작. vendored `langfuse_hook.py`와 무관한
+  자체 파일이며 표준 라이브러리만 쓴다.
+- **패턴 판정**: `rm` 재귀+강제 삭제는 정규식이 아니라 **선형 시간 토큰 검사**로 잡는다 —
+  명령을 공백 분할해 `rm` 뒤 `-` 시작 플래그에서 r·f 동시 포함(또는 `--recursive`·
+  `--force`)을 본다. 정규식 접근은 ReDoS(`rm -x -x …` 백트래킹)와 `rm -i`류 오탐을
+  낳아 폐기했다. 나머지 패턴(sudo·mkfs·dd of=/dev·chmod -R 777·curl|sh·force push)은
+  선형 룩어헤드 정규식이다. `_match` 진입 전 명령이 8KB를 넘으면 앞 8KB만 검사하고
+  payload에 `truncated` 플래그를 싣는다(sha256은 원문 전체로 계산).
 - **원문 비전송**: 페이로드는 `{patternName, commandSha256, commandMasked(패턴 매치
-  키워드만 남기고 나머지 마스킹, 200자 이내), sessionId, cwd, hostname, userId?, ts}`.
-  원문 명령은 전송·저장 어디에도 남지 않는다. 정규식은 셸을 파싱하지 않으므로 인용
-  문자열 오탐·난독화 누락을 완전히는 못 막는다(조기경보이지 방어선이 아님).
+  키워드만 남기고 나머지 마스킹, 200자 이내), truncated, sessionId, cwd, hostname,
+  userId?, ts}`. 원문 명령은 전송·저장 어디에도 남지 않는다. 정규식/토큰 검사 모두 셸을
+  완전히 파싱하지는 않으므로 인용 문자열 오탐·난독화 누락을 완전히는 못 막는다(조기경보이지
+  방어선이 아님).
 - **수신**: `POST /api/v1/ingest/danger-command`. 무인 훅 호출이라 TenantScope가 아니라
-  정적 토큰(`X-AMX-Ingest-Token` == `AMX_DANGER_INGEST_TOKEN`)만으로 인증한다. 토큰
-  미설정 시 404로 비활성, 오토큰 401. 폭주 방어로 전역 고정창 레이트 제한
-  (`AMX_DANGER_RATE_LIMIT_PER_MIN` 기본 120, 초과 429·로그).
-- **경보 kind `dangerous_command`**(alembic 0023): 시스템 범위(`server_id` NULL, 고정
-  시스템 테넌트 nil UUID). dedupe는 `(hostname, patternName, commandSha256)` 기반이라
-  같은 호스트의 같은 명령 반복은 새 경보를 만들지 않고 detail만 갱신한다. **auto-resolve
-  없음**(이벤트성 — 관리자가 ack/resolve). §5.6.2 웹훅 프리미티브(`open_event_alert`)를
-  통과하므로 아웃박스에도 스테이징돼 웹훅으로 함께 나간다(알림이 목적). detail에는
-  마스킹본·해시·세션·호스트만 담고 원문은 저장하지 않는다.
+  정적 토큰(`X-AMX-Ingest-Token` == `AMX_DANGER_INGEST_TOKEN`)만으로 인증한다. 토큰 또는
+  귀속 테넌트 미설정 시 404로 비활성, 오토큰 401. 무자격 도달 경로라 본문 파싱 전
+  Content-Length 상한(64KB, 초과 413)으로 값싸게 거른다. 폭주 방어로 전역 고정창 레이트
+  제한(`AMX_DANGER_RATE_LIMIT_PER_MIN` 기본 120, 초과 429·로그).
+- **경보 kind `dangerous_command`**(alembic 0023): 서버에 매이지 않는 시스템 범위
+  (`server_id` NULL)이되 **실 테넌트**(`AMX_DANGER_TENANT_ID`, 없으면 `AMX_LANGFUSE_TENANT_ID`
+  폴백)에 귀속시켜 콘솔 경보 목록·ack 동선에 정상 노출한다(langfuse 시스템 경보 관례와
+  정렬). dedupe는 `(tenant, hostname, patternName, commandSha256)` 기반이라 같은 호스트의
+  같은 명령 반복은 새 경보를 만들지 않고 detail만 갱신한다. **auto-resolve 없음**(이벤트성 —
+  관리자가 ack/resolve). §5.6.2 웹훅 프리미티브(`open_event_alert`)를 통과하므로 아웃박스에도
+  스테이징돼 웹훅으로 함께 나간다(알림이 목적). detail에는 마스킹본·해시·세션·호스트만
+  담고 원문은 저장하지 않는다.
 
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 

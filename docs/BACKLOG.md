@@ -34,6 +34,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | C1 | ~~AccountEvent 전달 무손실화~~ **대부분 기구현** | P3 결정8 · 리뷰 A·B | 중→하 | "메모리 전용"은 stale — 디스크 outbox 기구현: W1(재시작 시 `outbox.log` 리로드)·W2(전송 확인 후에만 del 톰스톤), `reporter/outboxlog.go`+`outbox_disk_test.go`. 2026-08-09 소급 확인(stale 4번째 사례). 잔존 창 = stream.Send 성공 후 AMS 커밋 전 crash(중복/유실)뿐 — 결정8 수용, 완전 무손실은 앱레벨 ack 재설계(G12·G30과 통합, 별도) |
 | C2 | ~~UnwrapKEK per-agent 래핑~~ **구현 완료** | P2 | 중 | 세션 KEK를 에이전트별 ephemeral X25519 **NaCl sealed box**로 봉인(c2-kek-wrap 병합, `crypto.go:199-214` UnwrapKEK가 raw KEK·타 키 봉인·변조 거부, §7 In-transit 반영). 2026-08-09 소급 확인 — 이 행이 stale였음 |
 | C3 | **BFF allowlist %2f 우회** | P4 ADVERSARY | 낮(하드닝) | P4에서 %2f/%5c 명시 거부 + 디코드 후 검사로 **처리 완료**. 향후 allowlisted prefix 아래 라우트 추가 시 재검토 |
+| C4 | **위험명령 경보 acked 무발신 정책** | P5 경로 d · 1차 리뷰 | 낮(정책) | `open_event_alert`은 `open_alert` 관례를 이어 같은 dedupe 키의 경보가 이미 **acked** 상태면 detail만 갱신하고 웹훅을 다시 스테이징하지 않는다(재알람 억제). 지속 조건성 경보엔 맞지만, `dangerous_command`는 **이벤트성 보안 경보**라 관리자가 한 번 ack한 뒤 같은 호스트에서 같은 위험 명령이 재발해도 알림이 안 나가는 창이 생긴다. 이벤트성 경보엔 acked여도 재발 시 재발신하는 편이 맞는지 정책 검토 필요(대안: kind별 재발신 정책 플래그, 또는 dedupe에 시간창 추가). 현 동작은 코드 진실이며 기능을 되돌리지 않음 |
 
 ## D. 회복 엣지 (P3 reconcile로 부분 완화, 완전한 처리는 후속)
 

@@ -561,21 +561,24 @@ bash deploy/fullstack-run.sh restart server --lan
 ```sh
 cat >> ~/AMX/.amx-dev/dev.env <<'ENV'
 AMX_DANGER_INGEST_TOKEN=<32바이트+ 무작위 토큰, 러너 훅과 동일 값>
+AMX_DANGER_TENANT_ID=<경보를 매달 테넌트 UUID; 생략 시 AMX_LANGFUSE_TENANT_ID 사용>
 ENV
 bash deploy/fullstack-run.sh restart server --lan
 ```
 
 - 이 엔드포인트는 관리자 인증이나 테넌트 범위를 타지 않는다. 사람이 아니라 무인 훅이
-  호출하므로 정적 토큰 하나(`X-AMX-Ingest-Token`)로만 막는다. 토큰이 **설정되지 않으면
-  경로 자체가 비활성**(404)이라, 안 켠 서버에서는 이 경로가 없는 것처럼 보인다. 토큰이
-  틀리면 401이다.
-- 경보는 시스템 범위(특정 서버에 매이지 않음)이고 `(hostname, patternName, commandSha256)`로
-  중복을 흡수한다. 같은 호스트에서 같은 위험 명령이 반복돼도 새 경보로 쌓이지 않고 기존
-  경보만 갱신된다. 자동 해소는 없다 — 관리자가 확인하고 ack/resolve 한다.
+  호출하므로 정적 토큰 하나(`X-AMX-Ingest-Token`)로만 막는다. **토큰과 귀속 테넌트가 둘 다
+  있어야** 켜진다. 하나라도 없으면 경로가 비활성(404)이라 안 켠 서버에서는 이 경로가 없는
+  것처럼 보인다. 토큰이 틀리면 401이다.
+- 경보는 서버에 매이지 않는 시스템 범위지만 **실 테넌트**(`AMX_DANGER_TENANT_ID`, 없으면
+  `AMX_LANGFUSE_TENANT_ID`)에 귀속돼 콘솔 경보 목록·ack 동선에 정상 노출된다. 중복은
+  `(tenant, hostname, patternName, commandSha256)`로 흡수하므로 같은 호스트의 같은 위험
+  명령이 반복돼도 새 경보로 쌓이지 않고 기존 경보만 갱신된다. 자동 해소는 없다 — 관리자가
+  확인하고 ack/resolve 한다.
 - 저장되는 건 마스킹본·해시·세션·호스트뿐이고 **원문 명령은 남지 않는다**.
 - 폭주 방어로 전역 분당 상한을 둔다. `AMX_DANGER_RATE_LIMIT_PER_MIN`(기본 120)을 넘는
   통보는 429로 떨어뜨리고 로그만 남긴다. 프로세스 로컬 카운터라 다중 인스턴스에서는
-  인스턴스당 상한이다.
+  인스턴스당 상한이다. 본문은 읽기 전에 Content-Length 64KB로 걸러(초과 413) 값싸게 막는다.
 
 ---
 
