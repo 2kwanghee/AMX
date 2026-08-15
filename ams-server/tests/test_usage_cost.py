@@ -466,10 +466,11 @@ def _plant_snapshot(tenant_id, server_id, reported_at, report_type="usage", acco
 def _set_settlement_cursors(watermark):
     """Park both settlement watermarks (rollup + billing) at ``watermark``."""
     from app.models import BillingCursor
+    from app.services import billing
 
     now = datetime.now(UTC)
     with _sm() as db:
-        for kind in (usage_cost.ROLLUP_KIND, usage_cost._BILLING_CURSOR_KIND):
+        for kind in (usage_cost.ROLLUP_KIND, billing.KIND):
             db.merge(BillingCursor(kind=kind, watermark=watermark, updated_at=now))
         db.commit()
 
@@ -497,8 +498,7 @@ def test_retention_purges_settled_expired_keeps_unsettled(app_env, monkeypatch):
 
     # A: expired (60d) AND settled (before the 50d boundary) -> purged.
     a = _plant_snapshot(tenant_id, server_id, now - timedelta(days=60))
-    # A switch_event in the same window -> also purged (settlement/alert code
-    # never reads a snapshot back once sealed; only the inventory UI listing does).
+    # A switch_event in the same window -> KEPT (console event-timeline source).
     a_switch = _plant_snapshot(
         tenant_id, server_id, now - timedelta(days=61), report_type="switch_event"
     )
@@ -510,11 +510,60 @@ def test_retention_purges_settled_expired_keeps_unsettled(app_env, monkeypatch):
     with _sm() as db:
         purged = usage_cost.sweep_snapshot_retention(db)
 
-    assert purged == 2
+    assert purged == 1  # only the usage row A
     assert not _snapshot_exists(a)
-    assert not _snapshot_exists(a_switch)
+    assert _snapshot_exists(a_switch)  # switch_event retained regardless of age
     assert _snapshot_exists(b)  # unsettled is never deleted, however old
     assert _snapshot_exists(c)
+
+
+# -- switch_event is retained even when expired AND settled -------------------
+def test_retention_keeps_switch_events(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret-sw@ex.com")
+    now = datetime.now(UTC)
+    # Boundary yesterday: a 100-day-old row is both expired and fully settled.
+    _set_settlement_cursors(usage_cost._floor_day(now - timedelta(days=1)))
+    _use_retention(monkeypatch, 30)
+
+    sw = _plant_snapshot(
+        tenant_id, server_id, now - timedelta(days=100), report_type="switch_event"
+    )
+    usg = _plant_snapshot(tenant_id, server_id, now - timedelta(days=100))
+
+    with _sm() as db:
+        purged = usage_cost.sweep_snapshot_retention(db)
+
+    assert purged == 1  # the usage row only
+    assert _snapshot_exists(sw)  # switch_event survives expiry + settlement
+    assert not _snapshot_exists(usg)
+
+
+# -- a future settlement watermark halts the purge entirely -------------------
+def test_retention_halts_on_future_watermark(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret-fut@ex.com")
+    now = datetime.now(UTC)
+    # G27 clock jump: watermark parked in the future. Rows below it are un-settled,
+    # so nothing may be purged however old — even a 100-day-old usage row.
+    _set_settlement_cursors(usage_cost._floor_day(now + timedelta(days=5)))
+    _use_retention(monkeypatch, 30)
+
+    old = _plant_snapshot(tenant_id, server_id, now - timedelta(days=100))
+    with _sm() as db:
+        assert usage_cost.sweep_snapshot_retention(db) == 0
+    assert _snapshot_exists(old)
+
+
+# -- no cursor (settlement boundary None) deletes nothing ---------------------
+def test_retention_no_cursor_keeps_everything(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret-nc@ex.com")
+    now = datetime.now(UTC)
+    # No BillingCursor rows planted -> boundary None -> nothing is settled yet.
+    _use_retention(monkeypatch, 30)
+
+    old = _plant_snapshot(tenant_id, server_id, now - timedelta(days=100))
+    with _sm() as db:
+        assert usage_cost.sweep_snapshot_retention(db) == 0
+    assert _snapshot_exists(old)
 
 
 # -- retention disabled (0) deletes nothing -----------------------------------

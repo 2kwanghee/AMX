@@ -255,9 +255,22 @@ assignments (
 usage_snapshots (
   id UUID PK, tenant_id, server_id, account_id NULL,
   report_type TEXT,                    -- usage | switch_event
-  payload JSONB,                       -- 보고 원문 보존
+  payload JSONB,                       -- 보고 원문(usage 행은 보존 정책 대상, 아래)
   reported_at TIMESTAMPTZ
 )
+
+-- 스냅샷 보존 정책 (retention sweep, usage_cost.sweep_snapshot_retention)
+-- 원문 스냅샷은 서버당 ~5분마다 무한 적재되므로 주기 삭제한다. 기본 90일
+-- (`usage_snapshot_retention_days`, 0 이하면 비활성). 삭제 조건은 두 가지를 모두
+-- 만족하는 `report_type='usage'` 행만이다: ① reported_at < now-보존일, ②
+-- reported_at < 정산 boundary(= rollup·billing 두 watermark의 min). 즉 미정산
+-- 스냅샷은 기한이 지나도 절대 삭제하지 않는다. 정산 boundary가 미래에 주차된
+-- 경우(G27 시계 점프)는 그 아래가 영원히 미정산이므로 purge를 전면 중단·경고만
+-- 남긴다. switch_event 행은 콘솔 이벤트 타임라인(list_switch_events →
+-- GET /servers/{id}/switch-events)의 유일한 원천이라 기한·정산과 무관하게 보존한다.
+-- usage_daily_rollup은 이 정책의 대상이 아니며 영구 보존한다(비용 배분 입력).
+-- 단, 90일을 넘긴 과거일은 원문이 사라지므로 usage_daily_rollup에 봉인된 값으로만
+-- 답할 수 있고 원문 기반 재계산(적분 규칙 변경 후 recompute)은 더 이상 불가하다.
 
 -- 관리자 RBAC (P5 F1, §7)
 admins (
