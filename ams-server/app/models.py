@@ -71,6 +71,10 @@ ALERT_KINDS = (
     "command_send_failed",
     "self_update_failed",
     "billing_watermark_future",
+    # P5 Langfuse 실측 임계값 경보(langfuse_alerts 스윕, 시스템 범위·server_id NULL).
+    "langfuse_usage_spike",
+    "langfuse_stale",
+    "langfuse_latency",
 )
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")
@@ -677,6 +681,52 @@ class Alert(Base):
     acked_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class AlertWebhookOutbox(Base):
+    """P5 경보 웹훅 아웃박스 — 경보 open/resolve 전이의 발송 대기 큐.
+
+    아웃박스 패턴(BACKLOG G41): ``services.alerts``의 open/resolve 프리미티브가
+    경보를 여는/닫는 것과 **같은 트랜잭션**으로 여기에 행을 스테이징한다(caller가
+    커밋). 트랜잭션이 롤백되면 아웃박스 행도 함께 사라지므로, 실제로 커밋되지 않은
+    경보에 대한 유령 웹훅이 나가지 않는다. 발송은 형제 스윕(``alert_webhook``,
+    자체 advisory 락 …08)이 HTTP POST로 드레인한다 — 성공 시 행 삭제, 실패 시
+    ``attempt``/``next_attempt_at`` 지수 백오프, 상한 초과 시 폐기.
+
+    발송 시점에 경보 자체는 이미 다른 상태로 바뀌었을 수 있으므로, 페이로드에 필요한
+    전이 스냅샷(kind·status·tenant·server·detail·occurred_at)을 행에 그대로 담는다 —
+    드레인은 alerts 테이블을 다시 읽지 않는다. 웹훅이 비활성(URL/시크릿 미설정)이면
+    스테이징 자체를 건너뛰므로 이 테이블은 비어 있고 완전 무부작용이다.
+    """
+
+    __tablename__ = "alert_webhook_outbox"
+    __table_args__ = (
+        Index("ix_alert_webhook_outbox_due", "next_attempt_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    # 전이한 경보의 id. FK 아님: 경보 행이 지워져도(테넌트/서버 CASCADE) 발송 대기 중인
+    # 전이 스냅샷은 자립적으로 남아 발송을 마칠 수 있어야 하고, occurredAt 시점의 값을
+    # 이미 복제해 두었으므로 원본 행에 대한 참조 무결성이 필요 없다.
+    alert_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    server_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    # "open" | "resolved" — 전이의 방향.
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    # 발송 시도 횟수와 다음 시도 가능 시각(지수 백오프의 앵커). 신규 행은 즉시 발송
+    # 대상이 되도록 next_attempt_at 기본값을 now()로 둔다.
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 
