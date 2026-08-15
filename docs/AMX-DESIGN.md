@@ -571,6 +571,60 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
   input+cache_read+cache_creation 합산값이라 `input_tokens` 컬럼이 부풀려졌고 캐시는 0이었으나,
   이제 `input_tokens`는 순수 input, 캐시 두 컬럼은 실측치로 채워진다.
 
+#### 5.6.2 경보 웹훅 발송 + Langfuse 임계값 경보 (P5, BACKLOG G41)
+
+경보를 콘솔 밖으로 내보내는 범용 웹훅 계층과, Langfuse 실측치를 임계값으로 감시하는
+경보 3종을 더한다.
+
+- **아웃박스 패턴**: `services.alerts`의 open/resolve 프리미티브는 경보를 여닫는 것과
+  **같은 트랜잭션**에서 `alert_webhook_outbox`(신규)에 전이 행을 스테이징한다(caller가
+  커밋). 커밋이 롤백되면 아웃박스 행도 함께 사라지므로, 실제로 열리지 않은 경보의 유령
+  웹훅이 나가지 않는다. `open_alert`은 `INSERT ... ON CONFLICT`의 `RETURNING (xmax = 0)`로
+  진짜 신규 open만 골라 스테이징하고(이미 열린 경보의 refresh·동시 리포트 경합은 제외),
+  resolve 계열은 실제로 닫힌 행만 `RETURNING`으로 골라 스테이징한다. 기존 8종·신규 3종
+  모두 이 프리미티브를 통과하므로 별도 배선 없이 전량이 웹훅을 탄다.
+- **전용 드레인 태스크**: `services.alert_webhook`가 전용 락 **`0x414D580F08`(…08)**로
+  아웃박스를 드레인한다. offline 스위퍼 공유 루프가 **아니라** 서버 기동 시 뜨는 독립
+  asyncio 태스크(`_alert_webhook_drainer`, 자체 주기 `AMX_ALERT_WEBHOOK_DRAIN_SECONDS`
+  기본 30·최소 5)로 돈다 — 불량 수신자의 느린 POST가 오프라인 탐지·명령 복구를 밀어내지
+  못하게 하는 것이 목적이다. HTTP POST는 P4 교훈대로 락·트랜잭션 밖에서 한다: 만기 행을
+  짧은 트랜잭션에서 **고유 리스 토큰**으로 예약(`lease_token` 세팅 + `next_attempt_at`
+  앞당김)하고 커밋해 락을 놓은 뒤 POST하고, 결과를 다시 짧게 반영한다. finalize는 리스
+  토큰이 자신이 부여한 값과 일치하는 행만 삭제/백오프해(소유 검증) 리스 만료 후 재예약된
+  행의 이중 처리를 막는다. 성공 → 행 삭제, 실패 → `attempt`+지수 백오프, 상한 초과 →
+  경고 로그 후 폐기 + 관측용 셀프 경보 `alert_webhook_dropped` open(그 경보는 웹훅
+  아웃박스에 싣지 않는다 — 재귀 방지). 배치는 20, POST 타임아웃은 http_timeout과 분리된
+  `AMX_ALERT_WEBHOOK_TIMEOUT_SECONDS`(기본 5). 페이로드는 `{alertId, kind,
+  status(open|resolved), tenantId, serverId, detail, occurredAt}`이고, 헤더
+  `X-AMS-Timestamp`(유닉스 초)와 `X-AMS-Signature: sha256=HMAC-SHA256(시크릿, 타임스탬프
+  +본문)`으로 무결성·리플레이를 막는다. **전달 의미론은 at-least-once·순서 미보장** —
+  수신자는 `(alertId, status, occurredAt)`로 멱등 처리한다. 활성화는
+  `AMX_ALERT_WEBHOOK_URL`/`AMX_ALERT_WEBHOOK_SECRET` 둘 다 설정된 경우에 한하며
+  (all-or-nothing), 하나라도 없으면 스테이징 자체를 건너뛰어 완전 무부작용이다. 시크릿은
+  서명 계산에만 쓰이고 로그에 남기지 않는다.
+- **수신자 검증(pseudo)**: 수신 측은 본문을 원문 그대로 받아 서명을 재계산한다 —
+  `expected = "sha256=" + hmac_sha256(secret, request.header["X-AMS-Timestamp"] + raw_body)`
+  를 계산해 `X-AMS-Signature`와 상수시간 비교하고, `X-AMS-Timestamp`가 허용 시차(예: ±5분)
+  안인지 확인해 리플레이를 거른다. 본문 재직렬화가 아니라 **받은 바이트 그대로** 서명해야
+  일치한다(발신 측은 정렬·compact JSON을 서명·전송한다).
+- **임계값 스위퍼**: `services.langfuse_alerts`가 전용 락 **`0x414D580F09`(…09)**로 offline
+  스위퍼 공유 루프에 sibling으로 붙어(langfuse-metrics 다음 여덟 번째 sibling) Langfuse 활성
+  게이트와 폴 주기(`AMX_LANGFUSE_POLL_SECONDS`)를 공유하되 독립 캐던스 상태로 경보 3종을
+  open/resolve 한다(전부 시스템 범위, `server_id` NULL·테넌트 범위 dedupe). latency의 HTTP
+  GET만 락 밖에서 먼저 하고, 나머지는 짧은 락+커밋으로 전이를 반영한다.
+  - `langfuse_usage_spike` — 당일(UTC) 총 토큰이 전일 대비 `AMX_ALERT_SPIKE_FACTOR`(기본
+    3.0) 배수를 초과하면 open. 전일이 0이면 배수가 무의미하므로 절대 하한
+    `AMX_ALERT_SPIKE_MIN_TOKENS`(기본 1,000,000)를 초과할 때만 open, 복귀 시 resolve.
+  - `langfuse_stale` — **metrics 스윕의 마지막 정상 시각 마커**(billing_cursors kind
+    `langfuse_metrics_sync`, 스윕이 HTTP 왕복 성공 시 활동 유무 무관하게 상향)가
+    `AMX_ALERT_STALE_MINUTES`(기본 60)를 넘겨 늙으면 open, 스윕 재개 시 resolve. 롤업
+    `max(updated_at)` 대신 이 마커를 써 무활동 주말 오발을 피하고 파이프라인 정체만 잡는다.
+    한 번도 정상 스윕이 없으면(마커 NULL) 평가하지 않는다.
+  - `langfuse_latency` — Metrics API latency p95(measure `latency`, aggregation `p95`, 최근
+    1시간)가 `AMX_ALERT_LATENCY_P95_MS`(기본 60000)를 초과하면 open, 이하 복귀 시 resolve.
+    Langfuse latency는 초 단위라 ms로 환산해 비교하며, HTTP 오류·무데이터는 경고 후 스킵해
+    경보 오발을 막는다.
+
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
 O9가 **회전형**으로 판별됨(§8): 계정이 서버에서 활성으로 돌면 그 서버의 Claude Code/tsamx가

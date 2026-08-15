@@ -302,6 +302,10 @@ AlertKind = Literal[
     "command_send_failed",
     "self_update_failed",
     "billing_watermark_future",
+    "langfuse_usage_spike",
+    "langfuse_stale",
+    "langfuse_latency",
+    "alert_webhook_dropped",
 ]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]

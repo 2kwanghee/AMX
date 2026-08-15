@@ -66,7 +66,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import try_advisory_xact_lock as _try_advisory_xact_lock
-from app.models import Account, LangfuseUsageRollup
+from app.models import Account, BillingCursor, LangfuseUsageRollup
 
 _logger = logging.getLogger("ams.langfuse")
 
@@ -76,6 +76,10 @@ _logger = logging.getLogger("ams.langfuse")
 _LANGFUSE_SWEEP_LOCK_KEY = 0x414D580F07
 
 _METRICS_PATH = "/api/public/v2/metrics"
+
+# billing_cursors 관례를 재사용한 "마지막 정상 스윕" 마커의 kind. langfuse_stale 경보가
+# 롤업 max(updated_at)(무활동 주말이면 오발) 대신 이 마커의 신선도를 판정 소스로 쓴다.
+_METRICS_SYNC_CURSOR_KIND = "langfuse_metrics_sync"
 
 # Process-local cadence gate: the monotonic time of the last run that passed the
 # gate, or None before the first. Shared across instances is unnecessary — the
@@ -273,6 +277,28 @@ def _upsert(db: Session, values: list[dict]) -> int:
     return len(values)
 
 
+def _mark_metrics_sync(db: Session, when: datetime) -> None:
+    """"마지막 정상 스윕" 마커를 ``when``으로 상향한다. caller가 커밋한다.
+
+    billing_cursors(kind PK)에 대한 idempotent upsert. 되감지 않고 갱신만 한다.
+    """
+    stmt = pg_insert(BillingCursor).values(
+        kind=_METRICS_SYNC_CURSOR_KIND, watermark=when, updated_at=when
+    )
+    db.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["kind"],
+            set_={"watermark": stmt.excluded.watermark, "updated_at": stmt.excluded.updated_at},
+        )
+    )
+
+
+def last_metrics_sync_at(db: Session) -> datetime | None:
+    """마지막 정상 스윕 시각. 한 번도 성공한 적 없으면 ``None``(langfuse_stale 판정 소스)."""
+    cursor = db.get(BillingCursor, _METRICS_SYNC_CURSOR_KIND)
+    return cursor.watermark if cursor is not None else None
+
+
 def sweep_langfuse_metrics(db: Session, *, client: httpx.Client | None = None) -> int:
     """Re-roll the recent Langfuse window into ``langfuse_usage_rollup``. Returns rows upserted.
 
@@ -330,6 +356,7 @@ def sweep_langfuse_metrics(db: Session, *, client: httpx.Client | None = None) -
     owns_client = client is None
     client = client or httpx.Client(timeout=settings.http_timeout_seconds)
     collected: list[dict] = []
+    had_error = False
     try:
         for day in days:
             try:
@@ -338,6 +365,7 @@ def sweep_langfuse_metrics(db: Session, *, client: httpx.Client | None = None) -
                 # Bare class name: an httpx error string can echo the request URL,
                 # and the request carries the Basic-auth secret key (§7). The days
                 # already fetched are kept; the rest of this cadence is skipped.
+                had_error = True
                 _logger.warning(
                     "langfuse metrics sweep: fetch error on %s (%s); aborting tick",
                     day.date(),
@@ -348,13 +376,20 @@ def sweep_langfuse_metrics(db: Session, *, client: httpx.Client | None = None) -
         if owns_client:
             client.close()
 
-    if not collected:
+    # Nothing to write and the round-trip errored → skip entirely (the sync marker
+    # must NOT advance on a failed tick; that is exactly what langfuse_stale watches).
+    if had_error and not collected:
         return 0
 
-    # Stage 2 — short lock + upsert + commit. The lock releases on commit.
+    # Stage 2 — short lock + upsert + (on a clean round-trip) sync-marker + commit.
     if not _try_advisory_xact_lock(db, _LANGFUSE_SWEEP_LOCK_KEY):
         return 0
     upserted = _upsert(db, collected)
+    if not had_error:
+        # Freshness marker for langfuse_stale: advanced on every clean sweep,
+        # activity or not — an idle weekend keeps the pipeline "fresh", a stalled
+        # pipeline lets it age. A partial (error-truncated) tick does not advance it.
+        _mark_metrics_sync(db, _now())
     db.commit()
     return upserted
 

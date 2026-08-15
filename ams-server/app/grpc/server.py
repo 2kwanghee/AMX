@@ -36,7 +36,16 @@ from app.db import get_sessionmaker, try_advisory_xact_lock as _try_advisory_xac
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
-from app.services import alerts, billing, commands, langfuse_metrics, reconcile, usage_cost
+from app.services import (
+    alert_webhook,
+    alerts,
+    billing,
+    commands,
+    langfuse_alerts,
+    langfuse_metrics,
+    reconcile,
+    usage_cost,
+)
 
 _logger = logging.getLogger("ams.grpc")
 
@@ -1205,6 +1214,57 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("langfuse metrics sweep iteration failed", exc_info=False)
+        # P5 Langfuse 임계값 경보(BACKLOG G41): 여덟 번째 형제 스윕이 usage_spike/stale/
+        # latency 3종을 실측 평가해 open/resolve 한다. langfuse 활성 게이트/폴 주기를
+        # 공유하고 자체 락(…09)·격리 try/except로 독립적이다(무설정 시 no-op).
+        try:
+            langfuse_alerted = await asyncio.to_thread(
+                _sweep_langfuse_alerts_once, session_factory
+            )
+            if langfuse_alerted:
+                _logger.info(
+                    "langfuse alert sweeper opened %d threshold alert(s)", langfuse_alerted
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("langfuse alert sweep iteration failed", exc_info=False)
+        # NOTE: 경보 웹훅 드레인은 이 공유 루프에 두지 않는다 — 불량 수신자로 인한 HTTP
+        # 지연이 오프라인 탐지·명령 복구를 밀어내지 못하게, 전용 백그라운드 태스크
+        # (_alert_webhook_drainer, 자체 주기)로 분리했다. 락 …08은 그대로 유지한다.
+
+
+ALERT_WEBHOOK_DRAIN_MIN_SECONDS = 5.0
+
+
+async def _alert_webhook_drainer(
+    session_factory: sessionmaker[Session],
+    *,
+    interval: float | None = None,
+) -> None:
+    """경보 웹훅 아웃박스를 드레인하는 전용 루프(offline 스위퍼와 분리).
+
+    자체 주기(``AMX_ALERT_WEBHOOK_DRAIN_SECONDS``, 최소 5초 클램프)로 돌며, 불량 수신자의
+    느린 POST가 오프라인 탐지·명령 복구 같은 다른 배경 작업을 지연시키지 못하게 한다.
+    드레인은 전용 락 …08을 잡아 다중 인스턴스에서 한 인스턴스만 발송한다(무설정 시 no-op).
+    한 반복의 실패는 로그만 남기고 루프를 계속한다.
+    """
+    if interval is None:
+        from app.config import get_settings
+
+        interval = max(
+            ALERT_WEBHOOK_DRAIN_MIN_SECONDS, get_settings().alert_webhook_drain_seconds
+        )
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            sent = await asyncio.to_thread(_sweep_alert_webhook_once, session_factory)
+            if sent:
+                _logger.info("alert webhook drainer delivered %d event(s)", sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a drain failure must not kill the process
+            _logger.warning("alert webhook drain iteration failed", exc_info=False)
 
 
 # F3 multi-instance: the sweeps below are idempotent, but running them from every
@@ -1218,8 +1278,8 @@ async def _offline_sweeper(
 # error handling in the sweeper loop.
 _OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
 _SENT_SWEEP_LOCK_KEY = 0x414D580F02
-# …03 billing, …04 rollup, …05 snapshot-retention, …07 langfuse-metrics (in their
-# own modules).
+# …03 billing, …04 rollup, …05 snapshot-retention, …07 langfuse-metrics,
+# …08 alert-webhook, …09 langfuse-alerts (in their own modules).
 _WATERMARK_SWEEP_LOCK_KEY = 0x414D580F06
 
 
@@ -1268,6 +1328,22 @@ def _sweep_langfuse_metrics_once(session_factory: sessionmaker[Session]) -> int:
         return langfuse_metrics.sweep_langfuse_metrics(db)
 
 
+def _sweep_alert_webhook_once(session_factory: sessionmaker[Session]) -> int:
+    # alert_webhook.sweep_alert_webhook takes its own advisory lock (…08), drains
+    # the outbox with HTTP POSTs outside the lock, and commits — a no-op when the
+    # webhook is unconfigured.
+    with session_factory() as db:
+        return alert_webhook.sweep_alert_webhook(db)
+
+
+def _sweep_langfuse_alerts_once(session_factory: sessionmaker[Session]) -> int:
+    # langfuse_alerts.sweep_langfuse_alerts takes its own advisory lock (…09),
+    # shares the langfuse enable-gate/poll cadence, and commits — a no-op when
+    # langfuse is unconfigured.
+    with session_factory() as db:
+        return langfuse_alerts.sweep_langfuse_alerts(db)
+
+
 def _sweep_watermark_future_once(session_factory: sessionmaker[Session]) -> bool:
     # usage_cost.sweep_watermark_future reads the rollup cursor and commits the
     # per-tenant alert lifecycle; the transaction-scoped lock (…06) makes exactly
@@ -1288,10 +1364,13 @@ async def serve(port: int = DEFAULT_PORT) -> None:
     await server.start()
     _logger.info("AMS gRPC control plane listening on :%s (%s)", port, mode)
     sweeper = asyncio.create_task(_offline_sweeper(servicer._sm))
+    # 웹훅 드레인은 offline 스위퍼와 독립된 전용 태스크로 돈다(불량 수신자 격리).
+    webhook_drainer = asyncio.create_task(_alert_webhook_drainer(servicer._sm))
     try:
         await server.wait_for_termination()
     finally:
         sweeper.cancel()
+        webhook_drainer.cancel()
 
 
 def main() -> None:

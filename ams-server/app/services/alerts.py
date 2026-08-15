@@ -26,7 +26,8 @@ from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.models import Alert, Server
+from app.config import get_settings
+from app.models import Alert, AlertWebhookOutbox, Server
 
 _ACTIVE_STATUSES = ("open", "acked")
 
@@ -44,6 +45,55 @@ def _now() -> datetime:
 def dedupe_key(server_id, kind: str, account_id=None) -> str:
     base = f"{server_id}:{kind}"
     return f"{base}:{account_id}" if account_id is not None else base
+
+
+def _stage_webhook(
+    db: Session,
+    *,
+    alert_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    server_id: uuid.UUID | None,
+    kind: str,
+    status: str,
+    detail: dict | None,
+) -> None:
+    """P5: 경보 open/resolve 전이 한 건을 웹훅 아웃박스에 스테이징한다(G41).
+
+    caller의 세션에 ``add``만 하고 커밋은 하지 않는다 — 경보를 여닫는 것과 **같은
+    트랜잭션**에서 함께 커밋/롤백되므로, 커밋되지 않은 경보의 유령 웹훅이 나가지
+    않는다. 웹훅이 비활성(URL/시크릿 미설정)이면 아무 것도 하지 않아 완전 무부작용이다.
+    발송 시점의 alerts 테이블 상태와 무관하도록 전이 스냅샷을 행에 그대로 담는다.
+    """
+    if not get_settings().alert_webhook_enabled:
+        return
+    db.add(
+        AlertWebhookOutbox(
+            alert_id=alert_id,
+            tenant_id=tenant_id,
+            server_id=server_id,
+            kind=kind,
+            status=status,
+            detail=detail,
+            occurred_at=_now(),
+        )
+    )
+
+
+# RETURNING에 실을 전이 스냅샷 컬럼 — resolve 계열이 실제로 닫은 행만 골라 스테이징한다.
+_RESOLVE_RETURNING = (Alert.id, Alert.tenant_id, Alert.server_id, Alert.kind, Alert.detail)
+
+
+def _stage_resolved(db: Session, rows) -> None:
+    for row in rows:
+        _stage_webhook(
+            db,
+            alert_id=row.id,
+            tenant_id=row.tenant_id,
+            server_id=row.server_id,
+            kind=row.kind,
+            status="resolved",
+            detail=row.detail,
+        )
 
 
 def open_alert(
@@ -96,7 +146,20 @@ def open_alert(
             "source_snapshot_id": stmt.excluded.source_snapshot_id,
         },
     )
-    db.execute(stmt)
+    # RETURNING의 (xmax = 0)은 이 문장이 실제 INSERT였는지(신규 open 전이) ON CONFLICT
+    # UPDATE였는지(이미 열린 경보의 refresh) 구분한다 — DB가 결정하므로 동시 두 리포트가
+    # 같은 키를 열어도 웹훅은 정확히 한 번만 스테이징된다.
+    row = db.execute(stmt.returning(Alert.id, text("xmax = 0"))).first()
+    if row is not None and row[1]:
+        _stage_webhook(
+            db,
+            alert_id=row[0],
+            tenant_id=tenant_id,
+            server_id=server_id,
+            kind=kind,
+            status="open",
+            detail=detail,
+        )
 
 
 def resolve(
@@ -114,9 +177,13 @@ def resolve(
     ]
     if account_id is not None:
         where.append(Alert.account_id == account_id)
-    db.execute(
-        update(Alert).where(*where).values(status="resolved", resolved_at=_now())
-    )
+    rows = db.execute(
+        update(Alert)
+        .where(*where)
+        .values(status="resolved", resolved_at=_now())
+        .returning(*_RESOLVE_RETURNING)
+    ).all()
+    _stage_resolved(db, rows)
 
 
 def _resolve_drift_except(
@@ -131,9 +198,13 @@ def _resolve_drift_except(
     ]
     if keep_account_ids:
         where.append(Alert.account_id.notin_([uuid.UUID(a) for a in keep_account_ids]))
-    db.execute(
-        update(Alert).where(*where).values(status="resolved", resolved_at=_now())
-    )
+    rows = db.execute(
+        update(Alert)
+        .where(*where)
+        .values(status="resolved", resolved_at=_now())
+        .returning(*_RESOLVE_RETURNING)
+    ).all()
+    _stage_resolved(db, rows)
 
 
 def sync_from_report(
@@ -253,7 +324,17 @@ def _open_watermark_future(db: Session, *, tenant_id: uuid.UUID, detail: dict) -
         index_where=text("status = 'open'"),
         set_={"detail": stmt.excluded.detail},
     )
-    db.execute(stmt)
+    row = db.execute(stmt.returning(Alert.id, text("xmax = 0"))).first()
+    if row is not None and row[1]:
+        _stage_webhook(
+            db,
+            alert_id=row[0],
+            tenant_id=tenant_id,
+            server_id=None,
+            kind=WATERMARK_FUTURE_KIND,
+            status="open",
+            detail=detail,
+        )
 
 
 def sync_watermark_future(
@@ -291,9 +372,87 @@ def sync_watermark_future(
             _open_watermark_future(db, tenant_id=tenant_id, detail=detail)
         else:
             key = _watermark_dedupe_key(tenant_id)
-            db.execute(
+            rows = db.execute(
                 update(Alert)
                 .where(Alert.dedupe_key == key, Alert.status.in_(_ACTIVE_STATUSES))
                 .values(status="resolved", resolved_at=_now())
-            )
+                .returning(*_RESOLVE_RETURNING)
+            ).all()
+            _stage_resolved(db, rows)
     return future
+
+
+def _system_dedupe_key(tenant_id, kind: str) -> str:
+    return f"{tenant_id}:{kind}"
+
+
+def open_system_alert(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    kind: str,
+    severity: str,
+    detail: dict | None = None,
+    stage_webhook: bool = True,
+) -> None:
+    """Open/refresh a system-scoped alert (``server_id`` NULL, tenant-scoped key).
+
+    P5 Langfuse 임계값 경보(usage_spike/stale/latency)처럼 특정 서버가 아니라 테넌트
+    전체를 대상으로 하는 경보용. ``_open_watermark_future``와 같은 구조(acked-aware,
+    부분 유니크 인덱스에 대한 ``INSERT ... ON CONFLICT``)이며, 신규 open 전이면 웹훅
+    아웃박스에 스테이징한다. caller가 커밋한다.
+
+    ``stage_webhook=False``는 웹훅 발송 실패로 폐기될 때 여는 ``alert_webhook_dropped``
+    셀프 경보 전용이다 — 그 경보까지 웹훅 아웃박스에 실으면 발송 실패→셀프 경보→발송
+    실패의 무한 재귀가 되므로 스테이징을 끊는다.
+    """
+    key = _system_dedupe_key(tenant_id, kind)
+    acked = db.scalar(
+        select(Alert).where(Alert.dedupe_key == key, Alert.status == "acked")
+    )
+    if acked is not None:
+        acked.detail = detail
+        return
+    stmt = pg_insert(Alert).values(
+        tenant_id=tenant_id,
+        server_id=None,
+        account_id=None,
+        kind=kind,
+        severity=severity,
+        status="open",
+        dedupe_key=key,
+        detail=detail,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["dedupe_key"],
+        index_where=text("status = 'open'"),
+        set_={"detail": stmt.excluded.detail},
+    )
+    row = db.execute(stmt.returning(Alert.id, text("xmax = 0"))).first()
+    if stage_webhook and row is not None and row[1]:
+        _stage_webhook(
+            db,
+            alert_id=row[0],
+            tenant_id=tenant_id,
+            server_id=None,
+            kind=kind,
+            status="open",
+            detail=detail,
+        )
+
+
+def resolve_system_alert(db: Session, *, tenant_id: uuid.UUID, kind: str) -> None:
+    """Resolve a system-scoped alert by its tenant-scoped key. Idempotent.
+
+    ``resolve`` is server-scoped (``server_id == NULL`` never matches), so
+    system-scoped kinds resolve by ``dedupe_key`` instead. Each closed row stages
+    a ``resolved`` webhook event.
+    """
+    key = _system_dedupe_key(tenant_id, kind)
+    rows = db.execute(
+        update(Alert)
+        .where(Alert.dedupe_key == key, Alert.status.in_(_ACTIVE_STATUSES))
+        .values(status="resolved", resolved_at=_now())
+        .returning(*_RESOLVE_RETURNING)
+    ).all()
+    _stage_resolved(db, rows)
