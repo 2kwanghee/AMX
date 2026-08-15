@@ -16,6 +16,7 @@ import type {
   CommandAccepted,
   EnrollTokenResponse,
   EventPage,
+  LangfuseUsage,
   OauthCompleteRequest,
   OauthStartRequest,
   OauthStartResponse,
@@ -130,6 +131,13 @@ export const api = {
     bff<UsageCostResponse>(
       'GET',
       `tenants/${t}/usage/cost${month ? `?month=${encodeURIComponent(month)}` : ''}`,
+    ),
+
+  // Langfuse 실측 사용량 — from/to는 YYYY-MM-DD. UI가 언제나 유효한 날짜만 만든다.
+  getLangfuseUsage: (t: string, from: string, to: string) =>
+    bff<LangfuseUsage>(
+      'GET',
+      `tenants/${t}/usage/langfuse?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
     ),
 
   // Alerts (Track A backend; UI ready)

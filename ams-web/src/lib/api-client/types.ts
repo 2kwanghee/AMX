@@ -352,6 +352,35 @@ export interface UsageCostResponse {
   subtotals: UsageCostSubtotal[];
 }
 
+// -- Langfuse 실측 사용량 (P4) ------------------------------------------------
+// GET /tenants/{id}/usage/langfuse?from=YYYY-MM-DD&to=YYYY-MM-DD.
+// 비용 배분(위)과 달리 Langfuse가 관측한 토큰 실측치다. 토큰 값은 정수(Number
+// 안전 범위 내)로 내려오므로 number로 둔다. 설정이 없는 서버에선 두 배열이 비고
+// uiUrl은 null이다.
+export interface LangfuseModelRow {
+  day: string; // YYYY-MM-DD
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  totalTokens: number;
+  observations: number;
+}
+
+export interface LangfuseUserRow {
+  day: string; // YYYY-MM-DD
+  userId: string;
+  totalTokens: number;
+  observations: number;
+}
+
+export interface LangfuseUsage {
+  modelRows: LangfuseModelRow[];
+  userRows: LangfuseUserRow[];
+  uiUrl?: string | null;
+}
+
 export interface ApiError {
   type?: string;
   title?: string;
