@@ -25,6 +25,8 @@
 #                      원격 셸에서 전개되므로 $HOME/~ 사용 가능. on/off에만 필요.
 #   --config-dir PATH  원격 설정 홈을 강제 지정(선택). 비우면 install 스크립트의
 #                      기본 precedence(~/.claude-amx > ~/.claude)를 따른다.
+#   --with-danger-hook `on`에서 위험명령 감지 PreToolUse 훅도 함께 설치(기본 off).
+#                      원격 install-langfuse-hook.sh에 --with-danger-hook을 넘긴다.
 #
 # 동작 원칙
 # --------
@@ -41,6 +43,7 @@ HOSTS_FILE="$SELF_DIR/fleet-hosts.txt"
 REMOTE_REPO='$HOME/AMX'
 CONFIG_DIR=""
 SUBCMD=""
+WITH_DANGER=0
 
 die()  { echo "fleet-langfuse: $*" >&2; exit 1; }
 info() { echo "fleet-langfuse: $*"; }
@@ -51,7 +54,8 @@ while [ $# -gt 0 ]; do
 		--hosts)       [ $# -ge 2 ] || die "--hosts needs a value"; shift; HOSTS_FILE="$1" ;;
 		--remote-repo) [ $# -ge 2 ] || die "--remote-repo needs a value"; shift; REMOTE_REPO="$1" ;;
 		--config-dir)  [ $# -ge 2 ] || die "--config-dir needs a value"; shift; CONFIG_DIR="$1" ;;
-		-h|--help)     sed -n '2,40p' "$0"; exit 0 ;;
+		--with-danger-hook) WITH_DANGER=1 ;;
+		-h|--help)     sed -n '2,42p' "$0"; exit 0 ;;
 		*) die "unknown argument: $1 (see --help)" ;;
 	esac
 	shift
@@ -73,6 +77,8 @@ SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5"
 REMOTE_SCRIPT="$REMOTE_REPO/deploy/install-langfuse-hook.sh"
 CFG_ARG=""
 [ -n "$CONFIG_DIR" ] && CFG_ARG="--config-dir '$CONFIG_DIR'"
+DANGER_ARG=""
+[ "$WITH_DANGER" = 1 ] && DANGER_ARG="--with-danger-hook"
 
 # 한 호스트 처리. 성공 0 / 실패 비0. 시크릿은 여기서도 절대 출력하지 않는다.
 run_on() {
@@ -81,7 +87,7 @@ run_on() {
 	printf '%s\n%s\n%s\n' "$LANGFUSE_BASE_URL" "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" \
 	| ssh $SSH_OPTS "$1" "IFS= read -r B; IFS= read -r P; IFS= read -r S; \
 LANGFUSE_BASE_URL=\"\$B\" LANGFUSE_PUBLIC_KEY=\"\$P\" LANGFUSE_SECRET_KEY=\"\$S\" \
-sh $REMOTE_SCRIPT $CFG_ARG </dev/null"
+sh $REMOTE_SCRIPT $CFG_ARG $DANGER_ARG </dev/null"
 }
 
 run_off() {

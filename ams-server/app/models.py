@@ -77,6 +77,9 @@ ALERT_KINDS = (
     "langfuse_latency",
     # 웹훅 발송이 재시도 상한을 넘겨 폐기될 때 여는 셀프 경보(관측용, system 범위).
     "alert_webhook_dropped",
+    # P5 위험명령 감지(danger_hook.py 발). system 범위·server_id NULL, auto-resolve
+    # 없음(이벤트성 — 관리자가 ack/resolve). dedupe는 host+pattern+명령 sha256 기반.
+    "dangerous_command",
 )
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")

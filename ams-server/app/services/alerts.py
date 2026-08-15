@@ -441,6 +441,57 @@ def open_system_alert(
         )
 
 
+def open_event_alert(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    kind: str,
+    severity: str,
+    dedupe_key: str,
+    detail: dict | None = None,
+) -> None:
+    """Open/refresh a system-scoped **event** alert keyed by an explicit dedupe_key.
+
+    ``open_system_alert``와 같은 구조(acked-aware, 부분 유니크 인덱스에 대한
+    ``INSERT ... ON CONFLICT``, 신규 open 전이만 웹훅 스테이징)이지만 dedupe 키를
+    ``{tenant_id}:{kind}`` 로 고정하지 않고 caller가 그대로 넘긴다 — P5 위험명령 경보
+    처럼 한 kind 안에서 (host, pattern, 명령 해시)별로 여러 경보가 공존해야 하는
+    이벤트성 경보용이다. auto-resolve 짝은 없다(관리자가 ack/resolve). caller가 커밋.
+    """
+    acked = db.scalar(
+        select(Alert).where(Alert.dedupe_key == dedupe_key, Alert.status == "acked")
+    )
+    if acked is not None:
+        acked.detail = detail
+        return
+    stmt = pg_insert(Alert).values(
+        tenant_id=tenant_id,
+        server_id=None,
+        account_id=None,
+        kind=kind,
+        severity=severity,
+        status="open",
+        dedupe_key=dedupe_key,
+        detail=detail,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["dedupe_key"],
+        index_where=text("status = 'open'"),
+        set_={"detail": stmt.excluded.detail},
+    )
+    row = db.execute(stmt.returning(Alert.id, text("xmax = 0"))).first()
+    if row is not None and row[1]:
+        _stage_webhook(
+            db,
+            alert_id=row[0],
+            tenant_id=tenant_id,
+            server_id=None,
+            kind=kind,
+            status="open",
+            detail=detail,
+        )
+
+
 def resolve_system_alert(db: Session, *, tenant_id: uuid.UUID, kind: str) -> None:
     """Resolve a system-scoped alert by its tenant-scoped key. Idempotent.
 
