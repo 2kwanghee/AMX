@@ -1,11 +1,13 @@
 """Langfuse metrics sweep — services.langfuse_metrics (P4 console monitoring).
 
 The Metrics API is stubbed with an httpx.MockTransport so the sweep's request
-shape (grouped model query vs per-userId filter query) and its roll-up upsert are
-pinned without a live Langfuse. What is checked: the model axis (including the null
-model folded to "unknown"), the per-account user axis, fetch-error isolation (HTTP
-and bad JSON), the inactive no-op, idempotent recompute-replace, the process-local
-cadence gate, the window floor of 2 (a closed day is re-rolled), and the account cap.
+shape (grouped model query vs per-userId filter query, both crossed with the
+usageType dimension) and its roll-up upsert are pinned without a live Langfuse.
+What is checked: the model axis (including the null model folded to "unknown"),
+the per-account user axis, usageByType-driven cache-token measurement, an unknown
+usageType being ignored, fetch-error isolation (HTTP and bad JSON), the inactive
+no-op, idempotent recompute-replace, the process-local cadence gate, the window
+floor of 2 (a closed day is re-rolled), and the account cap.
 """
 
 from __future__ import annotations
@@ -86,6 +88,33 @@ def _payload(rows):
     return {"data": rows}
 
 
+_NO_MODEL = object()
+
+
+def _ut_rows(count, *, model=_NO_MODEL, **toks):
+    """Expand token kwargs into usageType-crossed Metrics rows for one group.
+
+    Mirrors the live API: usageByType is summed per usageType, and count_count
+    repeats identically across a group's rows. ``model`` (incl. None) adds a
+    providedModelName field for the model axis; omit it for the user axis.
+    """
+    kinds = [
+        ("input", "input"),
+        ("output", "output"),
+        ("cache_read", "cache_read_input_tokens"),
+        ("cache_creation", "cache_creation_input_tokens"),
+        ("total", "total"),
+    ]
+    rows = []
+    for kw, utype in kinds:
+        row = {"usageType": utype, "sum_usageByType": toks.get(kw, 0),
+               "count_count": count}
+        if model is not _NO_MODEL:
+            row["providedModelName"] = model
+        rows.append(row)
+    return rows
+
+
 def _rows(tenant_id, dimension):
     with _sm() as db:
         return {
@@ -118,25 +147,25 @@ def test_sweep_model_and_user_axes(app_env, monkeypatch):
         assert request.headers["Authorization"].startswith("Basic ")
         query = json.loads(request.url.params["query"])
         assert query["view"] == "observations"
+        assert query["metrics"][0]["measure"] == "usageByType"
         # Only "today" carries data; yesterday (window floor of 2) is empty here.
         if query["fromTimestamp"] != _FROM_TODAY:
             return httpx.Response(200, json=_payload([]))
-        if query.get("dimensions"):
-            return httpx.Response(200, json=_payload([
-                {"providedModelName": "claude-sonnet-5", "sum_inputTokens": 100,
-                 "sum_outputTokens": 20, "sum_totalTokens": 120, "count_count": 5},
-                {"providedModelName": None, "sum_inputTokens": 0,
-                 "sum_outputTokens": 0, "sum_totalTokens": 0, "count_count": 3},
-            ]))
+        dims = [d["field"] for d in query.get("dimensions", [])]
+        assert "usageType" in dims
+        if "providedModelName" in dims:
+            return httpx.Response(200, json=_payload(
+                _ut_rows(5, model="claude-sonnet-5", input=100, output=20,
+                         cache_read=500, cache_creation=30, total=650)
+                + _ut_rows(3, model=None, total=0)
+            ))
         flt = query["filters"][0]
         assert flt["column"] == "userId"
         per_user = {
-            "alice@ex.com": {"sum_inputTokens": 40, "sum_outputTokens": 10,
-                             "sum_totalTokens": 50, "count_count": 2},
-            "bob@ex.com": {"sum_inputTokens": 0, "sum_outputTokens": 0,
-                           "sum_totalTokens": 0, "count_count": 0},
+            "alice@ex.com": _ut_rows(2, input=40, output=10, total=50),
+            "bob@ex.com": _ut_rows(0, total=0),
         }
-        return httpx.Response(200, json=_payload([per_user[flt["value"]]]))
+        return httpx.Response(200, json=_payload(per_user[flt["value"]]))
 
     with _sm() as db:
         n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
@@ -147,11 +176,12 @@ def test_sweep_model_and_user_axes(app_env, monkeypatch):
     models = _rows(tenant_id, "model")
     assert set(models) == {(_TODAY, "claude-sonnet-5"), (_TODAY, "unknown")}
     sonnet = models[(_TODAY, "claude-sonnet-5")]
-    assert sonnet.input_tokens == 100
-    assert sonnet.total_tokens == 120
-    assert sonnet.observation_count == 5
-    assert sonnet.cache_read_tokens == 0
-    assert sonnet.cache_creation_tokens == 0
+    assert sonnet.input_tokens == 100  # pure input, not input+cache
+    assert sonnet.output_tokens == 20
+    assert sonnet.total_tokens == 650
+    assert sonnet.observation_count == 5  # from the total row only
+    assert sonnet.cache_read_tokens == 500
+    assert sonnet.cache_creation_tokens == 30
     assert models[(_TODAY, "unknown")].observation_count == 3
 
     users = _rows(tenant_id, "user")
@@ -168,14 +198,13 @@ def test_window_floor_two_rerolls_closed_day(app_env, monkeypatch):
 
     def handler(request):
         query = json.loads(request.url.params["query"])
-        if not query.get("dimensions"):
+        dims = [d["field"] for d in query.get("dimensions", [])]
+        if "providedModelName" not in dims:
             return httpx.Response(200, json=_payload([]))
         totals = {_FROM_TODAY: 11, _FROM_YESTERDAY: 22}
         tok = totals.get(query["fromTimestamp"], 0)
-        return httpx.Response(200, json=_payload([
-            {"providedModelName": "m", "sum_inputTokens": tok,
-             "sum_outputTokens": 0, "sum_totalTokens": tok, "count_count": 1},
-        ]))
+        return httpx.Response(200, json=_payload(
+            _ut_rows(1, model="m", total=tok)))
 
     with _sm() as db:
         n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
@@ -198,12 +227,11 @@ def test_cadence_gate_skips_under_interval(app_env, monkeypatch):
     def handler(request):
         calls["n"] += 1
         query = json.loads(request.url.params["query"])
-        if not query.get("dimensions"):
+        dims = [d["field"] for d in query.get("dimensions", [])]
+        if "providedModelName" not in dims:
             return httpx.Response(200, json=_payload([]))
-        return httpx.Response(200, json=_payload([
-            {"providedModelName": "m", "sum_inputTokens": 1, "sum_outputTokens": 0,
-             "sum_totalTokens": 1, "count_count": 1},
-        ]))
+        return httpx.Response(200, json=_payload(
+            _ut_rows(1, model="m", input=1, total=1)))
 
     with _sm() as db:
         assert langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler)) == 2
@@ -232,9 +260,8 @@ def test_account_cap_truncates_sorted(app_env, monkeypatch):
 
     def handler(request):
         query = json.loads(request.url.params["query"])
-        if query.get("dimensions"):
-            return httpx.Response(200, json=_payload([]))
-        queried.add(query["filters"][0]["value"])
+        if "filters" in query:  # user axis carries the userId filter
+            queried.add(query["filters"][0]["value"])
         return httpx.Response(200, json=_payload([]))
 
     with _sm() as db:
@@ -280,11 +307,11 @@ def test_sweep_idempotent_recompute_replace(app_env, monkeypatch):
 
     def handler(request):
         query = json.loads(request.url.params["query"])
-        if query.get("dimensions") and query["fromTimestamp"] == _FROM_TODAY:
-            return httpx.Response(200, json=_payload([
-                {"providedModelName": "claude-sonnet-5", "sum_inputTokens": 100,
-                 "sum_outputTokens": 20, "sum_totalTokens": total["v"], "count_count": 5},
-            ]))
+        dims = [d["field"] for d in query.get("dimensions", [])]
+        if "providedModelName" in dims and query["fromTimestamp"] == _FROM_TODAY:
+            return httpx.Response(200, json=_payload(
+                _ut_rows(5, model="claude-sonnet-5", input=100, output=20,
+                         total=total["v"])))
         return httpx.Response(200, json=_payload([]))
 
     with _sm() as db:
@@ -298,3 +325,61 @@ def test_sweep_idempotent_recompute_replace(app_env, monkeypatch):
     models = _rows(tenant_id, "model")
     assert set(models) == {(_TODAY, "claude-sonnet-5")}
     assert models[(_TODAY, "claude-sonnet-5")].total_tokens == 999
+
+
+# -- cache tokens are measured (usageByType), not zeroed ----------------------
+def test_cache_tokens_measured(app_env, monkeypatch):
+    # The core fix: cache_read/creation land as measured values, and input_tokens
+    # is pure input (not the old input+cache sum), on both axes.
+    tenant_id = _seed_tenant("alice@ex.com")
+    _activate(monkeypatch, tenant_id, window=1)
+
+    def handler(request):
+        query = json.loads(request.url.params["query"])
+        if query["fromTimestamp"] != _FROM_TODAY:
+            return httpx.Response(200, json=_payload([]))
+        dims = [d["field"] for d in query.get("dimensions", [])]
+        toks = dict(input=100, output=20, cache_read=800, cache_creation=60, total=980)
+        if "providedModelName" in dims:
+            return httpx.Response(200, json=_payload(
+                _ut_rows(4, model="claude-sonnet-5", **toks)))
+        return httpx.Response(200, json=_payload(_ut_rows(4, **toks)))
+
+    with _sm() as db:
+        langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+
+    m = _rows(tenant_id, "model")[(_TODAY, "claude-sonnet-5")]
+    assert m.input_tokens == 100  # pure input, not input+cache_read+cache_creation
+    assert m.cache_read_tokens == 800
+    assert m.cache_creation_tokens == 60
+    assert m.total_tokens == 980
+    assert m.observation_count == 4  # from the total row only, not summed per type
+    u = _rows(tenant_id, "user")[(_TODAY, "alice@ex.com")]
+    assert u.cache_read_tokens == 800
+    assert u.cache_creation_tokens == 60
+    assert u.observation_count == 4
+
+
+# -- unknown usageType is ignored (with a warning), not misfiled --------------
+def test_unknown_usage_type_ignored(app_env, monkeypatch):
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, window=1)
+
+    def handler(request):
+        query = json.loads(request.url.params["query"])
+        dims = [d["field"] for d in query.get("dimensions", [])]
+        if "providedModelName" not in dims or query["fromTimestamp"] != _FROM_TODAY:
+            return httpx.Response(200, json=_payload([]))
+        rows = _ut_rows(2, model="m", input=10, total=15)
+        rows.append({"providedModelName": "m", "usageType": "brand_new_type",
+                     "sum_usageByType": 999, "count_count": 2})
+        return httpx.Response(200, json=_payload(rows))
+
+    with _sm() as db:
+        langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+    m = _rows(tenant_id, "model")[(_TODAY, "m")]
+    assert m.input_tokens == 10
+    assert m.total_tokens == 15
+    assert m.observation_count == 2
+    # The unknown 999 was dropped into no column.
+    assert (m.output_tokens, m.cache_read_tokens, m.cache_creation_tokens) == (0, 0, 0)

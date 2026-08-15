@@ -556,10 +556,15 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
   TenantScope)는 이 테넌트 행만 반환하므로 다른 테넌트 조회는 빈 결과다. 응답에 `lastSyncedAt`
   (해당 테넌트 롤업 `max(updated_at)`, 없으면 null)로 신선도를 노출한다. PoC 대상 단일 프로젝트라
   전역 바인딩으로 시작하며, 테넌트별 프로젝트 매핑은 후속 과제다.
-- **캐시 토큰 부재**: Metrics API의 토큰 measure는 `inputTokens`/`outputTokens`/`totalTokens`와
-  `count`뿐이고 캐시 토큰 measure는 없다(실측 확인). 스키마는 `cache_read_tokens`/
-  `cache_creation_tokens` 컬럼을 두되 **0으로 적재**하며, 향후 measure가 생기면 마이그레이션 없이
-  백필할 자리로 남긴다.
+- **토큰 수집(usageByType)**: 토큰은 `usageByType` measure를 `usageType` dimension과 교차해 뽑아
+  각 토큰 종류를 제 컬럼에 실측 적재한다(실측 확인). `usageType` 매핑은 `input`→`input_tokens`,
+  `output`→`output_tokens`, `cache_read_input_tokens`→`cache_read_tokens`,
+  `cache_creation_input_tokens`→`cache_creation_tokens`, `total`→`total_tokens`이며, 모르는
+  값은 경고 로그만 남기고 무시한다. `usageType`이 교차 dimension이라 각 축은 (그룹×usageType) 행을
+  반환하므로 스위퍼가 그룹별로 재조립한다. `count`는 한 그룹의 usageType 행마다 동일하게 반복되어
+  `observation_count`는 `total` 행에서만 취한다(이중 계산 방지). 이전 `inputTokens` measure는
+  input+cache_read+cache_creation 합산값이라 `input_tokens` 컬럼이 부풀려졌고 캐시는 0이었으나,
+  이제 `input_tokens`는 순수 input, 캐시 두 컬럼은 실측치로 채워진다.
 
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
