@@ -209,3 +209,50 @@ shim은 `claude`라는 **이름 해석**만 강제한다. 실제 바이너리를
 guard 디렉터리를 제거하면 우회된다. 이는 이름 기반 강제의 본질적 한계이며,
 주기 `verify`가 (a)(b) 드리프트를 감시하는 이유다. 이 창의 잔여 노출은 층 1(B1a
 sub-second·torn-free)이 방어한다.
+
+## 8. Langfuse 추적 (P3, 선택)
+
+러너 세션을 셀프호스팅 Langfuse로 흘려보내 세션 단위로 관찰한다. `amx-claude`
+**래퍼를 거쳐 뜬 세션만** 추적되고, 설정 파일이 없는 서버는 동작이 이전과 완전히
+같다 — 추적을 붙이지 않은 호스트에는 아무 부작용이 없다.
+
+### 어떻게 래퍼 경유만 추적되나
+추적은 두 조각으로 나뉜다. Stop 훅(`settings.json`에 등록, `deploy/langfuse/`에서
+복사)은 세션이 끝날 때마다 돌지만, 환경에 Langfuse 키가 없으면 아무 일도 하지 않고
+빠진다. 키를 환경에 넣어 주는 것은 오직 `amx-claude` 래퍼뿐이다. 래퍼는 실행 직전
+`$CLAUDE_CONFIG_DIR/amx-langfuse.env`가 있으면 읽어들이고, 그 안에
+`TRACE_TO_LANGFUSE=true`가 켜져 있을 때만 키를 export한다. 그래서 래퍼를 거치지
+않고 뜬 세션(실바이너리 직접 호출 등)은 키를 못 받아 훅이 그대로 무동작이다.
+파일 파싱 오류·`tsamx` 부재·조회 타임아웃 어느 것도 claude 기동을 막지 않는다(래퍼
+기존 fail-open 유지).
+
+### 수집 방침·전제
+프롬프트·응답 페이로드를 **전량 수집**한다(민감정보 마스킹 없음). 내부망·신뢰
+경계 안 전용이라는 전제이며, 인터넷에 노출된 Langfuse에는 붙이지 않는다. 페이로드
+길이는 `CC_LANGFUSE_MAX_CHARS`(기본 20000자)로 자른다.
+
+### 귀속
+- **계정 귀속**(`LANGFUSE_USER_ID`): env 파일에 직접 박지 않으면, 래퍼가
+  `tsamx status --json`의 활성 계정 이메일(`.active.email`)로 자동 채운다(상한 2초,
+  실패 시 미설정).
+- **서버 귀속**(`LANGFUSE_TRACING_ENVIRONMENT`): 비어 있으면 `$(hostname)`.
+
+### 설치
+```sh
+LANGFUSE_BASE_URL=http://<langfuse-host>:3100 \
+LANGFUSE_PUBLIC_KEY=pk-... \
+LANGFUSE_SECRET_KEY=sk-... \
+  sh deploy/install-langfuse-hook.sh
+```
+멱등(재실행 시 `settings.json` 불변)이다. 훅을 `$CLAUDE_CONFIG_DIR/hooks/`로
+복사하고, `settings.json`의 Stop 훅에 `uv run --script <훅>` 항목을 병합하며(기존
+다른 키·훅 보존), `amx-langfuse.env`(0600)를 만든다. 기존 env 파일이 있으면 `.bak`로
+백업한 뒤 덮어쓴다. 훅 실행에 `uv`가 필요하다 — 없으면 설치는 그 사실을 찍고,
+`python3 <훅>`(langfuse 사전 설치 전제)로 바꿔 쓸 수 있다.
+
+### 끄는 법
+```sh
+sh deploy/install-langfuse-hook.sh --uninstall
+```
+`amx-langfuse.env`를 지우고 `settings.json`에서 이 훅 항목만 뺀다. env 파일만 지워도
+래퍼가 키를 export하지 않아 추적이 멈춘다(훅은 남아 있어도 무동작).
