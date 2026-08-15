@@ -60,4 +60,58 @@ fi
 # AMX_DELIVER_WAIT overrides the wait bound (seconds; default 5).
 flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
 
+# --- Langfuse tracing (P3, optional) -----------------------------------------
+# If (and only if) `<CLAUDE_CONFIG_DIR>/amx-langfuse.env` exists, load it and,
+# when it opts in with TRACE_TO_LANGFUSE=true, export the credentials so the
+# Stop hook (installed in settings.json) ships this session to Langfuse. A
+# session NOT launched through this wrapper never gets the keys in its env, so
+# the hook no-ops there — only wrapper-launched sessions are traced.
+#
+# Fail-open, always: a missing file, a missing tsamx/timeout, or a tsamx query
+# error must never stop claude from starting (same philosophy as the flock
+# above). The env file is TRUSTED input — it is created 0600 by
+# install-langfuse-hook.sh, not user-authored — so we do not defend against
+# hostile content; we only guard against an accidentally malformed file by
+# pre-validating its syntax (`sh -n`) and skipping the load on a parse error,
+# rather than letting `set -e` abort the runner. The whole block runs `set +e`.
+LF_ENV_FILE="$CONFIG_DIR/amx-langfuse.env"
+if [ -f "$LF_ENV_FILE" ] && [ -r "$LF_ENV_FILE" ]; then
+	set +e
+	# Only source if it parses cleanly, so a hand-edited broken file can never
+	# abort the runner.
+	if sh -n "$LF_ENV_FILE" 2>/dev/null; then
+		# shellcheck disable=SC1090
+		. "$LF_ENV_FILE"
+		if [ "${TRACE_TO_LANGFUSE:-}" = "true" ]; then
+			# Account attribution: default LANGFUSE_USER_ID to the currently
+			# active AMX account (tsamx active email), unless the env file
+			# already pinned it. Bounded to 2s via timeout(1). If timeout(1) is
+			# absent (some minimal images), we SKIP the lookup entirely rather
+			# than run tsamx unbounded — leaving LANGFUSE_USER_ID unset (pin it
+			# in the env file on such hosts).
+			if [ -z "${LANGFUSE_USER_ID:-}" ] \
+				&& command -v timeout >/dev/null 2>&1 \
+				&& command -v tsamx >/dev/null 2>&1; then
+				_lf_email=$(timeout 2 tsamx status --json 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("active") or {}).get("email") or "")' 2>/dev/null)
+				if [ -n "${_lf_email:-}" ]; then
+					LANGFUSE_USER_ID="$_lf_email"
+				fi
+				unset _lf_email
+			fi
+			# Server attribution: default the tracing environment to this host.
+			if [ -z "${LANGFUSE_TRACING_ENVIRONMENT:-}" ]; then
+				LANGFUSE_TRACING_ENVIRONMENT="$(hostname 2>/dev/null || echo "")"
+			fi
+			# Export only under opt-in, so TRACE_TO_LANGFUSE!=true keeps the keys
+			# out of the child env and the hook stays a no-op.
+			export TRACE_TO_LANGFUSE
+			export LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY LANGFUSE_BASE_URL
+			export LANGFUSE_USER_ID LANGFUSE_TRACING_ENVIRONMENT
+			export CC_LANGFUSE_MAX_CHARS CC_LANGFUSE_DEBUG
+		fi
+	fi
+	set -e
+fi
+# -----------------------------------------------------------------------------
+
 exec "$CLAUDE_BIN" "$@"
