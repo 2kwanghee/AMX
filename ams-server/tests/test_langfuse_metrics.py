@@ -383,3 +383,34 @@ def test_unknown_usage_type_ignored(app_env, monkeypatch):
     assert m.observation_count == 2
     # The unknown 999 was dropped into no column.
     assert (m.output_tokens, m.cache_read_tokens, m.cache_creation_tokens) == (0, 0, 0)
+
+
+# -- 마지막 정상 스윕 마커 (langfuse_stale 판정 소스) --------------------------
+def test_sync_marker_advances_on_clean_tick(app_env, monkeypatch):
+    # 정상 왕복이면 데이터가 없어도(무활동) 마커가 _NOW로 상향된다.
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, window=1)
+
+    def handler(request):
+        return httpx.Response(200, json=_payload([]))
+
+    with _sm() as db:
+        n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+    assert n == 0  # 무활동
+    with _sm() as db:
+        assert langfuse_metrics.last_metrics_sync_at(db) == _NOW
+
+
+def test_sync_marker_not_advanced_on_error(app_env, monkeypatch):
+    # HTTP 오류로 왕복이 깨지면 마커를 갱신하지 않는다 → langfuse_stale이 정체를 잡는다.
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, window=1)
+
+    def handler(request):
+        return httpx.Response(500, json={"e": "boom"})
+
+    with _sm() as db:
+        n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+    assert n == 0
+    with _sm() as db:
+        assert langfuse_metrics.last_metrics_sync_at(db) is None

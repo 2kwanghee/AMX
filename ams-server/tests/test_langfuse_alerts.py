@@ -18,7 +18,7 @@ from sqlalchemy import select
 from app.config import get_settings as _real_get_settings
 from app.db import get_sessionmaker
 from app.models import Alert, LangfuseUsageRollup
-from app.services import inventory, langfuse_alerts
+from app.services import inventory, langfuse_alerts, langfuse_metrics
 
 _NOW = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
 _TODAY = _NOW.date()
@@ -73,6 +73,12 @@ def _latency_client(p95_seconds=1.0, *, status=200):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def _set_sync_marker(when):
+    with _sm() as db:
+        langfuse_metrics._mark_metrics_sync(db, when)
+        db.commit()
+
+
 def _alert(tenant_id, kind, status="open"):
     with _sm() as db:
         return db.scalar(
@@ -122,31 +128,40 @@ def test_usage_spike_prev_zero_uses_min_floor(app_env, monkeypatch):
     assert _alert(tenant_id, "langfuse_usage_spike") is not None
 
 
-# -- stale --------------------------------------------------------------------
-def test_stale_open_and_resolve(app_env, monkeypatch):
+# -- stale (판정 소스 = metrics 스윕 마지막 정상 시각 마커) --------------------
+def test_stale_open_when_sweep_stalls(app_env, monkeypatch):
     tenant_id = _seed_tenant()
     _activate(monkeypatch, tenant_id, alert_stale_minutes=60)
-    # 마지막 갱신이 120분 전 → stale. total은 작게 둬 스파이크는 안 나게.
-    _seed_rollup(tenant_id, _TODAY, 10, updated_at=_NOW - timedelta(minutes=120))
+    # 마지막 정상 스윕이 120분 전 = 파이프라인 정체 → open.
+    _set_sync_marker(_NOW - timedelta(minutes=120))
     with _sm() as db:
         opened = langfuse_alerts.sweep_langfuse_alerts(db, client=_latency_client())
     assert opened == 1
     assert _alert(tenant_id, "langfuse_stale") is not None
 
-    # 갱신 재개(신선) → resolve.
-    with _sm() as db:
-        db.query(LangfuseUsageRollup).filter_by(day=_TODAY).update({"updated_at": _NOW})
-        db.commit()
+    # 스윕 재개(마커 신선) → resolve.
+    _set_sync_marker(_NOW)
     monkeypatch.setattr(langfuse_alerts, "_LAST_POLL_MONOTONIC", None, raising=False)
     with _sm() as db:
         langfuse_alerts.sweep_langfuse_alerts(db, client=_latency_client())
     assert _alert(tenant_id, "langfuse_stale") is None
 
 
+def test_no_stale_when_idle_but_sweep_healthy(app_env, monkeypatch):
+    # 무활동(롤업 행 0)이어도 스윕이 방금 정상 왕복했으면 마커가 신선 → 오발 없음.
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, alert_stale_minutes=60)
+    _set_sync_marker(_NOW)
+    with _sm() as db:
+        opened = langfuse_alerts.sweep_langfuse_alerts(db, client=_latency_client())
+    assert opened == 0
+    assert _alert(tenant_id, "langfuse_stale") is None
+
+
 def test_stale_never_synced_skips(app_env, monkeypatch):
     tenant_id = _seed_tenant()
     _activate(monkeypatch, tenant_id)
-    # 롤업 행이 전혀 없음 → 평가 스킵, 경보 없음.
+    # 마커 없음(한 번도 정상 스윕 없음) → 평가 스킵, 경보 없음.
     with _sm() as db:
         opened = langfuse_alerts.sweep_langfuse_alerts(db, client=_latency_client())
     assert opened == 0

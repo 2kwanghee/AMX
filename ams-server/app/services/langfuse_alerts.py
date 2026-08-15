@@ -8,8 +8,10 @@ process-local 캐던스 상태는 독립적이다:
 * ``langfuse_usage_spike`` — 당일(UTC) 총 토큰이 전일 대비 ``alert_spike_factor`` 배수를
   초과하면 open. 전일이 0이면 배수가 무의미하므로 절대 하한 ``alert_spike_min_tokens``를
   초과할 때만 open. 복귀 시 resolve.
-* ``langfuse_stale`` — 롤업 ``max(updated_at)``이 ``alert_stale_minutes``를 넘겨 정체되면
-  open, 갱신 재개 시 resolve. 한 번도 동기화된 적 없으면(NULL) 평가하지 않는다(오발 방지).
+* ``langfuse_stale`` — metrics 스윕의 **마지막 정상 시각 마커**가 ``alert_stale_minutes``를
+  넘겨 늙으면 open, 스윕 재개 시 resolve. 롤업 ``max(updated_at)`` 대신 이 마커를 쓰므로
+  무활동(데이터 0) 주말에는 오발하지 않고 파이프라인 정체만 잡는다. 한 번도 정상 스윕이
+  없었으면(마커 NULL) 평가하지 않는다.
 * ``langfuse_latency`` — Metrics API latency p95(최근 1시간)가 ``alert_latency_p95_ms``를
   초과하면 open, 이하 복귀 시 resolve. HTTP 오류/무데이터는 경고 후 스킵(경보 오발 금지).
 
@@ -34,12 +36,7 @@ from app.config import get_settings
 from app.db import try_advisory_xact_lock as _try_advisory_xact_lock
 from app.models import LangfuseUsageRollup
 from app.services import alerts
-from app.services.langfuse_metrics import (
-    _METRICS_PATH,
-    _auth_header,
-    _iso,
-    _query_metrics,
-)
+from app.services.langfuse_metrics import _iso, _query_metrics, last_metrics_sync_at
 
 _logger = logging.getLogger("ams.langfuse")
 
@@ -148,15 +145,16 @@ def _eval_usage_spike(db: Session, settings, tenant_id: uuid.UUID) -> bool:
 
 
 def _eval_stale(db: Session, settings, tenant_id: uuid.UUID) -> bool | None:
-    """롤업이 stale하면 open, 신선하면 resolve. 한 번도 동기화 안 됐으면 None(스킵)."""
-    latest = db.scalar(
-        select(func.max(LangfuseUsageRollup.updated_at)).where(
-            LangfuseUsageRollup.tenant_id == tenant_id
-        )
-    )
-    if latest is None:
+    """파이프라인이 정체하면 open, 재개하면 resolve. 한 번도 동기화 안 됐으면 None(스킵).
+
+    판정 소스는 롤업 ``max(updated_at)``이 아니라 **metrics 스윕의 마지막 정상 시각**
+    마커다 — 무활동 주말에는 데이터가 안 들어와도 스윕은 정상 왕복하므로 마커가 신선하게
+    유지되어 오발하지 않고, 스윕(파이프라인) 자체가 멈췄을 때만 마커가 늙어 경보가 열린다.
+    """
+    last_sync = last_metrics_sync_at(db)
+    if last_sync is None:
         return None
-    age = _now() - latest
+    age = _now() - last_sync
     stale = age > timedelta(minutes=settings.alert_stale_minutes)
     if stale:
         alerts.open_system_alert(
@@ -165,7 +163,7 @@ def _eval_stale(db: Session, settings, tenant_id: uuid.UUID) -> bool | None:
             kind=_STALE_KIND,
             severity="warning",
             detail={
-                "last_updated_at": latest.astimezone(UTC).isoformat(),
+                "last_sync_at": last_sync.astimezone(UTC).isoformat(),
                 "age_seconds": int(age.total_seconds()),
                 "threshold_minutes": settings.alert_stale_minutes,
             },
