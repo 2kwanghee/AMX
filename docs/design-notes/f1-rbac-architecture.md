@@ -1,5 +1,7 @@
 # F1 테넌트 RBAC 상세 설계 (P5 S2)
 
+> 이 문서는 설계 시점 기록(as-designed)이며, 현행 동작의 기준은 `docs/AMX-DESIGN.md`다.
+
 > REASONER 산출(2026-08-09). E3(Principal 반환형) 위. 사용자 확정: 자체 admins+bcrypt, 2-role.
 > SSOT는 `docs/AMX-DESIGN.md`. proto/gRPC 무변경(RBAC은 REST 평면).
 

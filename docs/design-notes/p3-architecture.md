@@ -1,5 +1,7 @@
 # AMX P3 "스위칭 제어" 아키텍처 설계서
 
+> 이 문서는 설계 시점 기록(as-designed)이며, 현행 동작의 기준은 `docs/AMX-DESIGN.md`다.
+
 > REASONER 산출(2026-08-08) + O4-C 델타 통합. 구현 브리핑의 근거. SSOT는 `docs/AMX-DESIGN.md` —
 > 상충 시 SSOT 우선. 확정: O4-C 하이브리드(threshold+strategy 하달, cooldown/hysteresis 로컬).
 

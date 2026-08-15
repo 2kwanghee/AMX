@@ -1,5 +1,7 @@
 # AMX P4 "콘솔·운영" 아키텍처 설계서
 
+> 이 문서는 설계 시점 기록(as-designed)이며, 현행 동작의 기준은 `docs/AMX-DESIGN.md`다.
+
 > REASONER 산출(2026-08-08). 구현 브리핑의 근거. SSOT는 `docs/AMX-DESIGN.md` — 상충 시 SSOT 우선.
 > **O8(ClickEye 연동)은 사용자 결정으로 P4에서 건너뜀** — 계정 스위칭 관제에 집중. Track D(ClickEye
 > read-only API) 제외, O8은 미해결 유지.
