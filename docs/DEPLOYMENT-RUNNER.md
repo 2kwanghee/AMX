@@ -282,3 +282,50 @@ sh deploy/install-langfuse-hook.sh --uninstall
   `exit 0`으로 끝나고 실패는 훅 로그 파일에만 남는다(코드 확인: `main()`이
   네트워크·클라이언트 생성 실패를 잡아 `return 0`). 따라서 Langfuse 장애가 Claude
   세션 종료나 동작을 막지 않는다. 추적만 조용히 누락된다.
+
+### 함대(fleet) 일괄 배포
+호스트가 몇 대 넘어가면 서버마다 손으로 설치 명령을 치는 방식은 오래 못 간다. 신규
+에이전트는 설치 때 자동으로 켜지게 하고, 이미 떠 있는 호스트는 목록 한 장으로 한꺼번에
+켜고 끄는 두 갈래를 둔다.
+
+**신규 에이전트 자동 적용.** `deploy/agent-setup.sh install`은 `AMX_LANGFUSE_BASE_URL`,
+`AMX_LANGFUSE_PUBLIC_KEY`, `AMX_LANGFUSE_SECRET_KEY` 세 환경변수가 **모두** 있을 때만
+설치 끝에 `install-langfuse-hook.sh`를 같은 설정 홈에 심는다. 하나라도 비면 훅에 손을
+대지 않아 기존 설치 흐름이 그대로다. 훅 설치가 실패해도 경고만 남기고 에이전트 설치는
+계속 진행한다.
+
+```sh
+AMX_LANGFUSE_BASE_URL=http://<langfuse-host>:3100 \
+AMX_LANGFUSE_PUBLIC_KEY=pk-... \
+AMX_LANGFUSE_SECRET_KEY=sk-... \
+  deploy/agent-setup.sh install --ams HOST:PORT --token T --pubkey K --insecure
+```
+
+**기존 호스트 일괄 on/off/status.** `deploy/fleet-langfuse.sh`가 호스트 목록을 받아 ssh로
+각 서버에서 설치(`on`)·회수(`off`)·조회(`status`)를 돌린다. 목록은 한 줄에 `user@host`
+하나씩 적고, 빈 줄과 `#` 주석은 건너뛴다. 기본 경로는 `deploy/fleet-hosts.txt`이며
+`--hosts`로 바꿀 수 있다. 실호스트가 든 파일은 커밋하지 말고, `deploy/fleet-hosts.txt.example`을
+복사해 채운다.
+
+```sh
+# 켜기 — 세 자격증명을 환경에 넣어 실행(argv·로그에 시크릿이 남지 않는다)
+LANGFUSE_BASE_URL=http://<langfuse-host>:3100 \
+LANGFUSE_PUBLIC_KEY=pk-... \
+LANGFUSE_SECRET_KEY=sk-... \
+  sh deploy/fleet-langfuse.sh on
+
+sh deploy/fleet-langfuse.sh off       # 전 호스트에서 추적 회수
+sh deploy/fleet-langfuse.sh status    # 호스트별 amx-langfuse.env 존재 여부
+```
+
+`on`은 세 자격증명을 원격 명령의 stdin으로 흘려 원격 env에만 채운다. 로컬이든 원격이든
+`ps`에 시크릿이 뜨지 않고, 스크립트도 이를 화면에 찍지 않는다. `off`는 각 호스트에서
+`install-langfuse-hook.sh --uninstall`을 돌려 env 파일과 Stop 훅 항목만 걷어낸다.
+`status`는 자격증명이 필요 없고, `--config-dir`을 주지 않으면 `~/.claude-amx` → `~/.claude`
+순으로 첫 env 파일을 찾아 보고한다.
+
+원격 호스트의 AMX 체크아웃 경로는 기본 `$HOME/AMX`로 잡고, 다르면 `--remote-repo`로
+지정한다(`on`·`off`에만 쓰인다. `status`는 원격 저장소 없이도 돈다). ssh는
+`BatchMode=yes ConnectTimeout=5`로 붙어 암호 프롬프트에 걸려 멈추지 않는다. 한 호스트가
+실패해도 나머지는 계속 돌고, 마지막에 성공·실패 수와 실패 호스트를 집계한 뒤 실패가 하나라도
+있으면 종료코드 1로 끝난다.
