@@ -1069,6 +1069,44 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  # ---------------------------------------------------------------------------
+  # Langfuse usage (P4, console monitoring) — daily token roll-up
+  # ---------------------------------------------------------------------------
+  /tenants/{tenantId}/usage/langfuse:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [usage]
+      operationId: getLangfuseUsage
+      summary: Langfuse token roll-up for a tenant
+      description: |
+        Per-day token totals compacted from the Langfuse Metrics API by the
+        server-side metrics sweep, split into a model axis and a user axis. Both
+        `from`/`to` bounds are inclusive UTC days and default to the trailing week
+        ending today. A tenant other than the configured `AMX_LANGFUSE_TENANT_ID`,
+        or a range with no data, is an empty 200. `cacheReadTokens` /
+        `cacheCreationTokens` are always 0 today — the Metrics API exposes no
+        cache-token measure.
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Model-axis and user-axis token roll-up rows for the range.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LangfuseUsageResponse'
+        '404': { $ref: '#/components/responses/NotFound' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1975,3 +2013,71 @@ components:
             $ref: '#/components/schemas/BillingEvent'
         pageInfo:
           $ref: '#/components/schemas/PageInfo'
+
+    LangfuseModelRow:
+      type: object
+      required: [day, model, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, totalTokens, observations]
+      properties:
+        day:
+          type: string
+          format: date
+        model:
+          type: string
+          description: providedModelName, or "unknown" when Langfuse reports it null.
+        inputTokens:
+          type: integer
+          format: int64
+        outputTokens:
+          type: integer
+          format: int64
+        cacheReadTokens:
+          type: integer
+          format: int64
+          description: Always 0 today — the Metrics API exposes no cache-token measure.
+        cacheCreationTokens:
+          type: integer
+          format: int64
+          description: Always 0 today — the Metrics API exposes no cache-token measure.
+        totalTokens:
+          type: integer
+          format: int64
+        observations:
+          type: integer
+
+    LangfuseUserRow:
+      type: object
+      required: [day, userId, totalTokens, observations]
+      properties:
+        day:
+          type: string
+          format: date
+        userId:
+          type: string
+          description: The account email fixed as the Metrics API userId filter.
+        totalTokens:
+          type: integer
+          format: int64
+        observations:
+          type: integer
+
+    LangfuseUsageResponse:
+      type: object
+      required: [modelRows, userRows]
+      properties:
+        modelRows:
+          type: array
+          items:
+            $ref: '#/components/schemas/LangfuseModelRow'
+        userRows:
+          type: array
+          items:
+            $ref: '#/components/schemas/LangfuseUserRow'
+        uiUrl:
+          type: string
+          nullable: true
+          description: Console deep-link base (AMX_LANGFUSE_UI_URL, else the API base, else null).
+        lastSyncedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Newest roll-up updated_at for this tenant; null before any sync.

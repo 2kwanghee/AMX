@@ -71,12 +71,51 @@ class Settings:
     # binaries needs one setting, while dev points it at the repo's deploy/.
     artifacts_dir: str | None = None
     install_scripts_dir: str | None = None
+    # P4 Langfuse console monitoring. The periodic metrics sweep and its REST read
+    # are active only when all four of base_url / public_key / secret_key /
+    # tenant_id are set; any missing → the sweep is a no-op and the endpoint
+    # returns empty. `langfuse_tenant_id` is the AMS tenant whose account emails
+    # the sweep loops over (as the Metrics API `userId` filter) and the only
+    # tenant whose roll-up rows the REST returns. `langfuse_ui_url` is the console
+    # deep-link base shown to operators; it falls back to `langfuse_base_url` at
+    # the read layer, and to null when neither is set. `langfuse_metrics_window_days`
+    # is the sliding re-aggregation window (idempotent upsert, so re-rolling recent
+    # days each tick is safe).
+    langfuse_base_url: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_tenant_id: str | None = None
+    langfuse_ui_url: str | None = None
+    # Re-aggregation window. Clamped to a floor of 2 at the sweep: a window of 1
+    # rolls only today (still partial), so a UTC day's finalised total would never
+    # be re-fetched after it closed and its last live value would be stored
+    # forever — covering today+yesterday guarantees each day is re-rolled once
+    # closed. Default 3 leaves extra slack for late-settling Langfuse data.
+    langfuse_metrics_window_days: int = 3
+    # The metrics sweep runs on its own cadence, independent of the 30s offline
+    # sweeper tick that drives it: a tick sooner than this many seconds since the
+    # last run returns immediately (process-local state; the advisory lock still
+    # coordinates across instances). Clamped to a floor of 60 at the sweep.
+    langfuse_poll_seconds: int = 300
+    # The user axis issues one Metrics API call per account email; a tenant with
+    # thousands of accounts would make the sweep unbounded, so it is capped — past
+    # this many accounts the sweep warns and rolls only the first N (sorted).
+    langfuse_max_accounts: int = 100
 
     @property
     def ams_endpoint(self) -> str | None:
         if not self.advertise_host:
             return None
         return f"{self.advertise_host}:{self.grpc_port}"
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        return bool(
+            self.langfuse_base_url
+            and self.langfuse_public_key
+            and self.langfuse_secret_key
+            and self.langfuse_tenant_id
+        )
 
 
 def _pubkey_from_seed(seed_b64: str) -> str:
@@ -191,6 +230,20 @@ def load_settings() -> Settings:
         install_scripts_dir=(
             os.environ.get("AMX_INSTALL_SCRIPTS_DIR", "").strip() or artifacts_dir
         ),
+        langfuse_base_url=(
+            os.environ.get("AMX_LANGFUSE_BASE_URL", "").strip().rstrip("/") or None
+        ),
+        langfuse_public_key=os.environ.get("AMX_LANGFUSE_PUBLIC_KEY", "").strip() or None,
+        langfuse_secret_key=os.environ.get("AMX_LANGFUSE_SECRET_KEY", "").strip() or None,
+        langfuse_tenant_id=os.environ.get("AMX_LANGFUSE_TENANT_ID", "").strip() or None,
+        langfuse_ui_url=(
+            os.environ.get("AMX_LANGFUSE_UI_URL", "").strip().rstrip("/") or None
+        ),
+        langfuse_metrics_window_days=int(
+            os.environ.get("AMX_LANGFUSE_METRICS_WINDOW_DAYS", "3")
+        ),
+        langfuse_poll_seconds=int(os.environ.get("AMX_LANGFUSE_POLL_SECONDS", "300")),
+        langfuse_max_accounts=int(os.environ.get("AMX_LANGFUSE_MAX_ACCOUNTS", "100")),
     )
 
 

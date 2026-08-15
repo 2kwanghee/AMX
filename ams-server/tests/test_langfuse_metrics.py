@@ -1,0 +1,300 @@
+"""Langfuse metrics sweep — services.langfuse_metrics (P4 console monitoring).
+
+The Metrics API is stubbed with an httpx.MockTransport so the sweep's request
+shape (grouped model query vs per-userId filter query) and its roll-up upsert are
+pinned without a live Langfuse. What is checked: the model axis (including the null
+model folded to "unknown"), the per-account user axis, fetch-error isolation (HTTP
+and bad JSON), the inactive no-op, idempotent recompute-replace, the process-local
+cadence gate, the window floor of 2 (a closed day is re-rolled), and the account cap.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import uuid
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+
+import httpx
+
+from app.config import get_settings as _real_get_settings
+from app.db import get_sessionmaker
+from app.models import LangfuseUsageRollup
+from app.services import inventory, langfuse_metrics
+
+from tests.test_grpc_channel import _oauth_secret
+
+# A fixed "now" so the sliding window resolves to deterministic UTC days.
+_NOW = datetime(2026, 8, 15, 9, 30, tzinfo=UTC)
+_TODAY = _NOW.date()
+_YESTERDAY = _TODAY - timedelta(days=1)
+
+# The exact fromTimestamp strings the sweep sends for each day of the window.
+_FROM_TODAY = langfuse_metrics._iso(langfuse_metrics._floor_day(_NOW))
+_FROM_YESTERDAY = langfuse_metrics._iso(
+    langfuse_metrics._floor_day(_NOW) - timedelta(days=1)
+)
+
+_BASE = "http://langfuse.test"
+_PK = "pk-test"
+_SK = "sk-secret-should-never-be-logged"
+
+
+def _sm():
+    return get_sessionmaker()()
+
+
+def _seed_tenant(*emails: str) -> uuid.UUID:
+    with _sm() as db:
+        tenant = inventory.create_tenant(db, "lf-" + uuid.uuid4().hex[:8])
+        for email in emails:
+            inventory.create_account(
+                db, tenant.id, email=email, credential_type="oauth",
+                secret=_oauth_secret(email),
+            )
+        return tenant.id
+
+
+def _activate(monkeypatch, tenant_id, *, window=1, ui_url=None, max_accounts=100,
+              poll_seconds=300):
+    settings = replace(
+        _real_get_settings(),
+        langfuse_base_url=_BASE,
+        langfuse_public_key=_PK,
+        langfuse_secret_key=_SK,
+        langfuse_tenant_id=str(tenant_id),
+        langfuse_ui_url=ui_url,
+        langfuse_metrics_window_days=window,
+        langfuse_max_accounts=max_accounts,
+        langfuse_poll_seconds=poll_seconds,
+    )
+    monkeypatch.setattr(langfuse_metrics, "get_settings", lambda: settings)
+    monkeypatch.setattr(langfuse_metrics, "_now", lambda: _NOW)
+    # Reset the process-local cadence gate and hand out ever-advancing monotonic
+    # time so back-to-back sweep calls in a test are never throttled by default.
+    monkeypatch.setattr(langfuse_metrics, "_LAST_POLL_MONOTONIC", None, raising=False)
+    ticks = itertools.count(0, 10**6)
+    monkeypatch.setattr(langfuse_metrics, "_monotonic", lambda: next(ticks))
+
+
+def _mock_client(handler) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _payload(rows):
+    return {"data": rows}
+
+
+def _rows(tenant_id, dimension):
+    with _sm() as db:
+        return {
+            (r.day, r.key): r
+            for r in db.query(LangfuseUsageRollup).filter_by(
+                tenant_id=tenant_id, dimension=dimension
+            )
+        }
+
+
+# -- inactive -----------------------------------------------------------------
+def test_sweep_inactive_without_settings(app_env):
+    # Real settings carry no AMX_LANGFUSE_* — the sweep is a no-op and must not
+    # even build a client (a client that raises proves it is never called).
+    def _boom(request):  # pragma: no cover - must not run
+        raise AssertionError("sweep touched the API while inactive")
+
+    with _sm() as db:
+        n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(_boom))
+    assert n == 0
+
+
+# -- model + user axes --------------------------------------------------------
+def test_sweep_model_and_user_axes(app_env, monkeypatch):
+    tenant_id = _seed_tenant("alice@ex.com", "bob@ex.com")
+    _activate(monkeypatch, tenant_id)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Auth header carries the Basic secret; assert present but never surfaced.
+        assert request.headers["Authorization"].startswith("Basic ")
+        query = json.loads(request.url.params["query"])
+        assert query["view"] == "observations"
+        # Only "today" carries data; yesterday (window floor of 2) is empty here.
+        if query["fromTimestamp"] != _FROM_TODAY:
+            return httpx.Response(200, json=_payload([]))
+        if query.get("dimensions"):
+            return httpx.Response(200, json=_payload([
+                {"providedModelName": "claude-sonnet-5", "sum_inputTokens": 100,
+                 "sum_outputTokens": 20, "sum_totalTokens": 120, "count_count": 5},
+                {"providedModelName": None, "sum_inputTokens": 0,
+                 "sum_outputTokens": 0, "sum_totalTokens": 0, "count_count": 3},
+            ]))
+        flt = query["filters"][0]
+        assert flt["column"] == "userId"
+        per_user = {
+            "alice@ex.com": {"sum_inputTokens": 40, "sum_outputTokens": 10,
+                             "sum_totalTokens": 50, "count_count": 2},
+            "bob@ex.com": {"sum_inputTokens": 0, "sum_outputTokens": 0,
+                           "sum_totalTokens": 0, "count_count": 0},
+        }
+        return httpx.Response(200, json=_payload([per_user[flt["value"]]]))
+
+    with _sm() as db:
+        n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+
+    # model: sonnet + unknown (null folded, count 3 keeps it despite 0 tokens).
+    # user: alice only (bob had no activity, skipped). All on today.
+    assert n == 3
+    models = _rows(tenant_id, "model")
+    assert set(models) == {(_TODAY, "claude-sonnet-5"), (_TODAY, "unknown")}
+    sonnet = models[(_TODAY, "claude-sonnet-5")]
+    assert sonnet.input_tokens == 100
+    assert sonnet.total_tokens == 120
+    assert sonnet.observation_count == 5
+    assert sonnet.cache_read_tokens == 0
+    assert sonnet.cache_creation_tokens == 0
+    assert models[(_TODAY, "unknown")].observation_count == 3
+
+    users = _rows(tenant_id, "user")
+    assert set(users) == {(_TODAY, "alice@ex.com")}
+    assert users[(_TODAY, "alice@ex.com")].total_tokens == 50
+
+
+# -- window floor of 2: a closed day (yesterday) is re-rolled ------------------
+def test_window_floor_two_rerolls_closed_day(app_env, monkeypatch):
+    # window=1 is clamped up to 2, so yesterday (already closed/final) is fetched
+    # and its finalised total stored — the W2 defect this guards against.
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, window=1)
+
+    def handler(request):
+        query = json.loads(request.url.params["query"])
+        if not query.get("dimensions"):
+            return httpx.Response(200, json=_payload([]))
+        totals = {_FROM_TODAY: 11, _FROM_YESTERDAY: 22}
+        tok = totals.get(query["fromTimestamp"], 0)
+        return httpx.Response(200, json=_payload([
+            {"providedModelName": "m", "sum_inputTokens": tok,
+             "sum_outputTokens": 0, "sum_totalTokens": tok, "count_count": 1},
+        ]))
+
+    with _sm() as db:
+        n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+    assert n == 2
+    models = _rows(tenant_id, "model")
+    assert models[(_TODAY, "m")].total_tokens == 11
+    assert models[(_YESTERDAY, "m")].total_tokens == 22
+
+
+# -- cadence gate -------------------------------------------------------------
+def test_cadence_gate_skips_under_interval(app_env, monkeypatch):
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, window=2, poll_seconds=300)
+    # Drive a controllable monotonic clock instead of the advancing default.
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(langfuse_metrics, "_monotonic", lambda: clock["t"])
+
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        query = json.loads(request.url.params["query"])
+        if not query.get("dimensions"):
+            return httpx.Response(200, json=_payload([]))
+        return httpx.Response(200, json=_payload([
+            {"providedModelName": "m", "sum_inputTokens": 1, "sum_outputTokens": 0,
+             "sum_totalTokens": 1, "count_count": 1},
+        ]))
+
+    with _sm() as db:
+        assert langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler)) == 2
+    hits_after_first = calls["n"]
+    assert hits_after_first > 0
+
+    # 200s later (< 300s poll) — gated, no new API calls, no work.
+    clock["t"] = 1200.0
+    with _sm() as db:
+        assert langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler)) == 0
+    assert calls["n"] == hits_after_first
+
+    # 300s past the first run — due again.
+    clock["t"] = 1300.0
+    with _sm() as db:
+        assert langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler)) == 2
+    assert calls["n"] > hits_after_first
+
+
+# -- account cap --------------------------------------------------------------
+def test_account_cap_truncates_sorted(app_env, monkeypatch):
+    tenant_id = _seed_tenant("a@ex.com", "b@ex.com", "c@ex.com")
+    _activate(monkeypatch, tenant_id, window=2, max_accounts=2)
+
+    queried: set[str] = set()
+
+    def handler(request):
+        query = json.loads(request.url.params["query"])
+        if query.get("dimensions"):
+            return httpx.Response(200, json=_payload([]))
+        queried.add(query["filters"][0]["value"])
+        return httpx.Response(200, json=_payload([]))
+
+    with _sm() as db:
+        langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+    # Only the first 2 sorted emails are ever queried; c@ex.com is dropped.
+    assert queried == {"a@ex.com", "b@ex.com"}
+
+
+# -- fetch-error isolation ----------------------------------------------------
+def test_sweep_http_error_isolated(app_env, monkeypatch):
+    tenant_id = _seed_tenant("alice@ex.com")
+    _activate(monkeypatch, tenant_id, window=2)
+
+    def handler(request):
+        return httpx.Response(502, text="bad gateway")
+
+    with _sm() as db:
+        n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+    assert n == 0
+    assert _rows(tenant_id, "model") == {}
+    assert _rows(tenant_id, "user") == {}
+
+
+def test_sweep_bad_json_isolated(app_env, monkeypatch):
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, window=2)
+
+    def handler(request):
+        # 200 with an unparseable body -> json.JSONDecodeError (a ValueError).
+        return httpx.Response(200, text="not json{")
+
+    with _sm() as db:
+        n = langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler))
+    assert n == 0
+    assert _rows(tenant_id, "model") == {}
+
+
+# -- idempotent recompute-replace ---------------------------------------------
+def test_sweep_idempotent_recompute_replace(app_env, monkeypatch):
+    tenant_id = _seed_tenant()
+    _activate(monkeypatch, tenant_id, window=2)
+    total = {"v": 120}
+
+    def handler(request):
+        query = json.loads(request.url.params["query"])
+        if query.get("dimensions") and query["fromTimestamp"] == _FROM_TODAY:
+            return httpx.Response(200, json=_payload([
+                {"providedModelName": "claude-sonnet-5", "sum_inputTokens": 100,
+                 "sum_outputTokens": 20, "sum_totalTokens": total["v"], "count_count": 5},
+            ]))
+        return httpx.Response(200, json=_payload([]))
+
+    with _sm() as db:
+        assert langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler)) == 1
+    assert _rows(tenant_id, "model")[(_TODAY, "claude-sonnet-5")].total_tokens == 120
+
+    # Second run with a changed total must REPLACE the row, not duplicate it.
+    total["v"] = 999
+    with _sm() as db:
+        assert langfuse_metrics.sweep_langfuse_metrics(db, client=_mock_client(handler)) == 1
+    models = _rows(tenant_id, "model")
+    assert set(models) == {(_TODAY, "claude-sonnet-5")}
+    assert models[(_TODAY, "claude-sonnet-5")].total_tokens == 999

@@ -526,6 +526,41 @@ Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패�
 - **완료판정 검증**: BFF API 레벨(Route Handler 프로그램 구동)로 전 수명주기 조작 판정 + OAuth 등록
   마법사·deliver/recall만 실브라우저 Playwright 스모크.
 
+#### 5.6.1 Langfuse 사용량 롤업 (P4 콘솔 모니터링)
+
+콘솔의 토큰 사용량 뷰는 외부 **Langfuse Metrics API**(`GET /api/public/v2/metrics`, Basic
+Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension, key`)에 적재한
+로컬 롤업을 읽는다. 매 요청을 Langfuse로 프록시하지 않는다.
+
+- **일곱 번째 스위퍼**: 기존 6종 배경 스위퍼(offline·sent-ack·billing·usage-rollup·
+  snapshot-retention·watermark-future)에 이어 `services.langfuse_metrics.sweep_langfuse_metrics`를
+  같은 30초 틱에 sibling으로 붙인다. 전용 transaction-scope advisory lock **`0x414D580F07`(…07)**
+  로 다중 인스턴스 중복 적재를 배제하고, 자체 try/except로 다른 스위퍼와 격리한다.
+- **폴링 주기 분리**: 30초 틱마다 재폴링하면 외부 API를 과하게 때리므로, 프로세스-로컬 monotonic
+  게이트로 `AMX_LANGFUSE_POLL_SECONDS`(기본 300, 최소 60) 미만 간격의 틱은 즉시 return한다.
+  인스턴스 간 조율은 …07 락이 담당하므로 게이트는 프로세스 로컬로 충분하다.
+- **2단계 구조**: 모든 HTTP GET을 먼저 락·트랜잭션 밖에서 수행해 메모리에 모으고, 그 뒤 …07 락을
+  잡아 upsert+commit만 짧게 처리한다. 느리거나 막힌 Langfuse가 DB 트랜잭션이나 크로스-인스턴스
+  락을 붙잡지 못하게 한다. HTTP 오류·JSON 파싱 오류(`ValueError`)는 시크릿을 로그에 남기지 않고
+  해당 틱을 중단하되, 앞서 모은 날짜는 그대로 적재한다(멱등이라 다음 주기에 재롤).
+- **집계 축·윈도우**: `observations` 뷰를 일 단위로 `dimension="model"`(providedModelName 그룹,
+  null 모델은 `key="unknown"`)과 `dimension="user"`(userId는 고카디널리티라 그룹 불가·필터만
+  가능 → 테넌트 계정 이메일을 userId 필터로 고정해 루프) 두 축으로 뽑는다. 재집계 윈도우는
+  `AMX_LANGFUSE_METRICS_WINDOW_DAYS`(기본 3)이며 **최소 2로 클램프**한다 — 윈도우 1이면 오늘(항상
+  미확정)만 롤해 마감된 날의 확정치가 영구 미저장되므로, 오늘+어제를 덮어 마감일이 반드시 한 번
+  재롤되게 한다. 계정 수는 `AMX_LANGFUSE_MAX_ACCOUNTS`(기본 100)로 상한, 초과 시 경고 후 정렬
+  선두 N개만 처리한다.
+- **전역 테넌트 바인딩**: 활성화는 `AMX_LANGFUSE_BASE_URL`/`PUBLIC_KEY`/`SECRET_KEY`/`TENANT_ID`
+  4종이 모두 설정된 경우에 한한다(all-or-nothing). 현재 롤업은 **전역 단일 `AMX_LANGFUSE_TENANT_ID`**
+  에 귀속된다 — 스위퍼는 이 테넌트의 계정만 순회·적재하고, REST(`GET /tenants/{id}/usage/langfuse`,
+  TenantScope)는 이 테넌트 행만 반환하므로 다른 테넌트 조회는 빈 결과다. 응답에 `lastSyncedAt`
+  (해당 테넌트 롤업 `max(updated_at)`, 없으면 null)로 신선도를 노출한다. PoC 대상 단일 프로젝트라
+  전역 바인딩으로 시작하며, 테넌트별 프로젝트 매핑은 후속 과제다.
+- **캐시 토큰 부재**: Metrics API의 토큰 measure는 `inputTokens`/`outputTokens`/`totalTokens`와
+  `count`뿐이고 캐시 토큰 measure는 없다(실측 확인). 스키마는 `cache_read_tokens`/
+  `cache_creation_tokens` 컬럼을 두되 **0으로 적재**하며, 향후 measure가 생기면 마이그레이션 없이
+  백필할 자리로 남긴다.
+
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
 O9가 **회전형**으로 판별됨(§8): 계정이 서버에서 활성으로 돌면 그 서버의 Claude Code/tsamx가

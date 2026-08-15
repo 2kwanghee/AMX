@@ -36,7 +36,7 @@ from app.db import get_sessionmaker, try_advisory_xact_lock as _try_advisory_xac
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
-from app.services import alerts, billing, commands, reconcile, usage_cost
+from app.services import alerts, billing, commands, langfuse_metrics, reconcile, usage_cost
 
 _logger = logging.getLogger("ams.grpc")
 
@@ -1188,6 +1188,23 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("watermark-future sweep iteration failed", exc_info=False)
+        # P4 Langfuse metrics: a seventh sibling sweep polls the external Langfuse
+        # Metrics API and compacts the recent-day window into langfuse_usage_rollup
+        # for the console. Its own advisory lock (…07, owned inside the service),
+        # HTTP-only input, and isolated try/except keep it independent of the ledger
+        # sweeps above; a no-op unless the four AMX_LANGFUSE_* settings are present.
+        try:
+            langfuse_rolled = await asyncio.to_thread(
+                _sweep_langfuse_metrics_once, session_factory
+            )
+            if langfuse_rolled:
+                _logger.info(
+                    "langfuse metrics sweeper upserted %d rollup row(s)", langfuse_rolled
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("langfuse metrics sweep iteration failed", exc_info=False)
 
 
 # F3 multi-instance: the sweeps below are idempotent, but running them from every
@@ -1201,7 +1218,8 @@ async def _offline_sweeper(
 # error handling in the sweeper loop.
 _OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
 _SENT_SWEEP_LOCK_KEY = 0x414D580F02
-# …03 billing, …04 rollup, …05 snapshot-retention (in their own modules).
+# …03 billing, …04 rollup, …05 snapshot-retention, …07 langfuse-metrics (in their
+# own modules).
 _WATERMARK_SWEEP_LOCK_KEY = 0x414D580F06
 
 
@@ -1241,6 +1259,13 @@ def _sweep_snapshot_retention_once(session_factory: sessionmaker[Session]) -> in
     # commits per batch — independent of the rollup and billing sweeps.
     with session_factory() as db:
         return usage_cost.sweep_snapshot_retention(db)
+
+
+def _sweep_langfuse_metrics_once(session_factory: sessionmaker[Session]) -> int:
+    # langfuse_metrics.sweep_langfuse_metrics takes its own advisory lock (…07),
+    # polls the external Metrics API and commits — a no-op when unconfigured.
+    with session_factory() as db:
+        return langfuse_metrics.sweep_langfuse_metrics(db)
 
 
 def _sweep_watermark_future_once(session_factory: sessionmaker[Session]) -> bool:
