@@ -123,10 +123,27 @@
         "windowMinutes": {
           "type": "integer",
           "minimum": 0
-        },
+        }
+      }
+    },
+    "scopedWindow": {
+      "description": "One per-model scoped weekly window (tsamx scoped; usage.scopedWindows). Unlike quotaWindow it is keyed by model, not by a provider window id: the producer (reporter.go) fills model/pct/resetsAt only, never id/windowMinutes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "pct"],
+      "properties": {
         "model": {
-          "description": "Model identity for a per-model scoped weekly window (usage.scopedWindows). Empty/absent for the positional windows entries. tsamx emits it as the scoped item's name.",
-          "type": "string"
+          "description": "Model display name identifying the scoped window. tsamx emits it as the scoped item's name.",
+          "type": "string",
+          "minLength": 1
+        },
+        "pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "resetsAt": {
+          "$ref": "common.schema.json#/$defs/timestamp"
         }
       }
     },
@@ -205,10 +222,10 @@
               "$ref": "#/$defs/spend"
             },
             "scopedWindows": {
-              "description": "Per-model scoped weekly windows (tsamx scoped). Kept separate from windows so a per-model limit never feeds the switch/poolSummary math; each entry names its model in quotaWindow.model.",
+              "description": "Per-model scoped weekly windows (tsamx scoped). Kept separate from windows so a per-model limit never feeds the switch/poolSummary math; each entry names its model.",
               "type": "array",
               "items": {
-                "$ref": "#/$defs/quotaWindow"
+                "$ref": "#/$defs/scopedWindow"
               }
             }
           }
