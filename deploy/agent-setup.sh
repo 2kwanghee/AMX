@@ -83,6 +83,23 @@ do_install() {
   bash "$ROOT/deploy/agent-run.sh" up \
     --config-dir "$config_dir" --tsamx-bin "$tsamx_bin" "${pass[@]}"
 
+  # Langfuse 추적 opt-in: AMX_LANGFUSE_* 세 변수가 모두 있을 때만 훅을 설치한다.
+  # 하나라도 비면 완전 무동작(기존 설치 경로 불변). 실패는 경고만 — 에이전트
+  # 설치 자체를 막지 않는다. 같은 설정 홈(config_dir)에 심는다.
+  if [ -n "${AMX_LANGFUSE_BASE_URL:-}" ] \
+     && [ -n "${AMX_LANGFUSE_PUBLIC_KEY:-}" ] \
+     && [ -n "${AMX_LANGFUSE_SECRET_KEY:-}" ]; then
+    echo "   Langfuse 추적 설치 (AMX_LANGFUSE_* 감지)…"
+    if LANGFUSE_BASE_URL="$AMX_LANGFUSE_BASE_URL" \
+       LANGFUSE_PUBLIC_KEY="$AMX_LANGFUSE_PUBLIC_KEY" \
+       LANGFUSE_SECRET_KEY="$AMX_LANGFUSE_SECRET_KEY" \
+       sh "$ROOT/deploy/install-langfuse-hook.sh" --config-dir "$config_dir"; then
+      ok "Langfuse 훅 설치 완료 ($config_dir)"
+    else
+      warn "Langfuse 훅 설치 실패 — 추적 없이 계속합니다. 나중에 deploy/install-langfuse-hook.sh로 재시도하세요."
+    fi
+  fi
+
   # 재기동·제거를 위해 (토큰 제외) 설정을 기록해 둔다. 토큰은 1회용이라 저장하지 않는다.
   mkdir -p "$DEV_DIR"
   {
