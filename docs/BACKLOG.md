@@ -108,6 +108,7 @@ P0 계약 · P1 인벤토리 · P2 채널 · P3 스위칭 · P4 콘솔 = **완�
 | G42 | **Langfuse 운영 환경 반영 미완** — 스윕·REST는 머지됐으나 운영 AMS에 `AMX_LANGFUSE_*`(BASE_URL/PUBLIC_KEY/SECRET_KEY/TENANT_ID, 선택 UI_URL/POLL_SECONDS/WINDOW_DAYS/MAX_ACCOUNTS)가 없으면 비활성. alembic 0021 적용 필요. 시험 장비 상시 기동(ClickHouse 포함 스택) 여부 미결 | Langfuse 인수인계 남은작업2 |
 | G43 | **Langfuse 훅 파일럿 확대** — 훅이 현재 이 PC 한 대뿐. 노트북·운영 서버 확대 시 `deploy/fleet-langfuse.sh on`(운영 호스트 기본 `~/AMX`, dev 호스트 `--remote-repo ~/AMX-agent`). 노트북 접근은 10.60.1.15:3100 portproxy·방화벽 선행(WSL IP 변동 주의) | Langfuse 인수인계 남은작업3 |
 | G44 | **amx-codex Langfuse 미추적** — Langfuse 훅은 Claude Code 전용이라 codex 러너는 관측 공백. 멀티 프로바이더 계획(리서치 완료, 결정 3건 대기)에 종속 | Langfuse 인수인계 남은작업4 |
+| G45 | **e2e recall 단언이 구 O2 결정에 고착(테스트 실행 확인 우선)** — `e2e/README.md`의 "What it asserts"와 `test_p2_channel_e2e.py:205,208`이 O2 구 결정(회수 시 로컬 보존: `disabled=True`·`ALLOCATION_INACTIVE`·ciphertext 보존)을 단언한다. 그러나 `commands.py:134` `recall_purges_local_copy`가 08-14 O2 변경으로 provider 무관 항상 purge(True)를 반환해, 회수가 로컬 복사본을 남기지 않는다 → 이 e2e가 현재 실패할 가능성. **문서 정정보다 e2e 실행으로 실제 실패 여부 확인이 먼저** | 문서 감사(08-15) |
 
 ---
 
