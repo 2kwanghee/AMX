@@ -33,13 +33,15 @@ set -eu
 
 die() { echo "install-langfuse-hook: $*" >&2; exit 1; }
 info() { echo "install-langfuse-hook: $*"; }
+# Escape a value for single-quoted shell: ' -> '\''
+sq() { printf "%s" "$1" | sed "s/'/'\\\\''/g"; }
 
 # Resolve the repo's deploy/langfuse dir relative to this script, so the install
 # works from any CWD.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd) || die "cannot resolve script dir"
 SRC_HOOK="$SCRIPT_DIR/langfuse/langfuse_hook.py"
 
-CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CONFIG_DIR=""   # resolved after arg parsing (see below)
 
 UNINSTALL=0
 BASE_URL="${LANGFUSE_BASE_URL:-}"
@@ -58,6 +60,20 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+
+# Config-home precedence, so the hook lands in the SAME home tsamx/amx-claude
+# use on this host (see deploy/agent-setup.sh, default ~/.claude-amx):
+#   --config-dir flag  >  $CLAUDE_CONFIG_DIR  >  ~/.claude-amx (if present)  >  ~/.claude
+if [ -z "$CONFIG_DIR" ]; then
+	if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+		CONFIG_DIR="$CLAUDE_CONFIG_DIR"
+	elif [ -d "$HOME/.claude-amx" ]; then
+		CONFIG_DIR="$HOME/.claude-amx"
+	else
+		CONFIG_DIR="$HOME/.claude"
+	fi
+fi
+info "config home: $CONFIG_DIR"
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required (for settings.json merge)"
 
@@ -166,15 +182,38 @@ fi
 [ -n "$PUBLIC_KEY" ] || die "LANGFUSE_PUBLIC_KEY is required (env or --public-key)"
 [ -n "$SECRET_KEY" ] || die "LANGFUSE_SECRET_KEY is required (env or --secret-key)"
 
+# Integrity: verify the vendored hook against the recorded checksum BEFORE
+# copying it into the runner's config home. python3 (already required) does the
+# hashing, so we do not depend on sha256sum(1) being present.
+SUMS_FILE="$SCRIPT_DIR/langfuse/SHA256SUMS"
+[ -f "$SUMS_FILE" ] || die "checksum file not found: $SUMS_FILE"
+python3 - "$SRC_HOOK" "$SUMS_FILE" <<'PY' || die "hook checksum verification failed — refusing to install"
+import hashlib, sys
+src, sums = sys.argv[1], sys.argv[2]
+want = ""
+for line in open(sums):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    h, _, name = line.partition("  ")
+    if name.strip() == "langfuse_hook.py":
+        want = h.strip().lower()
+        break
+if not want:
+    sys.stderr.write("no langfuse_hook.py entry in SHA256SUMS\n"); sys.exit(1)
+got = hashlib.sha256(open(src, "rb").read()).hexdigest()
+if got != want:
+    sys.stderr.write("checksum mismatch: expected %s got %s\n" % (want, got)); sys.exit(1)
+PY
+info "verified hook checksum"
+
+# 'uv' is mandatory: the Stop hook runs via `uv run --script`, which reads the
+# hook's inline dependency metadata and installs langfuse into an ephemeral env.
+command -v uv >/dev/null 2>&1 || die "'uv' is required on PATH (Stop hook runs 'uv run --script'); install from https://docs.astral.sh/uv/"
+
 mkdir -p "$HOOKS_DIR" || die "cannot create $HOOKS_DIR"
 cp "$SRC_HOOK" "$DEST_HOOK" || die "cannot copy hook to $DEST_HOOK"
 info "installed hook: $DEST_HOOK"
-
-if ! command -v uv >/dev/null 2>&1; then
-	info "note: 'uv' not found on PATH. The Stop hook uses 'uv run --script'."
-	info "      install uv (https://docs.astral.sh/uv/) or edit $SETTINGS to run"
-	info "      the hook with: python3 $DEST_HOOK  (needs 'langfuse>=4,<5' installed)."
-fi
 
 apply_settings install
 
@@ -190,9 +229,9 @@ cat > "$_tmp" <<EOF
 # through that wrapper are traced; delete this file to turn tracing off.
 # Managed by deploy/install-langfuse-hook.sh (re-run to regenerate).
 TRACE_TO_LANGFUSE=true
-LANGFUSE_BASE_URL=$BASE_URL
-LANGFUSE_PUBLIC_KEY=$PUBLIC_KEY
-LANGFUSE_SECRET_KEY=$SECRET_KEY
+LANGFUSE_BASE_URL='$(sq "$BASE_URL")'
+LANGFUSE_PUBLIC_KEY='$(sq "$PUBLIC_KEY")'
+LANGFUSE_SECRET_KEY='$(sq "$SECRET_KEY")'
 # LANGFUSE_USER_ID and LANGFUSE_TRACING_ENVIRONMENT are auto-derived by the
 # wrapper (active tsamx account email / hostname) when left unset. Pin them here
 # to override.
@@ -205,5 +244,19 @@ EOF
 chmod 600 "$_tmp" || die "cannot chmod env file"
 mv "$_tmp" "$ENV_FILE" || die "cannot write $ENV_FILE"
 info "wrote $ENV_FILE (mode 0600)"
+
+# Warm the uv dependency cache now (while this install presumably has network),
+# so the FIRST real Stop hook on an offline/air-gapped host does not have to
+# resolve langfuse from PyPI. Run with TRACE_TO_LANGFUSE unset and no keys, so
+# the hook takes its inactive early-exit path — it only forces uv to fetch and
+# cache the pinned dependencies. Best-effort: a failure is a warning, not fatal.
+info "warming uv dependency cache (first-run offline safety)..."
+if env -u TRACE_TO_LANGFUSE -u LANGFUSE_PUBLIC_KEY -u LANGFUSE_SECRET_KEY \
+	uv run --script "$DEST_HOOK" </dev/null >/dev/null 2>&1; then
+	info "uv cache warmed"
+else
+	info "warning: could not warm uv cache now; the first Stop hook will resolve"
+	info "         dependencies then (needs network at that point)."
+fi
 
 info "done. Sessions launched via amx-claude on this host will trace to Langfuse."

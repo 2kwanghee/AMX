@@ -67,10 +67,13 @@ flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
 # session NOT launched through this wrapper never gets the keys in its env, so
 # the hook no-ops there — only wrapper-launched sessions are traced.
 #
-# Fail-open, always: a missing file, a malformed env file, a missing tsamx, or a
-# tsamx timeout must NEVER stop claude from starting (same philosophy as the
-# flock above). The whole block runs with `set +e` and pre-validates the env
-# file syntax before sourcing it.
+# Fail-open, always: a missing file, a missing tsamx/timeout, or a tsamx query
+# error must never stop claude from starting (same philosophy as the flock
+# above). The env file is TRUSTED input — it is created 0600 by
+# install-langfuse-hook.sh, not user-authored — so we do not defend against
+# hostile content; we only guard against an accidentally malformed file by
+# pre-validating its syntax (`sh -n`) and skipping the load on a parse error,
+# rather than letting `set -e` abort the runner. The whole block runs `set +e`.
 LF_ENV_FILE="$CONFIG_DIR/amx-langfuse.env"
 if [ -f "$LF_ENV_FILE" ] && [ -r "$LF_ENV_FILE" ]; then
 	set +e
@@ -82,8 +85,13 @@ if [ -f "$LF_ENV_FILE" ] && [ -r "$LF_ENV_FILE" ]; then
 		if [ "${TRACE_TO_LANGFUSE:-}" = "true" ]; then
 			# Account attribution: default LANGFUSE_USER_ID to the currently
 			# active AMX account (tsamx active email), unless the env file
-			# already pinned it. Bounded to 2s; any failure leaves it unset.
-			if [ -z "${LANGFUSE_USER_ID:-}" ] && command -v tsamx >/dev/null 2>&1; then
+			# already pinned it. Bounded to 2s via timeout(1). If timeout(1) is
+			# absent (some minimal images), we SKIP the lookup entirely rather
+			# than run tsamx unbounded — leaving LANGFUSE_USER_ID unset (pin it
+			# in the env file on such hosts).
+			if [ -z "${LANGFUSE_USER_ID:-}" ] \
+				&& command -v timeout >/dev/null 2>&1 \
+				&& command -v tsamx >/dev/null 2>&1; then
 				_lf_email=$(timeout 2 tsamx status --json 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("active") or {}).get("email") or "")' 2>/dev/null)
 				if [ -n "${_lf_email:-}" ]; then
 					LANGFUSE_USER_ID="$_lf_email"

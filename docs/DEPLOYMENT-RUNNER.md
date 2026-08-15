@@ -244,11 +244,22 @@ LANGFUSE_PUBLIC_KEY=pk-... \
 LANGFUSE_SECRET_KEY=sk-... \
   sh deploy/install-langfuse-hook.sh
 ```
-멱등(재실행 시 `settings.json` 불변)이다. 훅을 `$CLAUDE_CONFIG_DIR/hooks/`로
-복사하고, `settings.json`의 Stop 훅에 `uv run --script <훅>` 항목을 병합하며(기존
-다른 키·훅 보존), `amx-langfuse.env`(0600)를 만든다. 기존 env 파일이 있으면 `.bak`로
-백업한 뒤 덮어쓴다. 훅 실행에 `uv`가 필요하다 — 없으면 설치는 그 사실을 찍고,
-`python3 <훅>`(langfuse 사전 설치 전제)로 바꿔 쓸 수 있다.
+멱등(재실행 시 `settings.json` 불변)이다. 설정 홈은
+`--config-dir` > `$CLAUDE_CONFIG_DIR` > `~/.claude-amx`(존재 시) > `~/.claude`
+순으로 정해지고, 고른 경로를 설치 로그에 찍는다 — tsamx·`amx-claude`와 같은 홈을
+써야 하기 때문이다(러너 홈 관례는 `deploy/agent-setup.sh` 참조). 복사 전 vendored
+훅을 `deploy/langfuse/SHA256SUMS`와 대조해 불일치면 중단한다. 이어 훅을
+`<설정 홈>/hooks/`로 복사하고, `settings.json`의 Stop 훅에 `uv run --script <훅>`
+항목을 병합하며(기존 다른 키·훅 보존), `amx-langfuse.env`(0600)를 만든다. 기존 env
+파일이 있으면 `.bak`로 백업한 뒤 덮어쓴다. 훅 실행에 `uv`가 **필수**라 없으면 설치가
+오류로 멈춘다(https://docs.astral.sh/uv/). 설치 끝에 훅을 비활성 상태로 1회 돌려 uv
+의존성 캐시를 미리 채운다 — 오프라인 호스트에서 첫 Stop 훅이 PyPI 해석에 실패하는 것을
+막기 위함이고, 이 워밍 실패는 경고로만 남긴다.
+
+> 시크릿 전달 시 노출 주의: 키를 명령줄 인자(`--secret-key ...`)나 환경변수로 주면
+> `ps`·셸 히스토리에 남을 수 있다. 공유 호스트에서는 설치 셸의 히스토리를 끄거나,
+> 설치 직후 셸을 정리한다. 기록된 최종 자격증명은 `amx-langfuse.env`(0600) 한 곳에만
+> 둔다.
 
 ### 끄는 법
 ```sh
@@ -256,3 +267,18 @@ sh deploy/install-langfuse-hook.sh --uninstall
 ```
 `amx-langfuse.env`를 지우고 `settings.json`에서 이 훅 항목만 뺀다. env 파일만 지워도
 래퍼가 키를 export하지 않아 추적이 멈춘다(훅은 남아 있어도 무동작).
+
+### 운영 주의
+- **세션 도중 계정 전환**: `LANGFUSE_USER_ID`는 래퍼가 **기동 시점**의 활성 계정
+  이메일로 한 번 정해 고정한다. 세션이 떠 있는 동안 deliver로 활성 계정이 바뀌어도
+  그 세션의 추적 귀속은 기동 시점 계정 그대로다(세션 단위 정확도의 한계). 정확한
+  귀속이 필요하면 env 파일에 `LANGFUSE_USER_ID`를 명시적으로 박아 쓴다.
+- **키 로테이션**: Langfuse에서 새 키를 발급한 뒤 같은 설치 명령을 다시 돌리면
+  `amx-langfuse.env`가 갱신되고 기존 파일은 `.bak`로 남는다. **`.bak`에는 구
+  시크릿이 평문으로 남으므로** 로테이션 확인 후 `amx-langfuse.env.bak`을 지운다
+  (`shred -u` 권장). 이미 실행 중인 세션은 기동 시 읽은 구 키를 계속 쓴다 —
+  로테이션은 다음 기동부터 적용된다.
+- **Langfuse 서버 장애**: Stop 훅은 서버가 죽어 있거나 키가 틀려도 예외를 삼켜
+  `exit 0`으로 끝나고 실패는 훅 로그 파일에만 남는다(코드 확인: `main()`이
+  네트워크·클라이언트 생성 실패를 잡아 `return 0`). 따라서 Langfuse 장애가 Claude
+  세션 종료나 동작을 막지 않는다. 추적만 조용히 누락된다.
