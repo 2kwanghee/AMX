@@ -30,6 +30,12 @@ from app.models import Alert, Server
 
 _ACTIVE_STATUSES = ("open", "acked")
 
+# G27. The usage-rollup watermark is a single global cursor, but a forward
+# wall-clock step that parks it in the future silently strands every tenant's
+# below-watermark snapshots as unbilled, so the alert is raised per tenant with a
+# tenant-scoped dedupe key and a NULL server_id (not a per-server condition).
+WATERMARK_FUTURE_KIND = "billing_watermark_future"
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -212,3 +218,82 @@ def sweep_offline(db: Session, *, stale_after_seconds: float) -> list[uuid.UUID]
         )
     db.commit()
     return [s.id for s in stale]
+
+
+def _watermark_dedupe_key(tenant_id) -> str:
+    return f"{tenant_id}:{WATERMARK_FUTURE_KIND}"
+
+
+def _open_watermark_future(db: Session, *, tenant_id: uuid.UUID, detail: dict) -> None:
+    """Open/refresh one tenant's watermark-future alert, idempotent by key.
+
+    Mirrors ``open_alert`` (acked-aware, ``INSERT ... ON CONFLICT`` against the
+    partial unique index) but for a system-scoped condition: ``server_id`` is
+    NULL and the key is tenant-scoped rather than derived from a server.
+    """
+    key = _watermark_dedupe_key(tenant_id)
+    acked = db.scalar(
+        select(Alert).where(Alert.dedupe_key == key, Alert.status == "acked")
+    )
+    if acked is not None:
+        acked.detail = detail
+        return
+    stmt = pg_insert(Alert).values(
+        tenant_id=tenant_id,
+        server_id=None,
+        account_id=None,
+        kind=WATERMARK_FUTURE_KIND,
+        severity="warning",
+        status="open",
+        dedupe_key=key,
+        detail=detail,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["dedupe_key"],
+        index_where=text("status = 'open'"),
+        set_={"detail": stmt.excluded.detail},
+    )
+    db.execute(stmt)
+
+
+def sync_watermark_future(
+    db: Session,
+    *,
+    watermark: datetime | None,
+    now: datetime,
+    skew_seconds: float,
+    tenant_ids,
+) -> bool:
+    """G27: raise/resolve ``billing_watermark_future`` from the rollup watermark.
+
+    A forward wall-clock step (VM resume / NTP step) can advance the usage-rollup
+    watermark past real time; usage snapshots that then arrive below it are never
+    rolled up and go silently unbilled. While the watermark sits more than
+    ``skew_seconds`` ahead of ``now`` (skew tolerance guards benign clock jitter),
+    open a per-tenant warning; once it is back at/below now, auto-resolve (same
+    pattern as ``sync_from_report``). This only reads the watermark — it never
+    rewinds or mutates it. The caller commits.
+
+    Returns True while the future condition holds.
+    """
+    future = watermark is not None and watermark > now + timedelta(seconds=skew_seconds)
+    detail = (
+        {
+            "watermark": watermark.isoformat(),
+            "now": now.isoformat(),
+            "skew_seconds": skew_seconds,
+        }
+        if future
+        else None
+    )
+    for tenant_id in tenant_ids:
+        if future:
+            _open_watermark_future(db, tenant_id=tenant_id, detail=detail)
+        else:
+            key = _watermark_dedupe_key(tenant_id)
+            db.execute(
+                update(Alert)
+                .where(Alert.dedupe_key == key, Alert.status.in_(_ACTIVE_STATUSES))
+                .values(status="resolved", resolved_at=_now())
+            )
+    return future

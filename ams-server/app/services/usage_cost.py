@@ -38,8 +38,15 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import try_advisory_xact_lock as _try_advisory_xact_lock
-from app.models import Account, BillingCursor, Server, UsageDailyRollup, UsageSnapshot
-from app.services import billing
+from app.models import (
+    Account,
+    BillingCursor,
+    Server,
+    Tenant,
+    UsageDailyRollup,
+    UsageSnapshot,
+)
+from app.services import alerts, billing
 
 _logger = logging.getLogger("ams.usage_cost")
 
@@ -323,6 +330,29 @@ def sweep_usage_rollup(db: Session) -> int:
     )
     db.commit()
     return upserted
+
+
+# -- watermark-future guard (G27) ---------------------------------------------
+def sweep_watermark_future(db: Session) -> bool:
+    """Raise/resolve ``billing_watermark_future`` from the rollup watermark.
+
+    A forward wall-clock step can park the ``ROLLUP_KIND`` cursor ahead of real
+    time; snapshots that then land below it are skipped forever by the rollup
+    range query and go silently unbilled (BACKLOG G27). This reads the cursor
+    only — never rewinds it — and delegates the per-tenant alert lifecycle to
+    ``alerts.sync_watermark_future``. Self-commits; safe to run every sweep tick.
+
+    Returns True while the watermark sits beyond the skew tolerance in the future.
+    """
+    cursor = db.get(BillingCursor, ROLLUP_KIND)
+    watermark = cursor.watermark.astimezone(UTC) if cursor is not None else None
+    skew = float(get_settings().billing_watermark_skew_seconds)
+    tenant_ids = list(db.scalars(select(Tenant.id)))
+    future = alerts.sync_watermark_future(
+        db, watermark=watermark, now=_now(), skew_seconds=skew, tenant_ids=tenant_ids
+    )
+    db.commit()
+    return future
 
 
 # -- snapshot retention purge -------------------------------------------------

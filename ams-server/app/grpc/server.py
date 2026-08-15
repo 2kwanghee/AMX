@@ -1171,6 +1171,23 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("snapshot retention sweep iteration failed", exc_info=False)
+        # G27 watermark-future guard: a sixth sibling sweep flags the case where a
+        # forward wall-clock step has parked the rollup watermark ahead of real
+        # time, stranding below-watermark snapshots as silently unbilled. Its own
+        # advisory lock (…06) and isolated try/except keep it independent.
+        try:
+            watermark_future = await asyncio.to_thread(
+                _sweep_watermark_future_once, session_factory
+            )
+            if watermark_future:
+                _logger.warning(
+                    "usage-rollup watermark is ahead of real time; "
+                    "billing_watermark_future alert(s) open"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("watermark-future sweep iteration failed", exc_info=False)
 
 
 # F3 multi-instance: the sweeps below are idempotent, but running them from every
@@ -1184,6 +1201,8 @@ async def _offline_sweeper(
 # error handling in the sweeper loop.
 _OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
 _SENT_SWEEP_LOCK_KEY = 0x414D580F02
+# …03 billing, …04 rollup, …05 snapshot-retention (in their own modules).
+_WATERMARK_SWEEP_LOCK_KEY = 0x414D580F06
 
 
 def _sweep_once(
@@ -1222,6 +1241,16 @@ def _sweep_snapshot_retention_once(session_factory: sessionmaker[Session]) -> in
     # commits per batch — independent of the rollup and billing sweeps.
     with session_factory() as db:
         return usage_cost.sweep_snapshot_retention(db)
+
+
+def _sweep_watermark_future_once(session_factory: sessionmaker[Session]) -> bool:
+    # usage_cost.sweep_watermark_future reads the rollup cursor and commits the
+    # per-tenant alert lifecycle; the transaction-scoped lock (…06) makes exactly
+    # one instance run it per tick.
+    with session_factory() as db:
+        if not _try_advisory_xact_lock(db, _WATERMARK_SWEEP_LOCK_KEY):
+            return False
+        return usage_cost.sweep_watermark_future(db)
 
 
 async def serve(port: int = DEFAULT_PORT) -> None:

@@ -301,6 +301,7 @@ AlertKind = Literal[
     "recall_failed",
     "command_send_failed",
     "self_update_failed",
+    "billing_watermark_future",
 ]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]
