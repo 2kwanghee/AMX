@@ -496,3 +496,93 @@ def test_multiday_chunked_sweep(app_env):
     # Idempotent re-run over the same multi-day span creates nothing new.
     assert _sweep() == 0
     assert len(_events(tenant_id)) == 3
+
+
+# -- G27 self-heal: parked-future watermark rewinds and reheals ---------------
+def _watermark() -> datetime | None:
+    with get_sessionmaker()() as db:
+        cur = db.get(BillingCursor, "usage_daily")
+        return cur.watermark.astimezone(UTC) if cur is not None else None
+
+
+def _last_closed_end() -> datetime:
+    from app.config import get_settings
+
+    grace = get_settings().billing_close_grace_seconds
+    return billing._floor_day(datetime.now(UTC) - timedelta(seconds=grace))
+
+
+def test_future_watermark_rewinds_to_last_closed_end(app_env):
+    """A watermark parked in the future is rewound to last_closed_end on sweep,
+    so the early return can never leave the cursor stranded ahead of real time."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-rw@ex.com")
+    future = billing._floor_day(datetime.now(UTC)) + timedelta(days=10)
+    _set_watermark(future)
+    _plant(tenant_id, server_id, _closed_day(), _usage_payload(active_ids=["r1"]))
+
+    handler, restore = _capture_billing_logs()
+    try:
+        assert _sweep() == 0  # this tick idles
+    finally:
+        restore()
+
+    assert _watermark() == _last_closed_end()  # rewound out of the future
+    warnings = [m for lvl, m in handler.messages if lvl == logging.WARNING]
+    assert any("rewound" in m for m in warnings), warnings
+
+
+def test_rewound_watermark_reheals_reopened_day(app_env, monkeypatch):
+    """The rewind unfreezes forward progress: the day that was blocked by the
+    parked cursor is billed exactly once as soon as it closes (orphan resolved),
+    and a further sweep adds nothing (ON CONFLICT anchor). ``_now`` is pinned so
+    the "next tick" deterministically lands on the following, now-closed day."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-rh@ex.com")
+    t1 = datetime(2026, 3, 10, 23, 0, tzinfo=UTC)
+    monkeypatch.setattr(billing, "_now", lambda: t1)
+    _set_watermark(billing._floor_day(t1) + timedelta(days=10))  # forward jump
+    _plant(tenant_id, server_id, datetime(2026, 3, 10, 12, 0, tzinfo=UTC),
+           _usage_payload(active_ids=["h1"]))
+
+    assert _sweep() == 0  # rewind tick, idles
+    assert _watermark() == billing._floor_day(t1)  # rewound to 2026-03-10
+
+    monkeypatch.setattr(billing, "_now", lambda: t1 + timedelta(days=1))
+    assert _sweep() == 1  # 03-10 has now closed -> the reopened day is billed
+    assert len(_events(tenant_id)) == 1
+    assert _sweep() == 0  # idempotent: no double-bill
+    assert len(_events(tenant_id)) == 1
+
+
+def test_monotonic_future_does_not_flap(app_env):
+    """A watermark that only ever moves forward with real time (no backward
+    clock correction) must not re-trigger a rewind on the following tick."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-fl@ex.com")
+    _plant(tenant_id, server_id, _closed_day(), _usage_payload(active_ids=["f1"]))
+    assert _sweep() == 1  # normal advance to last_closed_end
+    wm_after = _watermark()
+
+    handler, restore = _capture_billing_logs()
+    try:
+        assert _sweep() == 0  # nothing new
+    finally:
+        restore()
+
+    assert _watermark() == wm_after  # unchanged
+    warnings = [m for lvl, m in handler.messages if lvl == logging.WARNING]
+    assert not any("rewound" in m for m in warnings), warnings
+
+
+def test_rewind_clamps_up_to_purge_cursor(app_env):
+    """The rewind target is clamped UP to the retention purge cursor, so a rewind
+    can never drop below already-purged data and re-bill a day from its survivors."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-clamp@ex.com")
+    purge = _last_closed_end() + timedelta(days=1)  # purge reached into a not-yet-closed day
+    with get_sessionmaker()() as db:
+        db.merge(BillingCursor(kind=billing.PURGE_KIND, watermark=purge,
+                               updated_at=datetime.now(UTC)))
+        db.commit()
+    _set_watermark(billing._floor_day(datetime.now(UTC)) + timedelta(days=10))  # forward jump
+    _plant(tenant_id, server_id, _closed_day(), _usage_payload(active_ids=["c1"]))
+
+    assert _sweep() == 0  # rewind tick
+    assert _watermark() == purge  # clamped up to the purge cursor, not last_closed_end

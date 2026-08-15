@@ -504,6 +504,66 @@ def test_watermark_within_skew_no_alert(app_env):
     assert _watermark_alerts(tenant_id, "open") == []
 
 
+# -- G27 self-heal: parked-future watermark rewinds and reheals ---------------
+def _rollup_watermark():
+    with _sm() as db:
+        cur = db.get(BillingCursor, usage_cost.ROLLUP_KIND)
+        return cur.watermark.astimezone(UTC) if cur is not None else None
+
+
+def _last_closed_end():
+    grace = _get_settings().billing_close_grace_seconds
+    return usage_cost._floor_day(datetime.now(UTC) - timedelta(seconds=grace))
+
+
+def test_rollup_future_watermark_rewinds(app_env):
+    """A rollup cursor parked in the future is rewound to last_closed_end on the
+    sweep, so the early return can never strand it ahead of real time."""
+    tenant_id, account_id, server_id = _seed_tenant_account_server("uc-rw@ex.com")
+    _set_rollup_watermark(usage_cost._floor_day(datetime.now(UTC)) + timedelta(days=10))
+    day = (datetime.now(UTC) - timedelta(days=3)).replace(hour=12, minute=0, second=0, microsecond=0)
+    _plant(tenant_id, server_id, day, [_acc(account_id, current=True, positional=(50.0, 0.0))])
+
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 0  # idle tick that rewinds
+    assert _rollup_watermark() == _last_closed_end()  # out of the future
+
+
+def test_rollup_rewind_reheals_reopened_day(app_env, monkeypatch):
+    """The rewind unfreezes forward progress: the day blocked by the parked cursor
+    is rolled up as soon as it closes (orphan resolved), and a further sweep
+    recompute-replaces without duplicating. ``_now`` is pinned so the "next tick"
+    deterministically lands on the following, now-closed day."""
+    from app.models import UsageDailyRollup
+
+    tenant_id, account_id, server_id = _seed_tenant_account_server("uc-rh@ex.com")
+    t1 = datetime(2026, 3, 10, 23, 0, tzinfo=UTC)
+    monkeypatch.setattr(usage_cost, "_now", lambda: t1)
+    _set_rollup_watermark(usage_cost._floor_day(t1) + timedelta(days=10))  # forward jump
+    day = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
+    _plant(tenant_id, server_id, day, [_acc(account_id, current=True, positional=(50.0, 0.0))])
+    _plant(tenant_id, server_id, day + timedelta(seconds=300),
+           [_acc(account_id, current=True, positional=(50.0, 0.0))])
+
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 0  # rewind tick
+    assert _rollup_watermark() == usage_cost._floor_day(t1)  # rewound to 2026-03-10
+
+    monkeypatch.setattr(usage_cost, "_now", lambda: t1 + timedelta(days=1))
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 1  # 03-10 has now closed -> reopened day rolled up
+
+    def _row():
+        with _sm() as db:
+            return db.get(UsageDailyRollup, (tenant_id, day.date(), server_id, account_id))
+
+    r = _row()
+    assert r is not None
+    # dt = 300 + 600 (gap-clamped last) = 900 observed; held = 50*900 = 45000.
+    assert r.held_util_seconds == Decimal("45000.000000")
+    assert r.snapshot_count == 2
+
+
 # ============================ retention purge ================================
 def _plant_snapshot(tenant_id, server_id, reported_at, report_type="usage", accounts=None):
     """Insert one snapshot of a given report_type; return its id."""
@@ -632,3 +692,104 @@ def test_retention_disabled_keeps_everything(app_env, monkeypatch):
     with _sm() as db:
         assert usage_cost.sweep_snapshot_retention(db) == 0
     assert _snapshot_exists(old)
+
+
+# -- G27 x retention regression: rewind must not recompute a purged day -------
+def test_rewind_clamps_above_purged_day(app_env, monkeypatch):
+    """Adversary regression: a fake-future tick seals a day from its morning
+    snapshots, retention (its boundary guard also fooled by the fake clock) then
+    deletes those morning rows, and on clock return the rewind must NOT drop below
+    that day — else the next tick recomputes the sealed row from the afternoon
+    survivors and loses the morning usage. The purge cursor clamps the rewind."""
+    from app.models import UsageDailyRollup
+    from app.services import billing
+
+    tenant_id, account_id, server_id = _seed_tenant_account_server("uc-clamp@ex.com")
+    _use_retention(monkeypatch, 5)
+    d = datetime(2026, 3, 10, tzinfo=UTC)
+
+    # 1) Fake-future tick seals day 03-10 from its MORNING snapshot only.
+    monkeypatch.setattr(usage_cost, "_now", lambda: datetime(2026, 3, 15, 12, 0, tzinfo=UTC))
+    _plant(tenant_id, server_id, d + timedelta(hours=6),
+           [_acc(account_id, current=True, positional=(60.0, 0.0))])
+    with _sm() as db:
+        assert sweep_usage_rollup(db) >= 1  # seals 03-10, parks watermark at 03-15
+
+    def _row():
+        with _sm() as db:
+            return db.get(UsageDailyRollup, (tenant_id, d.date(), server_id, account_id))
+
+    sealed = _row()
+    assert sealed.snapshot_count == 1
+    held_before, obs_before = sealed.held_util_seconds, sealed.observed_seconds
+
+    # Billing cursor present so the retention settlement boundary is computable.
+    with _sm() as db:
+        db.merge(BillingCursor(kind=billing.KIND, watermark=datetime(2026, 3, 15, tzinfo=UTC),
+                               updated_at=datetime(2026, 3, 15, 12, 0, tzinfo=UTC)))
+        db.commit()
+
+    # 2) Afternoon snapshot (different utilization) arrives; the fake-clock
+    #    retention then deletes the MORNING row while the afternoon survives.
+    _plant(tenant_id, server_id, d + timedelta(hours=18),
+           [_acc(account_id, current=True, positional=(20.0, 0.0))])
+    with _sm() as db:
+        assert usage_cost.sweep_snapshot_retention(db) == 1  # morning purged
+    with _sm() as db:
+        pc = db.get(BillingCursor, billing.PURGE_KIND)
+    assert pc.watermark.astimezone(UTC) == datetime(2026, 3, 11, tzinfo=UTC)  # day CEILING
+
+    # 3) Clock returns to real time: the parked watermark rewinds, but the clamp
+    #    keeps it at/above 03-11 so day 03-10 is never reopened.
+    monkeypatch.setattr(usage_cost, "_now", lambda: datetime(2026, 3, 10, 13, 0, tzinfo=UTC))
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 0  # rewind tick, idles
+    with _sm() as db:
+        wm = db.get(BillingCursor, usage_cost.ROLLUP_KIND).watermark.astimezone(UTC)
+    assert wm == datetime(2026, 3, 11, tzinfo=UTC)  # clamped up, not down to 03-10
+
+    # 4) Forward ticks advance past 03-11; 03-10 stays below the cursor and is never
+    #    recomputed. The sealed morning row is preserved byte-for-byte.
+    monkeypatch.setattr(usage_cost, "_now", lambda: datetime(2026, 3, 12, 13, 0, tzinfo=UTC))
+    with _sm() as db:
+        sweep_usage_rollup(db)
+    after = _row()
+    assert after.snapshot_count == 1                 # afternoon never folded in
+    assert after.held_util_seconds == held_before    # sealed value intact
+    assert after.observed_seconds == obs_before
+
+
+def test_purge_cursor_never_regresses(app_env, monkeypatch):
+    """The purge cursor is monotonic: a later purge computing an EARLIER
+    delete_before (e.g. after a backward clock step) must not move it back."""
+    from app.services import billing
+
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-mono@ex.com")
+    _use_retention(monkeypatch, 5)
+    with _sm() as db:  # pre-seed the purge cursor far in the future
+        db.merge(BillingCursor(kind=billing.PURGE_KIND, watermark=datetime(2027, 1, 1, tzinfo=UTC),
+                               updated_at=datetime(2027, 1, 1, tzinfo=UTC)))
+        db.commit()
+
+    monkeypatch.setattr(usage_cost, "_now", lambda: datetime(2026, 3, 20, 12, 0, tzinfo=UTC))
+    _set_settlement_cursors(usage_cost._floor_day(datetime(2026, 3, 19, tzinfo=UTC)))
+    _plant_snapshot(tenant_id, server_id, datetime(2026, 3, 1, tzinfo=UTC))
+    with _sm() as db:
+        assert usage_cost.sweep_snapshot_retention(db) == 1  # deletes the old row
+    with _sm() as db:
+        pc = db.get(BillingCursor, billing.PURGE_KIND).watermark.astimezone(UTC)
+    assert pc == datetime(2027, 1, 1, tzinfo=UTC)  # not moved backward
+
+
+def test_rewind_without_purge_cursor_unchanged(app_env, monkeypatch):
+    """Regression guard: with no purge cursor the rewind still lands exactly on
+    last_closed_end (the original G27 behavior)."""
+    tenant_id, account_id, server_id = _seed_tenant_account_server("uc-nopurge@ex.com")
+    t1 = datetime(2026, 3, 10, 23, 0, tzinfo=UTC)
+    monkeypatch.setattr(usage_cost, "_now", lambda: t1)
+    _set_rollup_watermark(usage_cost._floor_day(t1) + timedelta(days=10))
+    _plant(tenant_id, server_id, datetime(2026, 3, 10, 12, 0, tzinfo=UTC),
+           [_acc(account_id, current=True, positional=(50.0, 0.0))])
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 0
+    assert _rollup_watermark() == usage_cost._floor_day(t1)  # == last_closed_end
