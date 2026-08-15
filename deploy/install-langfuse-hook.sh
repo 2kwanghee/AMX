@@ -24,7 +24,11 @@
 #   sh deploy/install-langfuse-hook.sh \
 #     --base-url http://host:3100 --public-key pk-... --secret-key sk-...
 #
-#   sh deploy/install-langfuse-hook.sh --uninstall   # remove env + Stop entry
+#   # also wire the PreToolUse danger-command detection hook (opt-in, off by default):
+#   sh deploy/install-langfuse-hook.sh --with-danger-hook \
+#     --base-url http://host:3100 --public-key pk-... --secret-key sk-...
+#
+#   sh deploy/install-langfuse-hook.sh --uninstall   # remove env + Stop + danger entries
 #
 # CONFIG_DIR defaults to $CLAUDE_CONFIG_DIR or ~/.claude (must match the wrapper
 # and the AMA service account — see docs/DEPLOYMENT-RUNNER.md).
@@ -40,10 +44,12 @@ sq() { printf "%s" "$1" | sed "s/'/'\\\\''/g"; }
 # works from any CWD.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd) || die "cannot resolve script dir"
 SRC_HOOK="$SCRIPT_DIR/langfuse/langfuse_hook.py"
+SRC_DANGER_HOOK="$SCRIPT_DIR/langfuse/danger_hook.py"
 
 CONFIG_DIR=""   # resolved after arg parsing (see below)
 
 UNINSTALL=0
+WITH_DANGER=0
 BASE_URL="${LANGFUSE_BASE_URL:-}"
 PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-}"
 SECRET_KEY="${LANGFUSE_SECRET_KEY:-}"
@@ -51,6 +57,7 @@ SECRET_KEY="${LANGFUSE_SECRET_KEY:-}"
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--uninstall) UNINSTALL=1 ;;
+		--with-danger-hook) WITH_DANGER=1 ;;
 		--base-url) shift; BASE_URL="${1:-}" ;;
 		--public-key) shift; PUBLIC_KEY="${1:-}" ;;
 		--secret-key) shift; SECRET_KEY="${1:-}" ;;
@@ -79,23 +86,33 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required (for settings.jso
 
 HOOKS_DIR="$CONFIG_DIR/hooks"
 DEST_HOOK="$HOOKS_DIR/langfuse_hook.py"
+DEST_DANGER_HOOK="$HOOKS_DIR/danger_hook.py"
 SETTINGS="$CONFIG_DIR/settings.json"
 ENV_FILE="$CONFIG_DIR/amx-langfuse.env"
 # The command claude runs at Stop. `uv run --script` reads the inline
 # dependency metadata in the hook and installs langfuse into an ephemeral env.
 HOOK_CMD="uv run --script $DEST_HOOK"
+# The danger hook has NO external dependencies (stdlib only), so it runs under
+# plain python3 — no uv, no checksum (self-authored, not vendored). It fires on
+# PreToolUse with a "Bash" matcher.
+DANGER_HOOK_CMD="python3 $DEST_DANGER_HOOK"
 
 # ---- settings.json merge/removal (idempotent, preserves other keys) ---------
 # python reads the settings file BY PATH (never via stdin — stdin carries the
-# script here) so all sibling keys/hooks are preserved. Adds the Stop entry only
-# when absent; --uninstall removes matching entries. Writes atomically and
-# prints CHANGED / UNCHANGED so the shell reports without a second write.
+# script here) so all sibling keys/hooks are preserved. Adds the entry only when
+# absent; --uninstall removes matching entries. Writes atomically and prints
+# CHANGED / UNCHANGED so the shell reports without a second write.
+#
+# Args: <mode> <event> <matcher> <cmd>. `event` is Stop or PreToolUse; `matcher`
+# is the tool-name filter for PreToolUse ("" = no matcher key, as Stop uses).
+# Identity of "our" block is the exact command string, so Stop and PreToolUse
+# entries never collide and unrelated sibling hooks are untouched.
 apply_settings() {
-	_mode="$1"
-	_res=$(python3 - "$_mode" "$HOOK_CMD" "$SETTINGS" <<'PY'
+	_mode="$1"; _event="$2"; _matcher="$3"; _cmd="$4"
+	_res=$(python3 - "$_mode" "$_event" "$_matcher" "$_cmd" "$SETTINGS" <<'PY'
 import copy, json, os, sys
 
-mode, cmd, path = sys.argv[1], sys.argv[2], sys.argv[3]
+mode, event, matcher, cmd, path = sys.argv[1:6]
 try:
     with open(path) as f:
         raw = f.read().strip()
@@ -114,33 +131,36 @@ before = copy.deepcopy(data)
 hooks = data.get("hooks")
 if not isinstance(hooks, dict):
     hooks = {}
-stop = hooks.get("Stop")
-if not isinstance(stop, list):
-    stop = []
+entries = hooks.get(event)
+if not isinstance(entries, list):
+    entries = []
 
 def has_cmd(block):
     return any(isinstance(h, dict) and h.get("type") == "command" and h.get("command") == cmd
               for h in block.get("hooks", []))
 
 if mode == "install":
-    if not any(isinstance(b, dict) and has_cmd(b) for b in stop):
-        stop.append({"hooks": [{"type": "command", "command": cmd}]})
-    hooks["Stop"] = stop
+    if not any(isinstance(b, dict) and has_cmd(b) for b in entries):
+        block = {"hooks": [{"type": "command", "command": cmd}]}
+        if matcher:
+            block = {"matcher": matcher, "hooks": block["hooks"]}
+        entries.append(block)
+    hooks[event] = entries
     data["hooks"] = hooks
 else:  # uninstall
-    new_stop = []
-    for b in stop:
+    new_entries = []
+    for b in entries:
         if not isinstance(b, dict):
-            new_stop.append(b); continue
+            new_entries.append(b); continue
         kept = [h for h in b.get("hooks", [])
                 if not (isinstance(h, dict) and h.get("type") == "command" and h.get("command") == cmd)]
         if kept:
-            nb = dict(b); nb["hooks"] = kept; new_stop.append(nb)
+            nb = dict(b); nb["hooks"] = kept; new_entries.append(nb)
         # a block whose only hook was ours is dropped entirely
-    if new_stop:
-        hooks["Stop"] = new_stop
+    if new_entries:
+        hooks[event] = new_entries
     else:
-        hooks.pop("Stop", None)
+        hooks.pop(event, None)
     data["hooks"] = hooks
     if not hooks:
         data.pop("hooks", None)
@@ -157,21 +177,24 @@ print("CHANGED")
 PY
 	) || die "failed to merge settings.json"
 	case "$_res" in
-		UNCHANGED) info "settings.json already up to date (no change)" ;;
-		CHANGED)   info "settings.json updated ($_mode Stop hook)" ;;
+		UNCHANGED) info "settings.json already up to date ($_event, no change)" ;;
+		CHANGED)   info "settings.json updated ($_mode $_event hook)" ;;
 		*)         die "unexpected settings merge result: $_res" ;;
 	esac
 }
 
 if [ "$UNINSTALL" = 1 ]; then
 	[ -d "$CONFIG_DIR" ] || die "config dir not found: $CONFIG_DIR"
-	apply_settings uninstall
+	apply_settings uninstall Stop "" "$HOOK_CMD"
+	# Always remove the danger PreToolUse entry too (regardless of the flag), so
+	# a single --uninstall fully reverses either install shape.
+	apply_settings uninstall PreToolUse Bash "$DANGER_HOOK_CMD"
 	if [ -f "$ENV_FILE" ]; then
 		rm -f "$ENV_FILE" && info "removed $ENV_FILE"
 	else
 		info "no env file to remove ($ENV_FILE)"
 	fi
-	info "left hook script in place: $DEST_HOOK (safe; inert without env file)"
+	info "left hook scripts in place: $DEST_HOOK, $DEST_DANGER_HOOK (safe; inert without env/config)"
 	info "uninstall complete"
 	exit 0
 fi
@@ -215,7 +238,17 @@ mkdir -p "$HOOKS_DIR" || die "cannot create $HOOKS_DIR"
 cp "$SRC_HOOK" "$DEST_HOOK" || die "cannot copy hook to $DEST_HOOK"
 info "installed hook: $DEST_HOOK"
 
-apply_settings install
+apply_settings install Stop "" "$HOOK_CMD"
+
+# ---- danger-command detection hook (opt-in) ---------------------------------
+# Self-authored, stdlib-only; copied and wired into PreToolUse. It is inert
+# until AMX_DANGER_INGEST_URL/TOKEN are set (see amx-langfuse.env below).
+if [ "$WITH_DANGER" = 1 ]; then
+	[ -f "$SRC_DANGER_HOOK" ] || die "danger hook not found: $SRC_DANGER_HOOK"
+	cp "$SRC_DANGER_HOOK" "$DEST_DANGER_HOOK" || die "cannot copy danger hook to $DEST_DANGER_HOOK"
+	info "installed danger hook: $DEST_DANGER_HOOK"
+	apply_settings install PreToolUse Bash "$DANGER_HOOK_CMD"
+fi
 
 # ---- env file (0600, backup existing) ---------------------------------------
 if [ -f "$ENV_FILE" ]; then
@@ -240,6 +273,15 @@ LANGFUSE_SECRET_KEY='$(sq "$SECRET_KEY")'
 # Truncate large prompt/response payloads (chars). Default 20000.
 # CC_LANGFUSE_MAX_CHARS=20000
 # CC_LANGFUSE_DEBUG=true
+#
+# ---- Danger-command detection (PreToolUse danger_hook.py) --------------------
+# Set BOTH to arm the danger hook; leave either unset and the hook is a no-op.
+# The hook posts a masked digest (never the raw command) to the AMS ingest
+# endpoint. Point the URL at your AMS and use the server's danger_ingest_token.
+# AMX_DANGER_INGEST_URL='http://ams-host:8080/api/v1/ingest/danger-command'
+# AMX_DANGER_INGEST_TOKEN='<must match AMS settings.danger_ingest_token>'
+# Optional extra regex patterns (one per line, file MUST be mode 0600):
+# CC_DANGER_PATTERNS_FILE=
 EOF
 chmod 600 "$_tmp" || die "cannot chmod env file"
 mv "$_tmp" "$ENV_FILE" || die "cannot write $ENV_FILE"
