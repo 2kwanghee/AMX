@@ -247,6 +247,29 @@ def sweep_usage_rollup(db: Session) -> int:
                 skipped,
                 min_reported.isoformat() if min_reported else None,
             )
+        # G27 self-heal: the watermark is parked in the future (a forward
+        # wall-clock step). Rewind the cursor to last_closed_end and COMMIT it with
+        # the same upsert used on a normal advance, so the ``return 0`` just below
+        # cannot leave the cursor stranded ahead of real time. This tick idles; the
+        # next tick re-rolls the reopened days from real snapshots — the rollup is
+        # ON CONFLICT DO UPDATE recompute-replace (idempotent), so no double-count.
+        now = _now()
+        db.execute(
+            pg_insert(BillingCursor)
+            .values(kind=ROLLUP_KIND, watermark=last_closed_end, updated_at=now)
+            .on_conflict_do_update(
+                index_elements=["kind"],
+                set_={"watermark": last_closed_end, "updated_at": now},
+            )
+        )
+        db.commit()
+        _logger.warning(
+            "usage-rollup sweep: watermark rewound from %s to %s (was parked ahead "
+            "of real time)",
+            start.isoformat(),
+            last_closed_end.isoformat(),
+        )
+        start = last_closed_end
 
     if start >= last_closed_end:
         return 0  # no fully-closed day beyond the watermark

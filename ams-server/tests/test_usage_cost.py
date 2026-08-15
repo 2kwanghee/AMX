@@ -504,6 +504,66 @@ def test_watermark_within_skew_no_alert(app_env):
     assert _watermark_alerts(tenant_id, "open") == []
 
 
+# -- G27 self-heal: parked-future watermark rewinds and reheals ---------------
+def _rollup_watermark():
+    with _sm() as db:
+        cur = db.get(BillingCursor, usage_cost.ROLLUP_KIND)
+        return cur.watermark.astimezone(UTC) if cur is not None else None
+
+
+def _last_closed_end():
+    grace = _get_settings().billing_close_grace_seconds
+    return usage_cost._floor_day(datetime.now(UTC) - timedelta(seconds=grace))
+
+
+def test_rollup_future_watermark_rewinds(app_env):
+    """A rollup cursor parked in the future is rewound to last_closed_end on the
+    sweep, so the early return can never strand it ahead of real time."""
+    tenant_id, account_id, server_id = _seed_tenant_account_server("uc-rw@ex.com")
+    _set_rollup_watermark(usage_cost._floor_day(datetime.now(UTC)) + timedelta(days=10))
+    day = (datetime.now(UTC) - timedelta(days=3)).replace(hour=12, minute=0, second=0, microsecond=0)
+    _plant(tenant_id, server_id, day, [_acc(account_id, current=True, positional=(50.0, 0.0))])
+
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 0  # idle tick that rewinds
+    assert _rollup_watermark() == _last_closed_end()  # out of the future
+
+
+def test_rollup_rewind_reheals_reopened_day(app_env, monkeypatch):
+    """The rewind unfreezes forward progress: the day blocked by the parked cursor
+    is rolled up as soon as it closes (orphan resolved), and a further sweep
+    recompute-replaces without duplicating. ``_now`` is pinned so the "next tick"
+    deterministically lands on the following, now-closed day."""
+    from app.models import UsageDailyRollup
+
+    tenant_id, account_id, server_id = _seed_tenant_account_server("uc-rh@ex.com")
+    t1 = datetime(2026, 3, 10, 23, 0, tzinfo=UTC)
+    monkeypatch.setattr(usage_cost, "_now", lambda: t1)
+    _set_rollup_watermark(usage_cost._floor_day(t1) + timedelta(days=10))  # forward jump
+    day = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
+    _plant(tenant_id, server_id, day, [_acc(account_id, current=True, positional=(50.0, 0.0))])
+    _plant(tenant_id, server_id, day + timedelta(seconds=300),
+           [_acc(account_id, current=True, positional=(50.0, 0.0))])
+
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 0  # rewind tick
+    assert _rollup_watermark() == usage_cost._floor_day(t1)  # rewound to 2026-03-10
+
+    monkeypatch.setattr(usage_cost, "_now", lambda: t1 + timedelta(days=1))
+    with _sm() as db:
+        assert sweep_usage_rollup(db) == 1  # 03-10 has now closed -> reopened day rolled up
+
+    def _row():
+        with _sm() as db:
+            return db.get(UsageDailyRollup, (tenant_id, day.date(), server_id, account_id))
+
+    r = _row()
+    assert r is not None
+    # dt = 300 + 600 (gap-clamped last) = 900 observed; held = 50*900 = 45000.
+    assert r.held_util_seconds == Decimal("45000.000000")
+    assert r.snapshot_count == 2
+
+
 # ============================ retention purge ================================
 def _plant_snapshot(tenant_id, server_id, reported_at, report_type="usage", accounts=None):
     """Insert one snapshot of a given report_type; return its id."""

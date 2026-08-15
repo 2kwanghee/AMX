@@ -266,7 +266,10 @@ usage_snapshots (
 -- reported_at < 정산 boundary(= rollup·billing 두 watermark의 min). 즉 미정산
 -- 스냅샷은 기한이 지나도 절대 삭제하지 않는다. 정산 boundary가 미래에 주차된
 -- 경우(G27 시계 점프)는 그 아래가 영원히 미정산이므로 purge를 전면 중단·경고만
--- 남긴다. switch_event 행은 콘솔 이벤트 타임라인(list_switch_events →
+-- 남긴다. 다만 rollup·billing 스윕 자체가 주차(`start > last_closed_end`)를
+-- 감지하면 커서를 `last_closed_end`로 되감아 자가치유하므로(다음 틱부터 재정산
+-- 재개) 이 중단은 되감김이 반영되기 전 과도기 구간의 안전망으로만 작동한다.
+-- switch_event 행은 콘솔 이벤트 타임라인(list_switch_events →
 -- GET /servers/{id}/switch-events)의 유일한 원천이라 기한·정산과 무관하게 보존한다.
 -- usage_daily_rollup은 이 정책의 대상이 아니며 영구 보존한다(비용 배분 입력).
 -- 단, 90일을 넘긴 과거일은 원문이 사라지므로 usage_daily_rollup에 봉인된 값으로만
