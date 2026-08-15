@@ -465,3 +465,39 @@ class UsageCostResponse(Wire):
     is_partial: bool
     servers: list[UsageCostServerLine]
     subtotals: list[UsageCostSubtotal]
+
+
+# -- Langfuse usage (P4 console monitoring) -----------------------------------
+class LangfuseModelRow(Wire):
+    day: date
+    model: str  # providedModelName, or "unknown" when Langfuse reports it null
+    input_tokens: int
+    output_tokens: int
+    # Always 0 today: the Metrics API exposes no cache-token measure.
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    total_tokens: int
+    observations: int
+
+
+class LangfuseUserRow(Wire):
+    day: date
+    user_id: str  # the account email fixed as the Metrics API userId filter
+    total_tokens: int
+    observations: int
+
+
+class LangfuseUsageResponse(Wire):
+    # ``model_rows`` collides with Pydantic's ``model_`` protected namespace; the
+    # field is a domain name (rows grouped by model), so the guard is cleared here.
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+        protected_namespaces=(),
+    )
+
+    model_rows: list[LangfuseModelRow]
+    user_rows: list[LangfuseUserRow]
+    # Console deep-link base (AMX_LANGFUSE_UI_URL, else the API base, else null).
+    ui_url: str | None = None

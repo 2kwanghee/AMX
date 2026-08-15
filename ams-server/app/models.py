@@ -15,6 +15,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -547,6 +548,69 @@ class UsageDailyRollup(Base):
     # signal for the day, not a billed quantity.
     snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class LangfuseUsageRollup(Base):
+    """Per-(tenant, UTC day, dimension, key) token aggregate from the Langfuse Metrics API.
+
+    P4 console monitoring. A periodic sweep (``services.langfuse_metrics``) polls
+    the external Langfuse Metrics API and compacts each day into this table, so the
+    console reads a local roll-up instead of proxying every request to Langfuse.
+
+    The composite primary key ``(tenant_id, day, dimension, key)`` is the
+    idempotency anchor — re-aggregating a day upserts each row in place. ``dimension``
+    is ``"model"`` (``key`` = ``providedModelName``, or ``"unknown"`` when Langfuse
+    reports it null) or ``"user"`` (``key`` = the account email fixed as the
+    Metrics API ``userId`` filter). ``tenant_id`` is the operator-configured
+    ``AMX_LANGFUSE_TENANT_ID``, carried under a tenant-scoped ``ON DELETE CASCADE``
+    foreign key (mirroring ``usage_daily_rollup``) so a deleted tenant's monitoring
+    rows are dropped with it — the roll-up is worthless once its tenant is gone.
+
+    Token columns are ``BigInteger`` (a busy tenant's monthly totals exceed a 32-bit
+    int). ``cache_read_tokens`` / ``cache_creation_tokens`` are part of the schema
+    but always 0 today: the Metrics API exposes no cache-token measure (only
+    input/output/total), so the sweep leaves them at the server default. They stay
+    in place so cache detail can be backfilled if a future measure appears without a
+    migration.
+    """
+
+    __tablename__ = "langfuse_usage_rollup"
+    __table_args__ = (
+        Index("ix_langfuse_usage_rollup_tenant_day", "tenant_id", "day"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # UTC calendar day the aggregate covers.
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    # "model" | "user".
+    dimension: Mapped[str] = mapped_column(String(16), primary_key=True)
+    # providedModelName (or "unknown") for dimension="model"; userId email for "user".
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    input_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    cache_read_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    cache_creation_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    total_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    observation_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
