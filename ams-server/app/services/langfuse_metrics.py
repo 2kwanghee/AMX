@@ -33,11 +33,16 @@ Two axes per day, both from the ``observations`` view:
   dimension, only a filter, so the sweep loops the tenant's account emails and
   fixes each as a ``userId`` equality filter, summing that account's tokens.
 
-Metrics API measures (verified against the live server): the observations view
-exposes ``inputTokens`` / ``outputTokens`` / ``totalTokens`` and ``count``, but **no
-cache-token measure** — so ``cache_read_tokens`` / ``cache_creation_tokens`` are
-left at 0 (the schema keeps them for a future backfill). Cost measures exist too
-but are out of scope here (token/observation volume only).
+Token collection uses the ``usageByType`` measure crossed with the ``usageType``
+dimension (verified against the live server), so each token class lands in its own
+column — cache tokens included. ``usageType`` values map: ``input``→input_tokens,
+``output``→output_tokens, ``cache_read_input_tokens``→cache_read_tokens,
+``cache_creation_input_tokens``→cache_creation_tokens, ``total``→total_tokens; an
+unknown value is ignored with a warning. Because ``usageType`` is a cross dimension,
+each axis returns one row per (group × usageType) and the sweep re-assembles them
+per group. ``count`` repeats identically across a group's usageType rows, so the
+observation count is taken only from the ``total`` row — never summed across types.
+Cost measures exist too but are out of scope here (token/observation volume only).
 
 Activation is all-or-nothing: the sweep is a no-op unless base_url / public_key /
 secret_key / tenant_id are all configured. HTTP failures are logged (never with the
@@ -77,9 +82,20 @@ _METRICS_PATH = "/api/public/v2/metrics"
 # advisory lock already coordinates the write; this only throttles one process.
 _LAST_POLL_MONOTONIC: float | None = None
 
-# observations-view measures the sweep pulls. Response keys are "<aggregation>_<measure>";
-# count uses the "count" aggregation, so its key is "count_count".
-_TOKEN_MEASURES = ("inputTokens", "outputTokens", "totalTokens")
+# observations-view measures the sweep pulls: usageByType (summed) crossed with the
+# usageType dimension, plus count. Response keys are "<aggregation>_<measure>", so
+# the token sum is "sum_usageByType" and the observation count is "count_count".
+_MEASURES = ("usageByType",)
+
+# Langfuse usageType dimension value -> roll-up token column. An unseen value is
+# ignored with a warning (see _assemble); "total" also carries observation_count.
+_USAGE_TYPE_COLUMNS = {
+    "input": "input_tokens",
+    "output": "output_tokens",
+    "cache_read_input_tokens": "cache_read_tokens",
+    "cache_creation_input_tokens": "cache_creation_tokens",
+    "total": "total_tokens",
+}
 
 
 def _now() -> datetime:
@@ -129,33 +145,58 @@ def _query_metrics(client: httpx.Client, settings, query: dict) -> list[dict]:
 def _base_query(from_ts: str, to_ts: str) -> dict:
     return {
         "view": "observations",
-        "metrics": [{"measure": m, "aggregation": "sum"} for m in _TOKEN_MEASURES]
+        "metrics": [{"measure": m, "aggregation": "sum"} for m in _MEASURES]
         + [{"measure": "count", "aggregation": "count"}],
         "fromTimestamp": from_ts,
         "toTimestamp": to_ts,
     }
 
 
-def _row_values(tenant_id: uuid.UUID, day, dimension: str, key: str, src: dict) -> dict:
-    return {
+def _assemble(
+    tenant_id: uuid.UUID, day, dimension: str, key: str, rows: list[dict]
+) -> dict:
+    """Fold a group's (usageType-crossed) rows into one roll-up value dict.
+
+    Each ``usageType`` row contributes its ``sum_usageByType`` to the mapped token
+    column; the ``total`` row alone supplies ``observation_count`` (``count_count``
+    repeats across a group's usageType rows, so summing it would double-count).
+    Unknown ``usageType`` values are ignored with a warning.
+    """
+    values = {
         "tenant_id": tenant_id,
         "day": day,
         "dimension": dimension,
         "key": key,
-        "input_tokens": _int(src, "sum_inputTokens"),
-        "output_tokens": _int(src, "sum_outputTokens"),
-        # No cache-token measure on the Metrics API — left at 0 (see module docstring).
+        "input_tokens": 0,
+        "output_tokens": 0,
         "cache_read_tokens": 0,
         "cache_creation_tokens": 0,
-        "total_tokens": _int(src, "sum_totalTokens"),
-        "observation_count": _int(src, "count_count"),
+        "total_tokens": 0,
+        "observation_count": 0,
     }
+    for row in rows:
+        usage_type = row.get("usageType")
+        column = _USAGE_TYPE_COLUMNS.get(usage_type)
+        if column is None:
+            _logger.warning(
+                "langfuse metrics sweep: unknown usageType %r (%s/%s); ignoring",
+                usage_type,
+                dimension,
+                key,
+            )
+            continue
+        values[column] += _int(row, "sum_usageByType")
+        if usage_type == "total":
+            values["observation_count"] = _int(row, "count_count")
+    return values
 
 
 def _has_activity(values: dict) -> bool:
     return bool(
         values["input_tokens"]
         or values["output_tokens"]
+        or values["cache_read_tokens"]
+        or values["cache_creation_tokens"]
         or values["total_tokens"]
         or values["observation_count"]
     )
@@ -178,24 +219,29 @@ def _fetch_one_day(
     day_date = day.date()
     values: list[dict] = []
 
-    # Model axis — one grouped query.
+    # Model axis — one grouped query, crossed with usageType. Rows arrive as
+    # (providedModelName × usageType); re-group per model preserving first-seen order.
     model_query = _base_query(from_ts, to_ts)
-    model_query["dimensions"] = [{"field": "providedModelName"}]
+    model_query["dimensions"] = [{"field": "providedModelName"}, {"field": "usageType"}]
+    groups: dict[str, list[dict]] = {}
     for row in _query_metrics(client, settings, model_query):
-        key = row.get("providedModelName") or "unknown"
-        v = _row_values(tenant_id, day_date, "model", str(key), row)
+        key = str(row.get("providedModelName") or "unknown")
+        groups.setdefault(key, []).append(row)
+    for key, rows in groups.items():
+        v = _assemble(tenant_id, day_date, "model", key, rows)
         if _has_activity(v):
             values.append(v)
 
-    # User axis — one filtered query per account email (userId is filter-only).
+    # User axis — one filtered query per account email (userId is filter-only),
+    # grouped by usageType so cache tokens land per account too.
     for email in emails:
         user_query = _base_query(from_ts, to_ts)
         user_query["filters"] = [
             {"column": "userId", "operator": "=", "value": email, "type": "string"}
         ]
+        user_query["dimensions"] = [{"field": "usageType"}]
         data = _query_metrics(client, settings, user_query)
-        agg = data[0] if data else {}
-        v = _row_values(tenant_id, day_date, "user", email, agg)
+        v = _assemble(tenant_id, day_date, "user", email, data)
         if _has_activity(v):
             values.append(v)
 
