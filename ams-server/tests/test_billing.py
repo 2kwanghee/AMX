@@ -570,3 +570,19 @@ def test_monotonic_future_does_not_flap(app_env):
     assert _watermark() == wm_after  # unchanged
     warnings = [m for lvl, m in handler.messages if lvl == logging.WARNING]
     assert not any("rewound" in m for m in warnings), warnings
+
+
+def test_rewind_clamps_up_to_purge_cursor(app_env):
+    """The rewind target is clamped UP to the retention purge cursor, so a rewind
+    can never drop below already-purged data and re-bill a day from its survivors."""
+    tenant_id, _acc, server_id = _seed_tenant_account_server("g27-clamp@ex.com")
+    purge = _last_closed_end() + timedelta(days=1)  # purge reached into a not-yet-closed day
+    with get_sessionmaker()() as db:
+        db.merge(BillingCursor(kind=billing.PURGE_KIND, watermark=purge,
+                               updated_at=datetime.now(UTC)))
+        db.commit()
+    _set_watermark(billing._floor_day(datetime.now(UTC)) + timedelta(days=10))  # forward jump
+    _plant(tenant_id, server_id, _closed_day(), _usage_payload(active_ids=["c1"]))
+
+    assert _sweep() == 0  # rewind tick
+    assert _watermark() == purge  # clamped up to the purge cursor, not last_closed_end

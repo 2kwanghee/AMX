@@ -85,6 +85,13 @@ def _floor_day(dt: datetime) -> datetime:
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def _ceil_day(dt: datetime) -> datetime:
+    """The smallest UTC midnight >= ``dt`` (``dt`` itself if already a midnight)."""
+    dt = dt.astimezone(UTC)
+    floored = _floor_day(dt)
+    return floored if floored == dt else floored + timedelta(days=1)
+
+
 def _num(v: object) -> float | None:
     """A finite numeric pct, or None. ``bool`` is not a number here."""
     if isinstance(v, bool):
@@ -248,28 +255,47 @@ def sweep_usage_rollup(db: Session) -> int:
                 min_reported.isoformat() if min_reported else None,
             )
         # G27 self-heal: the watermark is parked in the future (a forward
-        # wall-clock step). Rewind the cursor to last_closed_end and COMMIT it with
-        # the same upsert used on a normal advance, so the ``return 0`` just below
-        # cannot leave the cursor stranded ahead of real time. This tick idles; the
-        # next tick re-rolls the reopened days from real snapshots — the rollup is
-        # ON CONFLICT DO UPDATE recompute-replace (idempotent), so no double-count.
+        # wall-clock step). Rewind the cursor and COMMIT it with the same upsert
+        # used on a normal advance, so the ``return 0`` just below cannot leave the
+        # cursor stranded ahead of real time. This tick idles; the next tick
+        # re-rolls the reopened days from real snapshots — the rollup is ON CONFLICT
+        # DO UPDATE recompute-replace (idempotent), so no double-count.
+        #
+        # Clamp the rewind target UP to the retention purge cursor: a fake-future
+        # tick can seal a day from its morning snapshots, then retention (its
+        # boundary guard also fooled by the fake clock) can delete those morning
+        # rows. Rewinding below such a day would let the next tick recompute it from
+        # the afternoon survivors and REPLACE the sealed row with a partial value.
+        # Keeping the cursor at/above the purged bound leaves those days sealed; the
+        # surviving snapshots below the cursor are surfaced by the below-watermark
+        # warning above rather than silently recomputed.
+        purge = db.get(BillingCursor, billing.PURGE_KIND)
+        rewind_to = last_closed_end
+        if purge is not None:
+            rewind_to = max(rewind_to, purge.watermark.astimezone(UTC))
         now = _now()
         db.execute(
             pg_insert(BillingCursor)
-            .values(kind=ROLLUP_KIND, watermark=last_closed_end, updated_at=now)
+            .values(kind=ROLLUP_KIND, watermark=rewind_to, updated_at=now)
             .on_conflict_do_update(
                 index_elements=["kind"],
-                set_={"watermark": last_closed_end, "updated_at": now},
+                set_={"watermark": rewind_to, "updated_at": now},
             )
         )
+        # Invariant: this commit releases the sweep's xact advisory lock early, but
+        # the ``return 0`` below means no further work happens this tick, so the
+        # early release is safe. This holds ONLY because rewind_to >= last_closed_end
+        # (the day loop range [rewind_to, last_closed_end) is empty and we return).
+        # Lowering rewind_to below last_closed_end would both re-open purged/sealed
+        # days for partial recompute AND make this early lock release unsafe.
         db.commit()
         _logger.warning(
             "usage-rollup sweep: watermark rewound from %s to %s (was parked ahead "
             "of real time)",
             start.isoformat(),
-            last_closed_end.isoformat(),
+            rewind_to.isoformat(),
         )
-        start = last_closed_end
+        start = rewind_to
 
     if start >= last_closed_end:
         return 0  # no fully-closed day beyond the watermark
@@ -474,6 +500,25 @@ def sweep_snapshot_retention(db: Session) -> int:
         if len(ids) < _RETENTION_BATCH:
             break
     if total:
+        # Record how far the purge reached so the G27 rewind clamp (usage_cost /
+        # billing) never rewinds a cursor below deleted data and recomputes a sealed
+        # day from the partial survivors. Store the day CEILING of delete_before,
+        # not delete_before itself: a mid-day delete_before still partially empties
+        # the day that contains it, so the first fully-intact day is the next
+        # midnight — and a day-aligned cursor keeps the rollup day-loop boundaries
+        # aligned. Monotonic: the ``where`` guard only advances the cursor (a
+        # backward clock step cannot lower the purged bound).
+        purge_bound = _ceil_day(delete_before)
+        db.execute(
+            pg_insert(BillingCursor)
+            .values(kind=billing.PURGE_KIND, watermark=purge_bound, updated_at=now)
+            .on_conflict_do_update(
+                index_elements=["kind"],
+                set_={"watermark": purge_bound, "updated_at": now},
+                where=BillingCursor.watermark < purge_bound,
+            )
+        )
+        db.commit()
         _logger.info(
             "snapshot retention purged %d expired usage snapshot(s) before %s",
             total,
