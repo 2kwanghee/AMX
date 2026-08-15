@@ -193,20 +193,23 @@ def test_fleet_delivery_and_recall_round_trip(fleet: Fleet):
     stuck = {email: state for email, state in states.items() if state != "detached"}
     assert not stuck, _report(fleet, f"recalls did not detach: {stuck}")
 
-    #     ...while the local record survives, merely held out of rotation. This
-    #     is the O2 decision: recall means disable, not delete.
+    #     ...while the local copy is fully removed. This is the current O2
+    #     decision (2026-08-14): recall means full detach, not disable — the
+    #     account leaves the host's tsamx pool and its manifest record is
+    #     deleted, its history living only in the AMS-side detached row.
     for label, email in recalled.items():
         host = fleet.hosts[label]
         accounts = host.tsamx_accounts()
-        assert len(accounts) == FLEET[label], _report(
-            fleet, f"host {label}: recall removed a tsamx record ({accounts})"
+        assert len(accounts) == FLEET[label] - 1, _report(
+            fleet, f"host {label}: recall did not remove the tsamx record ({accounts})"
         )
-        row = next(a for a in accounts if a["email"] == email)
-        assert row.get("disabled") is True, f"host {label}: {email} was not disabled"
+        assert email not in {a["email"] for a in accounts}, _report(
+            fleet, f"host {label}: {email} still in the tsamx pool after purge ({accounts})"
+        )
 
-        record = next(r for r in host.manifest_records() if r["email"] == email)
-        assert record["allocationStatus"] == ALLOCATION_INACTIVE
-        assert record["ciphertext"], "recall must preserve the sealed credential (O2)"
+        assert email not in {r["email"] for r in host.manifest_records()}, (
+            f"host {label}: {email} manifest record survived recall (O2 is full detach)"
+        )
 
     # Untouched assignments on the same hosts stay active — a recall is scoped
     # to its own assignment, not to the host.
