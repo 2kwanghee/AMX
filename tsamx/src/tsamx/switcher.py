@@ -2660,6 +2660,16 @@ class ClaudeAccountSwitcher:
                     if acc.get("email") == identifier
                 ]
                 if len(matches) > 1:
+                    if assume_yes:
+                        # Non-interactive caller (no stdin): never auto-pick an
+                        # ambiguous target — fail loud with the slots listed so
+                        # the caller disambiguates by number. Prompting here
+                        # would hit EOF, the very failure --yes exists to avoid.
+                        raise ValidationError(
+                            f"'{identifier}' matches multiple accounts "
+                            f"({', '.join(sorted(matches))}); "
+                            "remove by account number instead"
+                        )
                     print(f"Multiple accounts found for '{identifier}':")
                     for num in matches:
                         acc = data["accounts"][num]

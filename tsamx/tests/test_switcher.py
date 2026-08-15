@@ -8011,6 +8011,30 @@ class TestSwitchRemoveGatesAcceptAlias:
         with pytest.raises(ValidationError):
             switcher.remove_account("not an email or alias!")
 
+    def test_remove_account_assume_yes_ambiguous_email_errors_without_prompt(
+        self, temp_home: Path, sample_sequence_data: dict, monkeypatch,
+    ):
+        """assume_yes has no stdin to disambiguate a duplicated email: it must
+        raise loudly with the matching slots and never call input(), rather than
+        prompt (which would EOF) or auto-pick an ambiguous target."""
+        dup = sample_sequence_data["accounts"]["1"]["email"]
+        sample_sequence_data["accounts"]["2"]["email"] = dup
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        def _no_input(*a, **k):
+            raise AssertionError("input() must not be called under assume_yes")
+
+        monkeypatch.setattr("builtins.input", _no_input)
+
+        with pytest.raises(ValidationError) as exc:
+            switcher.remove_account(dup, assume_yes=True)
+        assert "1" in str(exc.value) and "2" in str(exc.value)
+
+        data = switcher._get_sequence_data()
+        assert "1" in data["accounts"] and "2" in data["accounts"]
+
 
 class TestAddAccountAlias:
     """Test the --alias convenience at add time, and preservation on re-add."""
