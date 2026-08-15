@@ -122,10 +122,13 @@ class Settings:
     # latency: Metrics API latency p95(최근 1시간)가 이 밀리초를 초과하면 open.
     alert_latency_p95_ms: float = 60_000.0
     # P5 위험명령 통보 수신(danger_hook.py → POST /api/v1/ingest/danger-command).
-    # 정적 토큰만으로 인증하는 무인 에이전트 발 호출이다(TenantScope 아님). 토큰이
-    # **미설정이면 엔드포인트 자체가 비활성**(404)이라, 설정하지 않은 AMS는 이 경로가
-    # 없는 것처럼 행동한다. 레이트 제한은 테넌트가 아닌 전역 고정창(분당 상한).
+    # 정적 토큰만으로 인증하는 무인 에이전트 발 호출이다(TenantScope 아님). 경보는
+    # 실 테넌트에 귀속시켜 콘솔 목록·ack 동선에 정상 노출한다(langfuse 경보 관례와
+    # 정렬): 귀속 테넌트는 `danger_tenant_id`, 없으면 `langfuse_tenant_id`로 폴백한다.
+    # **토큰이 없거나 귀속 테넌트가 없으면 엔드포인트 자체가 비활성**(404)이라, 설정하지
+    # 않은 AMS는 이 경로가 없는 것처럼 행동한다. 레이트 제한은 전역 고정창(분당 상한).
     danger_ingest_token: str | None = None
+    danger_tenant_id: str | None = None
     danger_rate_limit_per_min: int = 120
 
     @property
@@ -148,8 +151,15 @@ class Settings:
         return bool(self.alert_webhook_url and self.alert_webhook_secret)
 
     @property
+    def danger_tenant(self) -> str | None:
+        """위험명령 경보를 귀속시킬 테넌트. 전용 설정이 우선, 없으면 langfuse 테넌트."""
+        return self.danger_tenant_id or self.langfuse_tenant_id
+
+    @property
     def danger_ingest_enabled(self) -> bool:
-        return bool(self.danger_ingest_token)
+        # 토큰과 귀속 테넌트가 **둘 다** 있어야 활성. 어느 하나라도 없으면 경보를 어디에
+        # 매달지 알 수 없으므로 엔드포인트를 404로 비활성한다.
+        return bool(self.danger_ingest_token and self.danger_tenant)
 
 
 def _pubkey_from_seed(seed_b64: str) -> str:
@@ -293,6 +303,7 @@ def load_settings() -> Settings:
         alert_stale_minutes=int(os.environ.get("AMX_ALERT_STALE_MINUTES", "60")),
         alert_latency_p95_ms=float(os.environ.get("AMX_ALERT_LATENCY_P95_MS", "60000")),
         danger_ingest_token=os.environ.get("AMX_DANGER_INGEST_TOKEN", "").strip() or None,
+        danger_tenant_id=os.environ.get("AMX_DANGER_TENANT_ID", "").strip() or None,
         danger_rate_limit_per_min=int(
             os.environ.get("AMX_DANGER_RATE_LIMIT_PER_MIN", "120")
         ),

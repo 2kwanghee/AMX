@@ -6,10 +6,11 @@ Claude Code PreToolUse 훅(``deploy/langfuse/danger_hook.py``)이 Bash 명령의
 설정된 수신자에게 그대로 전달된다.
 
 특성:
-* **system 범위**(server_id NULL). 무인 에이전트 발이라 특정 서버/테넌트에 매이지
-  않으므로 고정 시스템 테넌트(``SYSTEM_TENANT_ID``, nil UUID)에 귀속시킨다.
-* **dedupe = (hostname, patternName, commandSha256)**. 같은 호스트에서 같은 위험
-  명령이 반복되면 새 경보가 폭주하지 않고 기존 open 경보의 detail만 갱신된다.
+* **system 범위**(server_id NULL). 무인 에이전트 발이라 특정 서버에 매이지 않는다.
+  다만 테넌트는 **실 테넌트**(설정 `AMX_DANGER_TENANT_ID`, 없으면 langfuse 테넌트)에
+  귀속시켜 콘솔 경보 목록·ack 동선에 정상 노출한다 — langfuse 시스템 경보 관례와 같다.
+* **dedupe = (tenant, hostname, patternName, commandSha256)**. 같은 호스트에서 같은
+  위험 명령이 반복되면 새 경보가 폭주하지 않고 기존 open 경보의 detail만 갱신된다.
 * **auto-resolve 없음**. 이벤트성이라 관리자가 ack/resolve 한다.
 * **원문 저장 금지**. detail에는 마스킹본·해시·세션·호스트·cwd만 담는다.
 
@@ -28,10 +29,6 @@ from sqlalchemy.orm import Session
 
 from app import schemas
 from app.services import alerts
-
-# 무인 에이전트 발 경보의 귀속 테넌트. alerts.tenant_id 에는 FK가 없고 server_id가
-# NULL이면 복합 FK도 강제되지 않으므로, 실제 tenants 행 없이 안전하게 쓸 수 있다.
-SYSTEM_TENANT_ID = uuid.UUID(int=0)
 
 _KIND = "dangerous_command"
 
@@ -72,13 +69,18 @@ def allow_request(limit_per_min: int) -> bool:
         return True
 
 
-def dedupe_key(hostname: str, pattern_name: str, command_sha256: str) -> str:
-    return f"{_KIND}:{hostname}:{pattern_name}:{command_sha256}"
+def dedupe_key(
+    tenant_id: uuid.UUID, hostname: str, pattern_name: str, command_sha256: str
+) -> str:
+    return f"{tenant_id}:{_KIND}:{hostname}:{pattern_name}:{command_sha256}"
 
 
-def record_danger_command(db: Session, payload: schemas.DangerCommandIngest) -> None:
+def record_danger_command(
+    db: Session, tenant_id: uuid.UUID, payload: schemas.DangerCommandIngest
+) -> None:
     """위험명령 통보 1건을 ``dangerous_command`` 경보로 open 한다. caller가 커밋한다.
 
+    ``tenant_id``는 실 테넌트(설정 해석은 라우터에서)이며 경보 귀속·dedupe 키에 쓰인다.
     원문 명령은 저장하지 않는다 — detail에는 마스킹본·sha256·세션·호스트·cwd·유저·
     타임스탬프만 담는다.
     """
@@ -94,9 +96,11 @@ def record_danger_command(db: Session, payload: schemas.DangerCommandIngest) -> 
     }
     alerts.open_event_alert(
         db,
-        tenant_id=SYSTEM_TENANT_ID,
+        tenant_id=tenant_id,
         kind=_KIND,
         severity="critical",
-        dedupe_key=dedupe_key(payload.hostname, payload.pattern_name, payload.command_sha256),
+        dedupe_key=dedupe_key(
+            tenant_id, payload.hostname, payload.pattern_name, payload.command_sha256
+        ),
         detail=detail,
     )
