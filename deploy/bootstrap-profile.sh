@@ -34,8 +34,9 @@
 #
 # 사용법
 # ------
-#   deploy/bootstrap-profile.sh                 # 기본값으로 연결
+#   deploy/bootstrap-profile.sh                 # 기본값으로 연결(메모리 포함)
 #   deploy/bootstrap-profile.sh --personal-dir ~/.claude --config-dir ~/.claude-amx
+#   deploy/bootstrap-profile.sh --no-memory     # 프로젝트 메모리 링크 단계 전체 생략
 #   deploy/bootstrap-profile.sh --uninstall     # 이 스크립트가 만든 링크만 제거
 #
 # 각 항목 처리 결과를 linked / copied / skipped / warned 한 줄씩 출력한다.
@@ -45,13 +46,15 @@ set -eu
 PERSONAL_DIR="$HOME/.claude"
 CONFIG_DIR="$HOME/.claude-amx"
 UNINSTALL=0
+NO_MEMORY=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--personal-dir) shift; PERSONAL_DIR="${1:-}" ;;
 		--config-dir)   shift; CONFIG_DIR="${1:-}" ;;
+		--no-memory)    NO_MEMORY=1 ;;
 		--uninstall)    UNINSTALL=1 ;;
-		-h|--help)      sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help)      sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) echo "bootstrap-profile: 알 수 없는 인자: $1 (--help 참고)" >&2; exit 1 ;;
 	esac
 	shift
@@ -274,9 +277,14 @@ for rel in CLAUDE.md skills keybindings.json agents commands; do
 done
 
 # 2) 프로젝트 메모리 링크 (개인 projects/*/memory 각각)
-each_personal_memory | while IFS= read -r rel; do
-	link_memory "$rel"
-done
+#    --no-memory 시 이 단계 전체를 건너뛴다(무인 러너의 개인 메모리 오염 표면 제거).
+if [ "$NO_MEMORY" = 1 ]; then
+	info "skipped projects/*/memory (--no-memory — 개인 메모리 링크 생략)"
+else
+	each_personal_memory | while IFS= read -r rel; do
+		link_memory "$rel"
+	done
+fi
 
 # 3) settings.json (없을 때만 복사)
 copy_settings
