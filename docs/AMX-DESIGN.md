@@ -571,6 +571,47 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
   input+cache_read+cache_creation 합산값이라 `input_tokens` 컬럼이 부풀려졌고 캐시는 0이었으나,
   이제 `input_tokens`는 순수 input, 캐시 두 컬럼은 실측치로 채워진다.
 
+#### 5.6.2 경보 웹훅 발송 + Langfuse 임계값 경보 (P5, BACKLOG G41)
+
+경보를 콘솔 밖으로 내보내는 범용 웹훅 계층과, Langfuse 실측치를 임계값으로 감시하는
+경보 3종을 더한다.
+
+- **아웃박스 패턴**: `services.alerts`의 open/resolve 프리미티브는 경보를 여닫는 것과
+  **같은 트랜잭션**에서 `alert_webhook_outbox`(신규)에 전이 행을 스테이징한다(caller가
+  커밋). 커밋이 롤백되면 아웃박스 행도 함께 사라지므로, 실제로 열리지 않은 경보의 유령
+  웹훅이 나가지 않는다. `open_alert`은 `INSERT ... ON CONFLICT`의 `RETURNING (xmax = 0)`로
+  진짜 신규 open만 골라 스테이징하고(이미 열린 경보의 refresh·동시 리포트 경합은 제외),
+  resolve 계열은 실제로 닫힌 행만 `RETURNING`으로 골라 스테이징한다. 기존 8종·신규 3종
+  모두 이 프리미티브를 통과하므로 별도 배선 없이 전량이 웹훅을 탄다.
+- **여덟 번째 스위퍼(드레인)**: `services.alert_webhook`가 전용 락 **`0x414D580F08`(…08)**로
+  아웃박스를 드레인한다. HTTP POST는 P4 교훈대로 락·트랜잭션 밖에서 한다 — 만기 행을 짧은
+  트랜잭션에서 리스 예약(`next_attempt_at`를 앞당김)하고 커밋해 락을 놓은 뒤 POST하고,
+  결과를 다시 짧게 반영한다. 성공 → 행 삭제, 실패 → `attempt`+지수 백오프, 상한 초과 →
+  경고 후 폐기(무한 적재 금지). 페이로드는 `{alertId, kind, status(open|resolved), tenantId,
+  serverId, detail, occurredAt}`이고, 헤더 `X-AMS-Timestamp`(유닉스 초)와
+  `X-AMS-Signature: sha256=HMAC-SHA256(시크릿, 타임스탬프+본문)`으로 무결성·리플레이를
+  막는다. 활성화는 `AMX_ALERT_WEBHOOK_URL`/`AMX_ALERT_WEBHOOK_SECRET` 둘 다 설정된 경우에
+  한하며(all-or-nothing), 하나라도 없으면 스테이징 자체를 건너뛰어 완전 무부작용이다.
+  시크릿은 서명 계산에만 쓰이고 로그에 남기지 않는다.
+- **수신자 검증(pseudo)**: 수신 측은 본문을 원문 그대로 받아 서명을 재계산한다 —
+  `expected = "sha256=" + hmac_sha256(secret, request.header["X-AMS-Timestamp"] + raw_body)`
+  를 계산해 `X-AMS-Signature`와 상수시간 비교하고, `X-AMS-Timestamp`가 허용 시차(예: ±5분)
+  안인지 확인해 리플레이를 거른다. 본문 재직렬화가 아니라 **받은 바이트 그대로** 서명해야
+  일치한다(발신 측은 정렬·compact JSON을 서명·전송한다).
+- **아홉 번째 스위퍼(임계값)**: `services.langfuse_alerts`가 전용 락 **`0x414D580F09`(…09)**로
+  Langfuse 활성 게이트와 폴 주기(`AMX_LANGFUSE_POLL_SECONDS`)를 공유하되 독립 캐던스 상태로
+  경보 3종을 open/resolve 한다(전부 시스템 범위, `server_id` NULL·테넌트 범위 dedupe).
+  latency의 HTTP GET만 락 밖에서 먼저 하고, 나머지는 짧은 락+커밋으로 전이를 반영한다.
+  - `langfuse_usage_spike` — 당일(UTC) 총 토큰이 전일 대비 `AMX_ALERT_SPIKE_FACTOR`(기본
+    3.0) 배수를 초과하면 open. 전일이 0이면 배수가 무의미하므로 절대 하한
+    `AMX_ALERT_SPIKE_MIN_TOKENS`(기본 1,000,000)를 초과할 때만 open, 복귀 시 resolve.
+  - `langfuse_stale` — 롤업 `max(updated_at)`이 `AMX_ALERT_STALE_MINUTES`(기본 60)를 넘겨
+    정체되면 open, 갱신 재개 시 resolve. 한 번도 동기화된 적 없으면(NULL) 평가하지 않는다.
+  - `langfuse_latency` — Metrics API latency p95(measure `latency`, aggregation `p95`, 최근
+    1시간)가 `AMX_ALERT_LATENCY_P95_MS`(기본 60000)를 초과하면 open, 이하 복귀 시 resolve.
+    Langfuse latency는 초 단위라 ms로 환산해 비교하며, HTTP 오류·무데이터는 경고 후 스킵해
+    경보 오발을 막는다.
+
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
 O9가 **회전형**으로 판별됨(§8): 계정이 서버에서 활성으로 돌면 그 서버의 Claude Code/tsamx가
