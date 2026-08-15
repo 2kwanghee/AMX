@@ -18,6 +18,7 @@ import { AssignmentsPanel, currentActiveByServer } from '@/components/Assignment
 import { ServersPanel } from '@/components/ServersPanel';
 import { SetupGuidePanel } from '@/components/SetupGuidePanel';
 import { UsageCostPanel } from '@/components/UsageCostPanel';
+import { LangfuseUsagePanel } from '@/components/LangfuseUsagePanel';
 import { TopologyView } from '@/components/topology/TopologyView';
 import {
   ConsoleHeader,
@@ -155,7 +156,10 @@ export default function Dashboard() {
         {active && tab === 'assignments' && <AssignmentsPanel tenantId={active} />}
         {active && tab === 'alerts' && <AlertsPanel tenantId={active} />}
         {active && tab === 'usage' && (
-          <UsageCostPanel tenantId={active} onGoAccounts={() => setTab('accounts')} />
+          <>
+            <UsageCostPanel tenantId={active} onGoAccounts={() => setTab('accounts')} />
+            <LangfuseUsagePanel tenantId={active} />
+          </>
         )}
         {tab === 'guide' && <SetupGuidePanel />}
       </main>
