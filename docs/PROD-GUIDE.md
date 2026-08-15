@@ -551,6 +551,32 @@ bash deploy/fullstack-run.sh restart server --lan
   - `AMX_ALERT_LATENCY_P95_MS`(기본 60000) — Metrics API latency p95(최근 1시간)가 이
     밀리초를 넘으면 `langfuse_latency`.
 
+### 9-5. 위험명령 경보 (선택)
+
+러너에 위험명령 감지 훅(§9-3의 `--with-danger-hook`)을 깔았다면, 그 통보를 받을 창구를
+중앙 서버에 열어야 한다. 훅이 Bash 위험 패턴을 잡으면 마스킹한 통보를
+`POST /api/v1/ingest/danger-command`로 보내고, AMS는 이를 `dangerous_command` 경보로
+올려 §9-4 웹훅으로 흘린다.
+
+```sh
+cat >> ~/AMX/.amx-dev/dev.env <<'ENV'
+AMX_DANGER_INGEST_TOKEN=<32바이트+ 무작위 토큰, 러너 훅과 동일 값>
+ENV
+bash deploy/fullstack-run.sh restart server --lan
+```
+
+- 이 엔드포인트는 관리자 인증이나 테넌트 범위를 타지 않는다. 사람이 아니라 무인 훅이
+  호출하므로 정적 토큰 하나(`X-AMX-Ingest-Token`)로만 막는다. 토큰이 **설정되지 않으면
+  경로 자체가 비활성**(404)이라, 안 켠 서버에서는 이 경로가 없는 것처럼 보인다. 토큰이
+  틀리면 401이다.
+- 경보는 시스템 범위(특정 서버에 매이지 않음)이고 `(hostname, patternName, commandSha256)`로
+  중복을 흡수한다. 같은 호스트에서 같은 위험 명령이 반복돼도 새 경보로 쌓이지 않고 기존
+  경보만 갱신된다. 자동 해소는 없다 — 관리자가 확인하고 ack/resolve 한다.
+- 저장되는 건 마스킹본·해시·세션·호스트뿐이고 **원문 명령은 남지 않는다**.
+- 폭주 방어로 전역 분당 상한을 둔다. `AMX_DANGER_RATE_LIMIT_PER_MIN`(기본 120)을 넘는
+  통보는 429로 떨어뜨리고 로그만 남긴다. 프로세스 로컬 카운터라 다중 인스턴스에서는
+  인스턴스당 상한이다.
+
 ---
 
 ## 10. 문제 해결 표

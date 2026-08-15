@@ -625,6 +625,32 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
     Langfuse latency는 초 단위라 ms로 환산해 비교하며, HTTP 오류·무데이터는 경고 후 스킵해
     경보 오발을 막는다.
 
+#### 5.6.3 위험명령 경보 (P5, 경로 d)
+
+러너에서 실행되려는 위험한 Bash 명령을 경보로 올린다. Langfuse는 툴 입력을 API로 노출하지
+않아(v4 events_only) 이 경로로는 잡을 수 없으므로, Claude Code **PreToolUse 경량 훅**
+(`deploy/langfuse/danger_hook.py`)이 명령을 직접 검사해 AMS로 통보하는 방식을 택했다.
+
+- **훅**: Bash 실행 직전 stdin으로 받은 payload의 `tool_input.command`를 보수적인 위험
+  패턴 목록과 대조한다. 감지·통보 전용이라 **차단하지 않고 항상 `exit 0`**으로 끝나므로
+  Claude 동작은 불변이다. 통보 실패도 조용히 삼켜(2초 타임아웃) 세션을 느리게/실패하게
+  하지 않는다. `AMX_DANGER_INGEST_URL`/`AMX_DANGER_INGEST_TOKEN`이 없으면 즉시 무동작.
+  vendored `langfuse_hook.py`와 무관한 자체 파일이며 표준 라이브러리만 쓴다.
+- **원문 비전송**: 페이로드는 `{patternName, commandSha256, commandMasked(패턴 매치
+  키워드만 남기고 나머지 마스킹, 200자 이내), sessionId, cwd, hostname, userId?, ts}`.
+  원문 명령은 전송·저장 어디에도 남지 않는다. 정규식은 셸을 파싱하지 않으므로 인용
+  문자열 오탐·난독화 누락을 완전히는 못 막는다(조기경보이지 방어선이 아님).
+- **수신**: `POST /api/v1/ingest/danger-command`. 무인 훅 호출이라 TenantScope가 아니라
+  정적 토큰(`X-AMX-Ingest-Token` == `AMX_DANGER_INGEST_TOKEN`)만으로 인증한다. 토큰
+  미설정 시 404로 비활성, 오토큰 401. 폭주 방어로 전역 고정창 레이트 제한
+  (`AMX_DANGER_RATE_LIMIT_PER_MIN` 기본 120, 초과 429·로그).
+- **경보 kind `dangerous_command`**(alembic 0023): 시스템 범위(`server_id` NULL, 고정
+  시스템 테넌트 nil UUID). dedupe는 `(hostname, patternName, commandSha256)` 기반이라
+  같은 호스트의 같은 명령 반복은 새 경보를 만들지 않고 detail만 갱신한다. **auto-resolve
+  없음**(이벤트성 — 관리자가 ack/resolve). §5.6.2 웹훅 프리미티브(`open_event_alert`)를
+  통과하므로 아웃박스에도 스테이징돼 웹훅으로 함께 나간다(알림이 목적). detail에는
+  마스킹본·해시·세션·호스트만 담고 원문은 저장하지 않는다.
+
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
 O9가 **회전형**으로 판별됨(§8): 계정이 서버에서 활성으로 돌면 그 서버의 Claude Code/tsamx가

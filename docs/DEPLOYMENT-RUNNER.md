@@ -287,6 +287,44 @@ sh deploy/install-langfuse-hook.sh --uninstall
   네트워크·클라이언트 생성 실패를 잡아 `return 0`). 따라서 Langfuse 장애가 Claude
   세션 종료나 동작을 막지 않는다. 추적만 조용히 누락된다.
 
+### 위험명령 감지 훅 (선택, 기본 off)
+같은 Stop 훅 설치 흐름에 위험명령 감지 훅을 얹을 수 있다. Claude Code가 Bash를
+실행하기 직전(PreToolUse) `deploy/langfuse/danger_hook.py`가 돌면서 명령을 보수적인
+위험 패턴 목록과 대조하고, 걸리면 AMS로 통보한다. AMS는 이를 `dangerous_command`
+경보로 올리고 웹훅으로 흘린다.
+
+핵심은 이 훅이 **명령을 막지 않는다**는 점이다. 감지와 통보만 하고 언제나 `exit 0`으로
+끝나므로 Claude의 동작은 그대로다. 통보 HTTP는 2초 타임아웃이고 실패는 조용히
+삼키기 때문에 세션을 느리게 하거나 실패시키지도 않는다. 원문 명령도 나가지 않는다 —
+sha256 다이제스트와, 패턴에 걸린 키워드만 남기고 나머지를 별표로 가린 축약본(200자
+이내)만 보낸다.
+
+설치는 `--with-danger-hook` 한 플래그를 붙이면 된다.
+```sh
+LANGFUSE_BASE_URL=http://<langfuse-host>:3100 \
+LANGFUSE_PUBLIC_KEY=pk-... LANGFUSE_SECRET_KEY=sk-... \
+  sh deploy/install-langfuse-hook.sh --with-danger-hook
+```
+훅을 `<설정 홈>/hooks/`로 복사하고 `settings.json`의 PreToolUse에 `Bash` matcher 항목을
+멱등 병합한다. 이 훅은 의존성이 없어 `python3`로 바로 돌고 uv나 체크섬 검증을 타지
+않는다(vendored `langfuse_hook.py`와는 별개 파일). 다만 복사만으로는 아무 일도 하지
+않는다. 통보 대상은 `amx-langfuse.env`의 두 값으로 정하며, 둘 다 없으면 훅은 무동작이다.
+```sh
+AMX_DANGER_INGEST_URL='http://<ams-host>:8080/api/v1/ingest/danger-command'
+AMX_DANGER_INGEST_TOKEN='<AMS의 danger_ingest_token과 동일>'
+```
+기본 패턴은 재귀 강제 삭제(`rm -rf` 계열), 권한 상승(`sudo`), 파일시스템 포맷(`mkfs`),
+블록 디바이스로의 `dd`, `chmod -R 777`, 네트워크에서 받아 셸로 바로 실행하는
+`curl|sh`, main/master로의 강제 push를 잡는다. `CC_DANGER_PATTERNS_FILE`(줄당 정규식,
+파일 권한 0600 필수)로 늘릴 수 있다.
+
+오탐 한계는 분명히 해 둔다. 정규식은 셸을 파싱하지 않으므로 인용 문자열이나 주석 안에
+든 위험 문자열을 잘못 잡을 수 있고, 난독화한 명령은 놓칠 수 있다. 단어 경계와 명령
+구분자로 오탐을 줄이되 완벽히 막지는 못한다. 이 훅은 조기경보이지 방어선이 아니다.
+
+끄려면 `--uninstall`을 돌린다. 플래그 없이 돌려도 Stop 훅과 danger 훅 항목을 함께
+걷어낸다.
+
 ### 함대(fleet) 일괄 배포
 호스트가 몇 대 넘어가면 서버마다 손으로 설치 명령을 치는 방식은 오래 못 간다. 신규
 에이전트는 설치 때 자동으로 켜지게 하고, 이미 떠 있는 호스트는 목록 한 장으로 한꺼번에
