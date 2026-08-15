@@ -17,6 +17,11 @@ from app.core.crypto import decrypt_secret
 from app.services import oauth_enroll
 from tests.test_api_crud import make_tenant
 
+# P2a moved the per-provider endpoint constants off the module and into
+# OAUTH_PROFILES; the OAuth start/complete flow defaults to the "claude"
+# provider, so the tests assert against that profile's values.
+CLAUDE_PROFILE = oauth_enroll.profile_for("claude")
+
 TOKEN_RESPONSE = {
     "access_token": "at-live",
     "refresh_token": "rt-live",
@@ -30,7 +35,7 @@ TOKEN_RESPONSE = {
 
 def install_token_stub(app, *, response=None, status_code=200, recorder=None):
     def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == oauth_enroll.OAUTH_TOKEN_URL
+        assert str(request.url) == CLAUDE_PROFILE.token_url
         if recorder is not None:
             recorder.append(json.loads(request.content))
         return httpx.Response(status_code, json=response if response is not None else TOKEN_RESPONSE)
@@ -51,11 +56,11 @@ def test_oauth_start_returns_a_pkce_authorize_url(client, app):
 
     parsed = urlparse(body["authorizeUrl"])
     params = parse_qs(parsed.query)
-    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == oauth_enroll.OAUTH_AUTHORIZE_URL
-    assert params["client_id"] == [oauth_enroll.OAUTH_CLIENT_ID]
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == CLAUDE_PROFILE.authorize_url
+    assert params["client_id"] == [CLAUDE_PROFILE.client_id]
     assert params["code_challenge_method"] == ["S256"]
     assert params["response_type"] == ["code"]
-    assert params["redirect_uri"] == [oauth_enroll.OAUTH_REDIRECT_URI]
+    assert params["redirect_uri"] == [CLAUDE_PROFILE.redirect_uri]
     # The verifier itself must never appear in a URL the administrator handles.
     challenge = params["code_challenge"][0]
     assert challenge
@@ -85,7 +90,7 @@ def test_complete_stores_the_full_credential_set_encrypted(client, app):
     assert sent[0]["grant_type"] == "authorization_code"
     assert sent[0]["code"] == "auth-code-1"
     assert sent[0]["code_verifier"]
-    assert sent[0]["redirect_uri"] == oauth_enroll.OAUTH_REDIRECT_URI
+    assert sent[0]["redirect_uri"] == CLAUDE_PROFILE.redirect_uri
 
     assert account["email"] == "owner@example.com"
     assert account["credentialType"] == "oauth"
