@@ -9,9 +9,11 @@ seeding pattern.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from app.config import get_settings as _get_settings
 from app.db import get_sessionmaker
 from app.models import Account, Server, UsageSnapshot
 from app.services import inventory, usage_cost
@@ -445,3 +447,133 @@ def test_sealed_plus_live_tail(app_env):
     # The month total reflects both the sealed day and the live tail (held > the
     # sealed day alone would contribute if the live tick were dropped).
     assert ac.total_held_util_seconds > Decimal("0")
+
+
+# ============================ retention purge ================================
+def _plant_snapshot(tenant_id, server_id, reported_at, report_type="usage", accounts=None):
+    """Insert one snapshot of a given report_type; return its id."""
+    with _sm() as db:
+        row = UsageSnapshot(
+            tenant_id=tenant_id, server_id=server_id, account_id=None,
+            report_type=report_type, payload={"accounts": accounts or []},
+            reported_at=reported_at,
+        )
+        db.add(row)
+        db.commit()
+        return row.id
+
+
+def _set_settlement_cursors(watermark):
+    """Park both settlement watermarks (rollup + billing) at ``watermark``."""
+    from app.models import BillingCursor
+    from app.services import billing
+
+    now = datetime.now(UTC)
+    with _sm() as db:
+        for kind in (usage_cost.ROLLUP_KIND, billing.KIND):
+            db.merge(BillingCursor(kind=kind, watermark=watermark, updated_at=now))
+        db.commit()
+
+
+def _snapshot_exists(snap_id):
+    with _sm() as db:
+        return db.get(UsageSnapshot, snap_id) is not None
+
+
+def _use_retention(monkeypatch, days):
+    monkeypatch.setattr(
+        usage_cost, "get_settings",
+        lambda: replace(_get_settings(), usage_snapshot_retention_days=days),
+    )
+
+
+# -- expired+settled is purged; expired+unsettled survives --------------------
+def test_retention_purges_settled_expired_keeps_unsettled(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret1@ex.com")
+    now = datetime.now(UTC)
+    # Settlement boundary parked 50 days back; retention window 30 days. The
+    # effective delete-before is min(now-30d, now-50d) = now-50d.
+    _set_settlement_cursors(usage_cost._floor_day(now - timedelta(days=50)))
+    _use_retention(monkeypatch, 30)
+
+    # A: expired (60d) AND settled (before the 50d boundary) -> purged.
+    a = _plant_snapshot(tenant_id, server_id, now - timedelta(days=60))
+    # A switch_event in the same window -> KEPT (console event-timeline source).
+    a_switch = _plant_snapshot(
+        tenant_id, server_id, now - timedelta(days=61), report_type="switch_event"
+    )
+    # B: expired (40d > 30d retention) BUT unsettled (after the 50d boundary) -> kept.
+    b = _plant_snapshot(tenant_id, server_id, now - timedelta(days=40))
+    # C: settled but not expired (10d) -> kept.
+    c = _plant_snapshot(tenant_id, server_id, now - timedelta(days=10))
+
+    with _sm() as db:
+        purged = usage_cost.sweep_snapshot_retention(db)
+
+    assert purged == 1  # only the usage row A
+    assert not _snapshot_exists(a)
+    assert _snapshot_exists(a_switch)  # switch_event retained regardless of age
+    assert _snapshot_exists(b)  # unsettled is never deleted, however old
+    assert _snapshot_exists(c)
+
+
+# -- switch_event is retained even when expired AND settled -------------------
+def test_retention_keeps_switch_events(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret-sw@ex.com")
+    now = datetime.now(UTC)
+    # Boundary yesterday: a 100-day-old row is both expired and fully settled.
+    _set_settlement_cursors(usage_cost._floor_day(now - timedelta(days=1)))
+    _use_retention(monkeypatch, 30)
+
+    sw = _plant_snapshot(
+        tenant_id, server_id, now - timedelta(days=100), report_type="switch_event"
+    )
+    usg = _plant_snapshot(tenant_id, server_id, now - timedelta(days=100))
+
+    with _sm() as db:
+        purged = usage_cost.sweep_snapshot_retention(db)
+
+    assert purged == 1  # the usage row only
+    assert _snapshot_exists(sw)  # switch_event survives expiry + settlement
+    assert not _snapshot_exists(usg)
+
+
+# -- a future settlement watermark halts the purge entirely -------------------
+def test_retention_halts_on_future_watermark(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret-fut@ex.com")
+    now = datetime.now(UTC)
+    # G27 clock jump: watermark parked in the future. Rows below it are un-settled,
+    # so nothing may be purged however old — even a 100-day-old usage row.
+    _set_settlement_cursors(usage_cost._floor_day(now + timedelta(days=5)))
+    _use_retention(monkeypatch, 30)
+
+    old = _plant_snapshot(tenant_id, server_id, now - timedelta(days=100))
+    with _sm() as db:
+        assert usage_cost.sweep_snapshot_retention(db) == 0
+    assert _snapshot_exists(old)
+
+
+# -- no cursor (settlement boundary None) deletes nothing ---------------------
+def test_retention_no_cursor_keeps_everything(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret-nc@ex.com")
+    now = datetime.now(UTC)
+    # No BillingCursor rows planted -> boundary None -> nothing is settled yet.
+    _use_retention(monkeypatch, 30)
+
+    old = _plant_snapshot(tenant_id, server_id, now - timedelta(days=100))
+    with _sm() as db:
+        assert usage_cost.sweep_snapshot_retention(db) == 0
+    assert _snapshot_exists(old)
+
+
+# -- retention disabled (0) deletes nothing -----------------------------------
+def test_retention_disabled_keeps_everything(app_env, monkeypatch):
+    tenant_id, _account_id, server_id = _seed_tenant_account_server("uc-ret2@ex.com")
+    now = datetime.now(UTC)
+    _set_settlement_cursors(usage_cost._floor_day(now - timedelta(days=1)))
+    _use_retention(monkeypatch, 0)
+
+    old = _plant_snapshot(tenant_id, server_id, now - timedelta(days=365))
+    with _sm() as db:
+        assert usage_cost.sweep_snapshot_retention(db) == 0
+    assert _snapshot_exists(old)
