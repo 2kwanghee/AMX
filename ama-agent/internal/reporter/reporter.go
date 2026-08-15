@@ -204,6 +204,27 @@ func accountUsage(row provider.AccountRow) *amxv1.AccountUsage {
 				au.SevenDay = &amxv1.UsageWindow{Pct: w.Pct, ResetsAt: parseTime(w.ResetsAt)}
 			}
 		}
+		// Pay-as-you-go spend and per-model scoped weekly windows are carried
+		// through verbatim. Neither is mirrored into Windows, so maxWindowPct and
+		// the eligible/all_exhausted switch math are untouched (they read only the
+		// positional windows above).
+		if s := row.Usage.Spend; s != nil {
+			au.Spend = &amxv1.Spend{
+				Used:     s.Used,
+				Limit:    s.Limit,
+				Pct:      s.Pct,
+				Currency: s.Currency,
+				ResetsAt: parseTime(s.ResetsAt),
+			}
+		}
+		for i := range row.Usage.Scoped {
+			sw := row.Usage.Scoped[i]
+			au.ScopedWindows = append(au.ScopedWindows, &amxv1.QuotaWindow{
+				Model:    sw.Name,
+				Pct:      sw.Pct,
+				ResetsAt: parseTime(sw.ResetsAt),
+			})
+		}
 	}
 	return au
 }

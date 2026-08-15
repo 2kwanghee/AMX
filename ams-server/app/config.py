@@ -46,6 +46,11 @@ class Settings:
     # wall clock. The tolerance absorbs benign clock skew/jitter between the DB
     # and the AMS host so a few seconds of drift never raises a spurious alert.
     billing_watermark_skew_seconds: int = 300
+    # Usage-snapshot retention: the raw JSONB usage_snapshots ledger grows ~5min
+    # per server forever, so the retention sweep purges snapshots older than this
+    # many days — but only once they are past the settlement watermark, never an
+    # unsettled row. 0 or negative disables the purge (keep every snapshot).
+    usage_snapshot_retention_days: int = 90
     # Console install-command support. `advertise_host` is the host (or IP) the
     # agent should dial; combined with `grpc_port` it forms the endpoint shown in
     # the enroll-token modal. Absent host → no endpoint (the console renders a
@@ -175,6 +180,9 @@ def load_settings() -> Settings:
         ),
         billing_watermark_skew_seconds=int(
             os.environ.get("AMX_BILLING_WATERMARK_SKEW_SECONDS", "300")
+        ),
+        usage_snapshot_retention_days=int(
+            os.environ.get("AMX_USAGE_SNAPSHOT_RETENTION_DAYS", "90")
         ),
         advertise_host=os.environ.get("AMX_ADVERTISE_HOST", "").strip() or None,
         grpc_port=int(os.environ.get("AMX_GRPC_PORT", "50051")),

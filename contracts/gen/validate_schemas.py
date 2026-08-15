@@ -42,6 +42,17 @@ SAMPLES = {
                 "usage": {
                     "fiveHour": {"pct": 61.2, "resetsAt": "2026-08-07T12:30:00Z"},
                     "sevenDay": {"pct": 44.0, "resetsAt": "2026-08-11T00:00:00Z"},
+                    "spend": {
+                        "used": 12.5,
+                        "limit": 50.0,
+                        "pct": 25.0,
+                        "currency": "USD",
+                        "resetsAt": "2026-09-01T00:00:00Z",
+                    },
+                    "scopedWindows": [
+                        {"model": "Fable", "pct": 33.0, "resetsAt": "2026-08-11T00:00:00Z"},
+                        {"model": "Opus", "pct": 44.0},
+                    ],
                 },
                 "usageFetchedAt": "2026-08-07T08:59:48Z",
             }

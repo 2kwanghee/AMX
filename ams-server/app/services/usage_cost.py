@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -46,7 +46,7 @@ from app.models import (
     UsageDailyRollup,
     UsageSnapshot,
 )
-from app.services import alerts
+from app.services import alerts, billing
 
 _logger = logging.getLogger("ams.usage_cost")
 
@@ -353,6 +353,110 @@ def sweep_watermark_future(db: Session) -> bool:
     )
     db.commit()
     return future
+
+
+# -- snapshot retention purge -------------------------------------------------
+# The retention sweep's own advisory-lock key (…05), distinct from the offline
+# (…01), sent-ack (…02), billing (…03) and rollup (…04) sweeps so one instance
+# owning the purge for a tick never blocks the others.
+_RETENTION_SWEEP_LOCK_KEY = 0x414D580F05
+# Rows deleted per statement. The purge loops fixed-size batches (never one bulk
+# DELETE) so a first run over a large backlog never pins a table-wide row-lock
+# set in one long transaction; each batch commits on its own.
+_RETENTION_BATCH = 5000
+
+
+def _settlement_boundary(db: Session) -> datetime | None:
+    """Instant strictly-before which every snapshot is fully settled, or None.
+
+    Both the rollup sweep (``ROLLUP_KIND``) and the billing sweep (``billing.KIND``)
+    integrate the raw ``usage_snapshots``; a snapshot is only past settlement once
+    BOTH watermarks have advanced beyond it, so the boundary is the MIN of the two.
+    A missing cursor means that sweep has sealed nothing yet — no snapshot is
+    settled — so return None (purge nothing).
+    """
+    marks = {
+        kind: watermark
+        for kind, watermark in db.execute(
+            select(BillingCursor.kind, BillingCursor.watermark).where(
+                BillingCursor.kind.in_([ROLLUP_KIND, billing.KIND])
+            )
+        ).all()
+    }
+    rollup = marks.get(ROLLUP_KIND)
+    billing_wm = marks.get(billing.KIND)
+    if rollup is None or billing_wm is None:
+        return None
+    return min(rollup.astimezone(UTC), billing_wm.astimezone(UTC))
+
+
+def sweep_snapshot_retention(db: Session) -> int:
+    """Purge settled ``report_type == "usage"`` snapshots past the retention window.
+
+    Deletes only ``usage`` rows. ``switch_event`` rows are the sole source of the
+    console event timeline (``inventory.list_switch_events`` ->
+    ``GET /servers/{id}/switch-events``), so they are retained regardless of age.
+    A usage snapshot is deleted only when its ``reported_at`` is before BOTH
+    ``now - retention`` and the settlement boundary — the settlement guard is
+    absolute, so the rollup/billing integrals can never lose an input.
+
+    Two safety cut-offs return 0 without deleting anything:
+    ``usage_snapshot_retention_days`` <= 0 (purge disabled), and a settlement
+    boundary parked in the FUTURE. A G27 wall-clock jump can strand a watermark
+    ahead of real time (usage_cost.py / billing.py); snapshots below such a
+    watermark are permanently un-settled, so treating the boundary as "settled"
+    would delete live data — the purge halts and warns instead. Returns rows deleted.
+    """
+    days = get_settings().usage_snapshot_retention_days
+    if days <= 0:
+        return 0
+    boundary = _settlement_boundary(db)
+    if boundary is None:
+        return 0
+    now = _now()
+    if boundary > now:
+        _logger.warning(
+            "snapshot retention halted: settlement watermark %s is in the future "
+            "(> now %s); snapshots below it are un-settled and must not be purged",
+            boundary.isoformat(),
+            now.isoformat(),
+        )
+        return 0
+    delete_before = min(now - timedelta(days=days), boundary)
+
+    total = 0
+    while True:
+        # Lock scope (option a): each batch is its OWN transaction that re-acquires
+        # the transaction-scoped advisory lock, because the previous batch's commit
+        # released it. One bulk delete under a single held lock is exactly what we
+        # avoid — a large first run would pin the lock and its row-lock set for the
+        # whole duration. Failing to re-acquire means another instance took over the
+        # purge this tick; yield the remaining batches to it.
+        if not _try_advisory_xact_lock(db, _RETENTION_SWEEP_LOCK_KEY):
+            break
+        ids = db.execute(
+            select(UsageSnapshot.id)
+            .where(
+                UsageSnapshot.report_type == "usage",
+                UsageSnapshot.reported_at < delete_before,
+            )
+            .limit(_RETENTION_BATCH)
+        ).scalars().all()
+        if not ids:
+            db.rollback()  # release the lock; nothing left to delete
+            break
+        db.execute(delete(UsageSnapshot).where(UsageSnapshot.id.in_(ids)))
+        db.commit()  # releases the advisory lock until the next batch re-takes it
+        total += len(ids)
+        if len(ids) < _RETENTION_BATCH:
+            break
+    if total:
+        _logger.info(
+            "snapshot retention purged %d expired usage snapshot(s) before %s",
+            total,
+            delete_before.isoformat(),
+        )
+    return total
 
 
 # -- month cost (PR3 consumes this) -------------------------------------------

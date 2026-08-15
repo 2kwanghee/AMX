@@ -307,6 +307,31 @@ export interface QuotaWindow {
     | undefined;
   /** window span in minutes */
   windowMinutes: number;
+  /**
+   * Model identity for a per-model scoped weekly window (carried in
+   * AccountUsage.scoped_windows). Empty for the positional windows[] entries,
+   * which are not model-scoped. tsamx emits it as the scoped item's `name`.
+   */
+  model: string;
+}
+
+/**
+ * Pay-as-you-go spend against a monthly cap (tsamx `spend`). Distinct from the
+ * quota windows: it tracks credits/currency, not a rate-limit percentage, and is
+ * never consulted by the switch driver. Present only for accounts with extra
+ * usage enabled and all three numbers returned.
+ */
+export interface Spend {
+  /** amount consumed this cycle */
+  used: number;
+  /** monthly cap */
+  limit: number;
+  /** 0.0 – 100.0 */
+  pct: number;
+  /** ISO currency, e.g. "USD" */
+  currency: string;
+  /** cycle reset (optional) */
+  resetsAt: Date | undefined;
 }
 
 export interface AccountUsage {
@@ -332,6 +357,21 @@ export interface AccountUsage {
    * five_hour/seven_day (dual-recorded), ordered by window_minutes ascending.
    */
   windows: QuotaWindow[];
+  /**
+   * Pay-as-you-go spend (tsamx `spend`). Additive, informational: it never
+   * feeds the switch decision or PoolSummary. Absent when the account has no
+   * extra-usage spend to report.
+   */
+  spend:
+    | Spend
+    | undefined;
+  /**
+   * Per-model scoped weekly windows (tsamx `scoped`). Kept SEPARATE from
+   * windows[] on purpose: windows[] drives the reporter's max-utilization and
+   * eligible/all_exhausted switch decision, and a per-model weekly limit must
+   * never move that. Each entry carries its model in QuotaWindow.model.
+   */
+  scopedWindows: QuotaWindow[];
 }
 
 /** Aggregate pool health (§6.5 poolSummary). */
@@ -1441,7 +1481,7 @@ export const UsageWindow: MessageFns<UsageWindow> = {
 };
 
 function createBaseQuotaWindow(): QuotaWindow {
-  return { id: "", pct: 0, resetsAt: undefined, windowMinutes: 0 };
+  return { id: "", pct: 0, resetsAt: undefined, windowMinutes: 0, model: "" };
 }
 
 export const QuotaWindow: MessageFns<QuotaWindow> = {
@@ -1457,6 +1497,9 @@ export const QuotaWindow: MessageFns<QuotaWindow> = {
     }
     if (message.windowMinutes !== 0) {
       writer.uint32(32).int32(message.windowMinutes);
+    }
+    if (message.model !== "") {
+      writer.uint32(42).string(message.model);
     }
     return writer;
   },
@@ -1500,6 +1543,14 @@ export const QuotaWindow: MessageFns<QuotaWindow> = {
           message.windowMinutes = reader.int32();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.model = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1523,6 +1574,7 @@ export const QuotaWindow: MessageFns<QuotaWindow> = {
         : isSet(object.window_minutes)
         ? globalThis.Number(object.window_minutes)
         : 0,
+      model: isSet(object.model) ? globalThis.String(object.model) : "",
     };
   },
 
@@ -1540,6 +1592,9 @@ export const QuotaWindow: MessageFns<QuotaWindow> = {
     if (message.windowMinutes !== 0) {
       obj.windowMinutes = Math.round(message.windowMinutes);
     }
+    if (message.model !== "") {
+      obj.model = message.model;
+    }
     return obj;
   },
 
@@ -1552,6 +1607,135 @@ export const QuotaWindow: MessageFns<QuotaWindow> = {
     message.pct = object.pct ?? 0;
     message.resetsAt = object.resetsAt ?? undefined;
     message.windowMinutes = object.windowMinutes ?? 0;
+    message.model = object.model ?? "";
+    return message;
+  },
+};
+
+function createBaseSpend(): Spend {
+  return { used: 0, limit: 0, pct: 0, currency: "", resetsAt: undefined };
+}
+
+export const Spend: MessageFns<Spend> = {
+  encode(message: Spend, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.used !== 0) {
+      writer.uint32(9).double(message.used);
+    }
+    if (message.limit !== 0) {
+      writer.uint32(17).double(message.limit);
+    }
+    if (message.pct !== 0) {
+      writer.uint32(25).double(message.pct);
+    }
+    if (message.currency !== "") {
+      writer.uint32(34).string(message.currency);
+    }
+    if (message.resetsAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.resetsAt), writer.uint32(42).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Spend {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSpend();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 9) {
+            break;
+          }
+
+          message.used = reader.double();
+          continue;
+        }
+        case 2: {
+          if (tag !== 17) {
+            break;
+          }
+
+          message.limit = reader.double();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.pct = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.currency = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.resetsAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Spend {
+    return {
+      used: isSet(object.used) ? globalThis.Number(object.used) : 0,
+      limit: isSet(object.limit) ? globalThis.Number(object.limit) : 0,
+      pct: isSet(object.pct) ? globalThis.Number(object.pct) : 0,
+      currency: isSet(object.currency) ? globalThis.String(object.currency) : "",
+      resetsAt: isSet(object.resetsAt)
+        ? fromJsonTimestamp(object.resetsAt)
+        : isSet(object.resets_at)
+        ? fromJsonTimestamp(object.resets_at)
+        : undefined,
+    };
+  },
+
+  toJSON(message: Spend): unknown {
+    const obj: any = {};
+    if (message.used !== 0) {
+      obj.used = message.used;
+    }
+    if (message.limit !== 0) {
+      obj.limit = message.limit;
+    }
+    if (message.pct !== 0) {
+      obj.pct = message.pct;
+    }
+    if (message.currency !== "") {
+      obj.currency = message.currency;
+    }
+    if (message.resetsAt !== undefined) {
+      obj.resetsAt = message.resetsAt.toISOString();
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<Spend>): Spend {
+    return Spend.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<Spend>): Spend {
+    const message = createBaseSpend();
+    message.used = object.used ?? 0;
+    message.limit = object.limit ?? 0;
+    message.pct = object.pct ?? 0;
+    message.currency = object.currency ?? "";
+    message.resetsAt = object.resetsAt ?? undefined;
     return message;
   },
 };
@@ -1565,6 +1749,8 @@ function createBaseAccountUsage(): AccountUsage {
     sevenDay: undefined,
     usageFetchedAt: undefined,
     windows: [],
+    spend: undefined,
+    scopedWindows: [],
   };
 }
 
@@ -1590,6 +1776,12 @@ export const AccountUsage: MessageFns<AccountUsage> = {
     }
     for (const v of message.windows) {
       QuotaWindow.encode(v!, writer.uint32(58).fork()).join();
+    }
+    if (message.spend !== undefined) {
+      Spend.encode(message.spend, writer.uint32(66).fork()).join();
+    }
+    for (const v of message.scopedWindows) {
+      QuotaWindow.encode(v!, writer.uint32(74).fork()).join();
     }
     return writer;
   },
@@ -1657,6 +1849,22 @@ export const AccountUsage: MessageFns<AccountUsage> = {
           message.windows.push(QuotaWindow.decode(reader, reader.uint32()));
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.spend = Spend.decode(reader, reader.uint32());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.scopedWindows.push(QuotaWindow.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1697,6 +1905,12 @@ export const AccountUsage: MessageFns<AccountUsage> = {
       windows: globalThis.Array.isArray(object?.windows)
         ? object.windows.map((e: any) => QuotaWindow.fromJSON(e))
         : [],
+      spend: isSet(object.spend) ? Spend.fromJSON(object.spend) : undefined,
+      scopedWindows: globalThis.Array.isArray(object?.scopedWindows)
+        ? object.scopedWindows.map((e: any) => QuotaWindow.fromJSON(e))
+        : globalThis.Array.isArray(object?.scoped_windows)
+        ? object.scoped_windows.map((e: any) => QuotaWindow.fromJSON(e))
+        : [],
     };
   },
 
@@ -1723,6 +1937,12 @@ export const AccountUsage: MessageFns<AccountUsage> = {
     if (message.windows?.length) {
       obj.windows = message.windows.map((e) => QuotaWindow.toJSON(e));
     }
+    if (message.spend !== undefined) {
+      obj.spend = Spend.toJSON(message.spend);
+    }
+    if (message.scopedWindows?.length) {
+      obj.scopedWindows = message.scopedWindows.map((e) => QuotaWindow.toJSON(e));
+    }
     return obj;
   },
 
@@ -1744,6 +1964,8 @@ export const AccountUsage: MessageFns<AccountUsage> = {
       : undefined;
     message.usageFetchedAt = object.usageFetchedAt ?? undefined;
     message.windows = object.windows?.map((e) => QuotaWindow.fromPartial(e)) || [];
+    message.spend = (object.spend !== undefined && object.spend !== null) ? Spend.fromPartial(object.spend) : undefined;
+    message.scopedWindows = object.scopedWindows?.map((e) => QuotaWindow.fromPartial(e)) || [];
     return message;
   },
 };

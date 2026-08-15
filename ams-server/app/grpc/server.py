@@ -1157,10 +1157,24 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("usage-rollup sweep iteration failed", exc_info=False)
-        # G27 watermark-future guard: a fifth sibling sweep flags the case where a
+        # Snapshot retention: a fifth sibling sweep on the same timer purges raw
+        # usage_snapshots past the retention window that are already settled (both
+        # the rollup and billing watermarks have sealed them). Own advisory lock
+        # (…05) and isolated try/except keep it independent of the sweeps above.
+        try:
+            purged = await asyncio.to_thread(
+                _sweep_snapshot_retention_once, session_factory
+            )
+            if purged:
+                _logger.info("snapshot retention sweeper purged %d snapshot(s)", purged)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("snapshot retention sweep iteration failed", exc_info=False)
+        # G27 watermark-future guard: a sixth sibling sweep flags the case where a
         # forward wall-clock step has parked the rollup watermark ahead of real
         # time, stranding below-watermark snapshots as silently unbilled. Its own
-        # advisory lock (…05) and isolated try/except keep it independent.
+        # advisory lock (…06) and isolated try/except keep it independent.
         try:
             watermark_future = await asyncio.to_thread(
                 _sweep_watermark_future_once, session_factory
@@ -1187,7 +1201,8 @@ async def _offline_sweeper(
 # error handling in the sweeper loop.
 _OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
 _SENT_SWEEP_LOCK_KEY = 0x414D580F02
-_WATERMARK_SWEEP_LOCK_KEY = 0x414D580F05
+# …03 billing, …04 rollup, …05 snapshot-retention (in their own modules).
+_WATERMARK_SWEEP_LOCK_KEY = 0x414D580F06
 
 
 def _sweep_once(
@@ -1221,9 +1236,16 @@ def _sweep_usage_rollup_once(session_factory: sessionmaker[Session]) -> int:
         return usage_cost.sweep_usage_rollup(db)
 
 
+def _sweep_snapshot_retention_once(session_factory: sessionmaker[Session]) -> int:
+    # usage_cost.sweep_snapshot_retention takes its own advisory lock (…05) and
+    # commits per batch — independent of the rollup and billing sweeps.
+    with session_factory() as db:
+        return usage_cost.sweep_snapshot_retention(db)
+
+
 def _sweep_watermark_future_once(session_factory: sessionmaker[Session]) -> bool:
     # usage_cost.sweep_watermark_future reads the rollup cursor and commits the
-    # per-tenant alert lifecycle; the transaction-scoped lock (…05) makes exactly
+    # per-tenant alert lifecycle; the transaction-scoped lock (…06) makes exactly
     # one instance run it per tick.
     with session_factory() as db:
         if not _try_advisory_xact_lock(db, _WATERMARK_SWEEP_LOCK_KEY):
