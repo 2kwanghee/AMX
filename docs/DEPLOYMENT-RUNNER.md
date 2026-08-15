@@ -365,13 +365,17 @@ ENV
 chmod 600 secrets.env
 
 . ./secrets.env && sh deploy/fleet-langfuse.sh on   # 히스토리에 키가 남지 않음
+. ./secrets.env && sh deploy/fleet-langfuse.sh on --with-danger-hook  # 위험명령 훅까지 함께
 
 sh deploy/fleet-langfuse.sh off       # 전 호스트에서 추적 회수
 sh deploy/fleet-langfuse.sh status    # 호스트별 amx-langfuse.env 존재 여부
 ```
 
-`off`는 각 호스트에서 `install-langfuse-hook.sh --uninstall`을 돌려 env 파일과 Stop 훅
-항목만 걷어낸다. `status`는 자격증명이 필요 없고, `--config-dir`을 주지 않으면
+`on`에 `--with-danger-hook`을 붙이면 원격 `install-langfuse-hook.sh`에 그대로 전달돼
+위험명령 감지 PreToolUse 훅까지 함께 깐다(기본은 off, Stop 훅만). 훅을 실제로 무장하려면
+각 호스트의 `amx-langfuse.env`에 `AMX_DANGER_INGEST_URL`/`AMX_DANGER_INGEST_TOKEN`을
+채워야 한다. `off`는 각 호스트에서 `install-langfuse-hook.sh --uninstall`을 돌려 env
+파일과 Stop·danger 훅 항목을 걷어낸다. `status`는 자격증명이 필요 없고, `--config-dir`을 주지 않으면
 `~/.claude-amx` → `~/.claude` 순으로 첫 env 파일을 찾아 보고한다. 다만 `status`는
 **`amx-langfuse.env` 파일이 있는지만** 본다 — `settings.json`의 Stop 훅 등록 여부나 키가
 실제로 유효한지는 확인하지 않으므로, 켜짐 표시가 곧 추적이 도는 증거는 아니다.
