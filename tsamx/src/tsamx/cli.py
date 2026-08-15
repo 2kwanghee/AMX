@@ -1039,6 +1039,16 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         action="store_true",
         help="Include full ~/.claude.json in export (default: oauthAccount only)",
     )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help=(
+            "Skip the confirmation prompt (use with 'remove'). Intended for "
+            "non-interactive callers with no stdin; the interactive default "
+            "still prompts when this is absent."
+        ),
+    )
 
     # Legacy `--flag` interface. Still fully supported (bare subcommands rewrite
     # into these, see _translate_subcommand), but hidden from --help so the
@@ -1197,6 +1207,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     if args.full and not args.export:
         parser.error("--full can only be used with 'export'")
 
+    if args.yes and args.remove_account is None:
+        parser.error("--yes can only be used with 'remove'")
+
     # Self-upgrade runs before switcher init so we don't touch config/keychain
     # just to upgrade the tool itself.
     if args.upgrade:
@@ -1233,7 +1246,7 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 slot=args.slot,
             )
         elif args.remove_account:
-            switcher.remove_account(args.remove_account)
+            switcher.remove_account(args.remove_account, assume_yes=args.yes)
         elif args.disable_account is not None:
             switcher.set_account_disabled(args.disable_account, True)
         elif args.enable_account is not None:
