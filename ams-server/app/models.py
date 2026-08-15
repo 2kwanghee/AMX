@@ -461,6 +461,21 @@ class UsageSnapshot(Base):
             "ix_usage_snapshots_tenant_type_time",
             "tenant_id", "report_type", "reported_at",
         ),
+        # Retention sweep (usage_cost.sweep_snapshot_retention) deletes by the
+        # exact predicate ``report_type = 'usage' AND reported_at < X`` — no
+        # tenant_id, so the composite above (tenant_id-leading) cannot serve it
+        # and a large first purge falls back to a seq-scan. A PARTIAL index is
+        # chosen over a plain ``(report_type, reported_at)`` composite because the
+        # sweep's report_type filter is a constant equality: folding it into the
+        # index WHERE clause leaves reported_at as the sole ordered key (a tight
+        # range scan) and keeps the index to usage rows only — smaller than a
+        # composite that would also carry switch_event rows the sweep never touches.
+        # migration 0020.
+        Index(
+            "ix_usage_snapshots_usage_reported_at",
+            "reported_at",
+            postgresql_where=text("report_type = 'usage'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
