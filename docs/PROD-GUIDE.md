@@ -438,7 +438,80 @@ claude -p "작업 내용"  # 배치
 
 ---
 
-## 9. 문제 해결 표
+## 9. 사용량 관측(Langfuse) 설치 — 선택
+
+러너 세션의 토큰 사용량을 계정별·모델별로 실측하려면 Langfuse 관측 층을 켠다. **선택
+기능**이라 켜지 않아도 나머지 운영은 완전히 동일하다. **내부망·신뢰 경계 안 전용**이며,
+프롬프트·응답을 마스킹 없이 전량 수집하므로 인터넷에 노출된 Langfuse에는 붙이지 않는다.
+원본 절차는 `deploy/langfuse/README.md`(스택)와 `docs/DEPLOYMENT-RUNNER.md` §8(훅)이며,
+아래는 운영 순서로 엮은 요약이다.
+
+구성은 세 조각이다: ① 데이터를 받는 **Langfuse 서버**(셀프호스팅), ② 중앙 서버가
+Langfuse를 폴링해 집계하는 **AMS 스윕**, ③ 각 러너 세션이 기록을 보내는 **Stop 훅**.
+
+### 9-1. Langfuse 서버 기동 (관측 데이터를 받을 호스트에서)
+
+```sh
+cd ~/AMX/deploy/langfuse
+cp env.example .env       # CHANGEME 전부 교체:
+#  - NEXTAUTH_SECRET / SALT : openssl rand -base64 32
+#  - ENCRYPTION_KEY         : openssl rand -hex 32  (정확히 64 hex)
+docker compose config     # 병합·문법 검증
+docker compose up -d
+curl -fsS http://localhost:3100/api/public/health   # {"status":"OK"} 류면 성공
+```
+
+- 웹 포트는 기본 **3100**(`LANGFUSE_WEB_PORT`). 웹(3100)과 minio(9090)를 뺀 포트는
+  `127.0.0.1`에만 바인딩된다. 다른 기기에서 대시보드를 열려면 §4 방식으로 3100을 연다.
+- 웹이 스키마 마이그레이션을 끝낸 뒤에만 워커가 뜨도록 기동 순서가 고정돼 있어, 첫
+  `up`부터 재시작 없이 정상화된다.
+- **`docker compose down -v`는 관측 데이터를 전소**시키므로 쓰지 않는다(볼륨 백업 후 업그레이드).
+- 대시보드에서 조직·프로젝트를 만들고 **API 키(pk-…/sk-…)**를 발급해 둔다. 아래 두 곳(AMS, 훅)이 이 키를 쓴다.
+
+### 9-2. 중앙 서버(AMS) 집계 켜기
+
+집계 스윕은 `.amx-dev/dev.env`에 아래 4종이 **모두** 있을 때만 활성화된다(하나라도 비면 비활성).
+
+```sh
+cat >> ~/AMX/.amx-dev/dev.env <<'ENV'
+AMX_LANGFUSE_BASE_URL=http://<langfuse-host>:3100
+AMX_LANGFUSE_PUBLIC_KEY=pk-...
+AMX_LANGFUSE_SECRET_KEY=sk-...
+AMX_LANGFUSE_TENANT_ID=<집계 대상 테넌트 UUID>
+ENV
+bash deploy/fullstack-run.sh restart server --lan
+```
+
+- 선택 변수: `AMX_LANGFUSE_UI_URL`(패널 딥링크용 대시보드 주소), `AMX_LANGFUSE_POLL_SECONDS`
+  (기본 300, 최소 60), `AMX_LANGFUSE_METRICS_WINDOW_DAYS`(기본 3, 최소 2로 클램프),
+  `AMX_LANGFUSE_MAX_ACCOUNTS`(기본 100).
+- 현재 롤업은 **전역 단일 테넌트**(`AMX_LANGFUSE_TENANT_ID`)에 귀속된다 — 그 테넌트의
+  사용량 탭에서만 실측 패널이 채워지고, 다른 테넌트 조회는 빈 결과다(§AMX-DESIGN 5.6.1).
+- **마이그레이션은 자동**이다. `fullstack-run.sh`의 up/restart가 `alembic upgrade head`를
+  돌려 이 트랙이 추가한 **0019**(watermark_future 경보)·**0020**(스냅샷 보존 부분 인덱스)·
+  **0021**(langfuse_usage_rollup)까지 적용한다. 이 세 마이그레이션이 밀려 있던 구버전
+  AMS를 올리는 경우에도 restart 한 번이면 반영된다.
+
+### 9-3. 러너에 Stop 훅 배포
+
+각 에이전트 서버 러너에 훅을 심으면 그 서버의 세션이 Langfuse로 흘러간다. `amx-claude`
+래퍼를 거쳐 뜬 세션만 추적되고, 훅·키가 없는 서버는 동작이 이전과 같다.
+
+- **호스트 한 대**: `docs/DEPLOYMENT-RUNNER.md` §8-"설치"의 `install-langfuse-hook.sh`.
+- **신규 에이전트 자동 적용**: `agent-setup.sh install`에 `AMX_LANGFUSE_BASE_URL`/
+  `PUBLIC_KEY`/`SECRET_KEY` 3종을 함께 주면 설치 끝에 훅까지 심는다(§DEPLOYMENT-RUNNER 8).
+- **기존 함대 일괄**: `deploy/fleet-langfuse.sh on|off|status`. 실호스트 목록은
+  `fleet-hosts.txt`(커밋 금지), 시크릿은 0600 env 파일로 소싱한다. dev 호스트가
+  `~/AMX-agent`에 체크아웃돼 있으면 `--remote-repo ~/AMX-agent`를 붙인다.
+  상세·주의는 `docs/DEPLOYMENT-RUNNER.md` §8-"함대(fleet) 일괄 배포".
+
+> 확인: 켜진 뒤 러너로 세션을 한 번 돌리고, 5분(폴 주기) 안팎 뒤 관리자 화면 **사용량**
+> 탭의 Langfuse 패널에 계정·모델이 뜨면 세 조각이 끝까지 이어진 것이다. `fleet-langfuse.sh
+> status`는 env 파일 존재만 보므로 "켜짐"이 곧 추적 성립 증거는 아니다(§DEPLOYMENT-RUNNER 8).
+
+---
+
+## 10. 문제 해결 표
 
 | 증상 | 1순위 점검 | 조치 |
 |---|---|---|
@@ -454,7 +527,7 @@ claude -p "작업 내용"  # 배치
 
 ---
 
-## 10. 설치 완료 체크리스트
+## 11. 설치 완료 체크리스트
 
 **중앙 서버:**
 - [ ] `fullstack-run.sh status` 전부 ✔ (db/REST/gRPC/web)

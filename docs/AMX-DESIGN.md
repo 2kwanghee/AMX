@@ -519,6 +519,11 @@ Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패�
   이벤트 · reconcile 드리프트(`usage_snapshots.drift`) · 서버 오프라인. `dedupe_key`(server×kind[×account])로
   open 1건 유지, 다음 UsageReport에서 조건 해소 시 auto-resolve. `GET /alerts` · `POST /alerts/{id}:ack`.
   경보는 이벤트 유실에 강건하도록 **reconcile-on-report 재조회로도 재구성 가능**(§P3 결정8 best-effort 보완).
+  - **경보 kind 전량(8종)**: 서버-scoped `all_exhausted`·`server_offline`·`self_update_failed`(`{server}:{kind}`),
+    계정-scoped `drift`·`quarantine`·`recall_failed`·`command_send_failed`(`{server}:{kind}:{account}`),
+    테넌트-scoped `billing_watermark_future`. 뒤 넷의 배선은 §5.2·회복 설계(§D1/D2)에, `billing_watermark_future`는
+    watermark-future 스위퍼(§5.6.1 목록의 여섯 번째, 락 …06)가 `reported_at < watermark` 시계 앞점프를 감지해 여는
+    것으로 G27 자가치유(§보존 정책 주석)의 관측 지점이다.
 - **서버 오프라인 정합**: `last_seen_at` 만료 스위퍼(주기적 `< now-3틱 → offline`) — half-open 스트림에서
   online 고착·경보 미발화 방지.
 - **인증**: ams-server는 단일 관리자 Bearer 유지, BFF에 로그인→쿠키 세션 + `Principal` 반환형(P5 테넌트
@@ -780,13 +785,30 @@ AMA는 usage API를 직접 폴링하지 않는다 — tsamx 캐시(`list --json`
       "isCurrent": true,              // 현재 활성 크레덴셜 여부
       "usage": {
         "fiveHour": { "pct": 61.2, "resetsAt": "2026-08-07T12:30:00Z" },
-        "sevenDay": { "pct": 44.0, "resetsAt": "2026-08-11T00:00:00Z" }
+        "sevenDay": { "pct": 44.0, "resetsAt": "2026-08-11T00:00:00Z" },
+        // 이하 P2b/P4 확장 (선택 필드, tsamx가 보고할 때만 실림):
+        "windows": [                     // 프로바이더 일반화 윈도우(P2b) — fiveHour/sevenDay와 병기, windowMinutes 오름차순
+          { "id": "five_hour", "windowMinutes": 300, "pct": 61.2, "resetsAt": "2026-08-07T12:30:00Z" },
+          { "id": "seven_day", "windowMinutes": 10080, "pct": 44.0, "resetsAt": "2026-08-11T00:00:00Z" }
+        ],
+        "spend": {                       // 종량제 지출(tsamx spend) — 정보용, 스위칭·poolSummary 계산에 미반영
+          "used": 12.4, "limit": 100.0, "pct": 12.4, "currency": "USD"
+        },
+        "scopedWindows": [               // 모델별 주간 윈도우(tsamx scoped) — 모델명 키, 스위칭·poolSummary에 미반영
+          { "model": "claude-sonnet-4", "pct": 30.5, "resetsAt": "2026-08-11T00:00:00Z" }
+        ]
       },
       "usageFetchedAt": "2026-08-07T08:59:48Z"
     }
   ]
 }
 ```
+
+`windows`/`spend`/`scopedWindows`는 #69에서 계약(스키마·proto)까지 관통해 수집·적재되는
+선택 필드다. `spend`(종량제 월 상한 대비 지출)와 `scopedWindows`(모델별 주간 한도)는 **정보용**이라
+스위칭 결정이나 `poolSummary.maxUtilizationPct`에 절대 들어가지 않는다(스위칭은 여전히
+`fiveHour`/`sevenDay` binding-window 최댓값만 본다, §2.2). 콘솔 표시는 P4에서 미구현이며,
+현재 관측 뷰는 §5.6.1 Langfuse 롤업이 담당한다.
 
 ```jsonc
 // AccountEvent (스위칭 즉시 통지)

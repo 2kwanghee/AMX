@@ -2,7 +2,9 @@
 
 deliver가 credential을 교체하는 동안 러너(Claude Code)가 신규 계정으로 과금되지
 않도록 하는 배포 가이드. AMA 측 B1a(창 최소화)와 B1b(flock 조율)의 2층 방어를
-설명하고, 참조 래퍼 `deploy/amx-claude`의 설치법을 다룬다.
+설명하고, 참조 래퍼 `deploy/amx-claude`의 설치법을 다룬다(§1~§7). 이어 러너 세션을
+셀프호스팅 Langfuse로 관측하는 Stop 훅과 함대 일괄 배포(§8), 개인 작업과 러너를 한
+대에서 겸용하는 PC의 프로필 부트스트랩·`amx` 명령(§9)까지 다룬다.
 
 ## 1. 러너 모델 (두 경로)
 
@@ -71,10 +73,12 @@ lock 파일은 credential 파일과 **분리**되어 있어 claude가 절대 건
 `deploy/amx-claude`는 `claude`의 드롭인 대체다. `CLAUDE_CONFIG_DIR`를 존중하고
 (미설정 시 `~/.claude`), `-p` 포함 **모든 인자를 그대로 패스스루**한다.
 
-- **사용자 터미널**: 대화형 셸에서 alias 권장.
+- **사용자 터미널**: 대화형 셸에서 alias 권장(러너 **전용** 서버 전제).
   ```sh
   alias claude=amx-claude    # ~/.bashrc, ~/.zshrc 등
   ```
+  개인 작업과 러너를 한 대에서 겸용하는 PC라면 `claude`를 래퍼에 alias하지 말고 §9의
+  `amx` 명령을 쓴다 — alias를 걸면 개인 세션까지 deliver 락에 묶인다.
 - **ClickEye webhook**: 진입점에서 `claude` 대신 `amx-claude`를 호출.
   ```sh
   amx-claude -p "<명령>"

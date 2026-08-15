@@ -17,6 +17,8 @@
 | 후속 | 보존 삭제용 부분 인덱스(alembic 0020) | #77 |
 | P4 | Langfuse Metrics API 주기 집계 스윕(7번째, 락 …07) + `langfuse_usage_rollup` + REST | #78 |
 | P4 | 콘솔 usage 탭 LangfuseUsagePanel(모델별·계정별 실측, uiUrl 딥링크) | #79 |
+| P4 | 토큰 수집을 `usageByType` 교차로 교체 — 캐시 토큰 실측 적재, `input_tokens` 의미 정정(순수 input) | #80 |
+| 후속 | 겸용 PC 프로필 부트스트랩(`bootstrap-profile.sh`·`amx` 명령, 개인→러너 유저 자산 링크, DEPLOYMENT-RUNNER §9) | #81 |
 
 P2(PoC)는 시험 장비 `~/langfuse-poc`에 Langfuse v4.11.0이 기동돼 있고(웹 포트 3100, org=amx / project=amx-poc, 키·admin 비밀번호는 `~/langfuse-poc/.env`), 이 PC의 러너 프로필(`~/.claude-amx`)에 훅이 설치돼 실 세션 추적이 검증됐다.
 
@@ -27,10 +29,11 @@ P2(PoC)는 시험 장비 `~/langfuse-poc`에 Langfuse v4.11.0이 기동돼 있�
 3. **파일럿 확대.** 훅은 현재 이 PC 한 대뿐. 노트북·운영 서버 확대 시 `deploy/fleet-langfuse.sh on` 사용(운영 호스트는 기본 `~/AMX`, dev 호스트는 `--remote-repo ~/AMX-agent`). 노트북 접근이 필요하면 10.60.1.15:3100 portproxy·방화벽 구성이 선행돼야 한다(WSL IP 변동 주의).
 4. **amx-codex 미추적.** Langfuse 훅은 Claude Code 전용이라 codex 러너는 관측 공백. 멀티 프로바이더 계획(리서치 완료, 결정 3건 대기)에 종속.
 5. **G27 후속(선택).** 되감기 자가치유로 핵심은 닫혔으나, 이미 billing 앵커가 생성된 날의 지각 스냅샷 반영은 G26 void/재집계 설계 소관으로 남아 있다.
+6. **tsamx run 세션 프로필 추적 공백.** 겸용 PC 부트스트랩(#81)은 러너 홈(`~/.claude-amx`)에만 Stop 훅을 심는다. tsamx가 세션마다 만드는 임시 세션 프로필은 `~/.claude`에 심링크된 `settings.json`을 쓰고 env(Langfuse 키)도 공유하지 않아, 그 프로필 경로로 직접 뜬 세션은 추적에서 빠진다(DEPLOYMENT-RUNNER §9 "알려진 한계"). `amx` 경유(러너 홈 그대로)는 해당 없음. 세션 프로필까지 덮으려면 tsamx 세션 생성 훅에 개입해야 해 별도 설계 필요.
 
 ## 결함 (미해결, 우선순위순)
 
-- **[중] P4 캐시 토큰 항상 0** — Langfuse Metrics API에 캐시 토큰 measure가 없어 `cache_read/creation_tokens`를 0으로 적재한다. 웹 패널이 이 컬럼을 표시하므로 사용자가 "캐시 미사용"으로 오인할 수 있다. 웹에 각주를 달거나 컬럼을 숨기는 한 줄 수정 권장. 원 데이터는 trace 인제스천에는 존재하므로(usageDetails), Langfuse가 measure를 추가하면 마이그레이션 없이 백필 가능.
+- **[해소됨 · #80] P4 캐시 토큰 항상 0** — 원래 "Metrics API에 캐시 measure가 없다"는 전제가 오류였다. 토큰을 `usageByType` measure를 `usageType` dimension과 교차해 뽑도록 교체하니 `cache_read_input_tokens`/`cache_creation_input_tokens`가 제 컬럼에 실측 적재된다. 겸사겸사 구 `inputTokens` measure가 input+cache 합산이라 부풀던 `input_tokens`도 순수 input으로 정정됐다. 웹 각주/컬럼 숨김은 불필요.
 - **[하] 사라진 key의 stale 행 잔존** — P4 upsert는 이번 fetch에 있는 key만 갱신한다. observations가 append-only라 실무 위험은 낮다.
 - **[하] Metrics API grouped 행 상한 미확인** — 모델 종수가 매우 많은 날 grouped 결과가 캡되면 일부 누락 가능(미검증 가설).
 
