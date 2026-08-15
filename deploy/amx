@@ -1,0 +1,30 @@
+#!/bin/sh
+# amx — AMX 러너 프로필로 Claude Code를 띄우는 전환 명령.
+#
+# 개인 `claude`(개인 프로필 ~/.claude)는 그대로 두고, 이 명령만 러너 프로필
+# (~/.claude-amx)을 CLAUDE_CONFIG_DIR로 주입해 amx-claude 래퍼로 넘긴다.
+# amx-claude 는 deliver 락 조율(B1b)과 Langfuse 추적을 담당하는 기존 래퍼로,
+# 여기서는 건드리지 않고 그대로 감싼다.
+#
+# 사용법: `claude`의 드롭인 대체. 모든 인자를 그대로 전달한다.
+#   amx                    # 대화형
+#   amx -p "작업 지시"      # 배치
+#
+# 프로필 경로는 AMX_CONFIG_DIR로 덮어쓸 수 있다(기본 ~/.claude-amx).
+
+set -eu
+
+CLAUDE_CONFIG_DIR="${AMX_CONFIG_DIR:-$HOME/.claude-amx}"
+export CLAUDE_CONFIG_DIR
+
+# amx-claude 위치: 이 스크립트와 같은 디렉터리를 우선하고, 없으면 PATH에서 찾는다.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "$SELF_DIR/amx-claude" ]; then
+	exec "$SELF_DIR/amx-claude" "$@"
+elif command -v amx-claude >/dev/null 2>&1; then
+	exec amx-claude "$@"
+else
+	echo "amx: amx-claude 를 찾지 못했습니다 (스크립트 디렉터리·PATH 모두 없음)." >&2
+	echo "     deploy/amx-claude 를 PATH에 두거나 amx 와 같은 디렉터리에 두세요." >&2
+	exit 127
+fi

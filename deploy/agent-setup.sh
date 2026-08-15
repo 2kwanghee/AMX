@@ -100,6 +100,22 @@ do_install() {
     fi
   fi
 
+  # 겸용 PC 프로필 부트스트랩: 개인 프로필(~/.claude)이 있고 유저 스코프 자산
+  # (CLAUDE.md·skills·projects) 중 하나라도 있으면, 그 지침·스킬·메모리를 러너
+  # 프로필($config_dir)에서 링크로 공유하도록 연결한다. 링크는 러너 홈 안에만
+  # 만들며 개인 프로필은 읽기만 한다(deploy/bootstrap-profile.sh 참고).
+  # 개인 프로필이 없거나 자산이 없으면 완전 무동작. 실패는 경고만 —
+  # 에이전트 설치를 막지 않는다.
+  if [ -d "$HOME/.claude" ] \
+     && { [ -e "$HOME/.claude/CLAUDE.md" ] || [ -d "$HOME/.claude/skills" ] || [ -d "$HOME/.claude/projects" ]; }; then
+    echo "   겸용 PC 프로필 부트스트랩 (개인 프로필 감지)…"
+    if sh "$ROOT/deploy/bootstrap-profile.sh" --personal-dir "$HOME/.claude" --config-dir "$config_dir"; then
+      ok "프로필 부트스트랩 완료 (개인→러너 자산 링크)"
+    else
+      warn "프로필 부트스트랩 실패 — 자산 공유 없이 계속합니다. 나중에 deploy/bootstrap-profile.sh로 재시도하세요."
+    fi
+  fi
+
   # 재기동·제거를 위해 (토큰 제외) 설정을 기록해 둔다. 토큰은 1회용이라 저장하지 않는다.
   mkdir -p "$DEV_DIR"
   {
