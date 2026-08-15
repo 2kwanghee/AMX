@@ -416,6 +416,10 @@ claude                # 대화형
 claude -p "작업 내용"  # 배치
 ```
 
+이 전역 `export`·`alias`는 러너 **전용** 서버 전제다. 개인 `~/.claude`와 러너를 한
+대에서 겸용하는 PC라면 이 방식을 쓰지 말고(개인 `claude`까지 러너로 끌려간다)
+`docs/DEPLOYMENT-RUNNER.md` §9의 `amx` 명령을 쓴다.
+
 자동화(웹훅·cron·systemd) 진입점도 `amx-claude`를 호출하게 한다.
 래퍼를 우회한 직접 실행까지 차단하려면 `deploy/install-runner-guard.sh`
 (검증: `verify-runner-guard.sh`) — 상세는 `docs/DEPLOYMENT-RUNNER.md`.
