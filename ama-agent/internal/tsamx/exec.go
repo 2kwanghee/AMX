@@ -235,8 +235,13 @@ func (b *ExecBridge) DeliverLock(ctx context.Context) func() error {
 }
 
 // Remove runs `tsamx remove <account>`.
+//
+// `--yes` skips tsamx's interactive [y/N] confirmation: the agent runs the CLI
+// with no stdin, so without it the prompt hits EOF and the removal fails. The
+// flag lives here (the stdin-less caller) rather than in the CLI dispatch so the
+// human path keeps prompting.
 func (b *ExecBridge) Remove(ctx context.Context, account string) error {
-	_, err := b.run(ctx, b.env("", ""), "remove", account)
+	_, err := b.run(ctx, b.env("", ""), "remove", account, "--yes")
 	return err
 }
 
