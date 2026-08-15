@@ -38,6 +38,7 @@ import os
 import re
 import socket
 import sys
+import threading
 import urllib.request
 from datetime import datetime, timezone
 
@@ -45,6 +46,9 @@ from datetime import datetime, timezone
 _HTTP_TIMEOUT_SECONDS = 2.0
 # commandMasked 상한.
 _MASK_MAX_CHARS = 200
+# _match가 검사하는 명령 앞부분 상한(바이트/문자). 초과분은 잘라 검사해 병리적
+# 초장문 입력이 패턴 검사 비용을 좌우하지 못하게 한다(payload에 truncated 플래그).
+_MAX_SCAN_CHARS = 8192
 
 # 명령 구분자 — 한 명령 토큰 경계를 넘지 않도록 룩어헤드에서 사용한다.
 _SEP = r"[^|&;\n]"
@@ -52,14 +56,10 @@ _SEP = r"[^|&;\n]"
 # 기본 내장 패턴(보수적). (이름, 컴파일된 정규식) 순서대로 첫 매치를 채택한다.
 # 룩어헤드는 같은 명령 조각(구분자 이전) 안에서 플래그/인자 존재를 확인한다.
 _BUILTIN_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
-    # rm 재귀+강제 삭제: -rf / -fr / -r -f / --recursive --force 등.
-    (
-        "rm_recursive_force",
-        re.compile(
-            rf"\brm\b(?=(?:{_SEP}*\s)-{_SEP}*r)(?=(?:{_SEP}*\s)-{_SEP}*f)",
-            re.IGNORECASE,
-        ),
-    ),
+    # NOTE: rm 재귀+강제 삭제는 정규식이 아니라 _rm_recursive_force() 토큰 검사로
+    # 판정한다(_match가 먼저 호출). 정규식 접근(플래그 존재를 두 룩어헤드로 확인)은
+    # `rm -x -x -x …` 류 입력에서 파국적 백트래킹(ReDoS)을 유발했고, `rm -i frodo.txt`
+    # 같은 비재귀 명령까지 오탐했다. 선형 토큰 스캔이 둘 다 없앤다.
     # 권한 상승. 뒤 인자를 소비하지 않도록 룩어헤드로만 확인한다.
     ("sudo", re.compile(r"\bsudo\b(?=\s+\S)")),
     # 파일시스템 생성(포맷).
@@ -141,8 +141,52 @@ def _load_extra_patterns() -> list[tuple[str, "re.Pattern[str]"]]:
     return out
 
 
+# 명령 구분자로 시작하는 토큰(파이프/논리연산/세미콜론) — rm 플래그 스캔을 여기서 끊는다.
+_TOKEN_RE = re.compile(r"\S+")
+
+
+def _rm_recursive_force(command: str) -> tuple[str, int, int] | None:
+    """rm 재귀+강제 삭제를 **선형 시간 토큰 검사**로 판정. (name, start, end) | None.
+
+    정규식 백트래킹(ReDoS)을 피하려고 정규식 대신 토큰 스캔을 쓴다. 명령을 공백으로
+    쪼개 각 ``rm`` 토큰을 찾고, 그 뒤로 이어지는 ``-`` 시작 플래그 토큰에서 재귀
+    (``r``/``R`` 또는 ``--recursive``)와 강제(``f`` 또는 ``--force``)가 **동시에** 켜지는지
+    본다. 플래그가 아닌 토큰(피연산자/구분자)을 만나면 그 rm의 옵션 영역을 끝낸다 —
+    이 조기 종료가 ``rm rm rm …`` 류에서도 전체를 선형으로 유지한다.
+
+    이렇게 하면 ``rm -i frodo.txt``(대화형, r·f 없음)는 발화하지 않고, ``rm -rf`` /
+    ``rm -r -f`` / ``rm --recursive --force``만 잡힌다. ``--`` 이후는 옵션이 아니라
+    피연산자이므로 ``rm -- -rf``(이름이 -rf인 파일)도 오탐하지 않는다.
+    """
+    tokens = [(m.group(), m.start()) for m in _TOKEN_RE.finditer(command)]
+    for i, (tok, pos) in enumerate(tokens):
+        if tok != "rm":
+            continue
+        recursive = force = False
+        for tok2, _ in tokens[i + 1 :]:
+            if tok2 == "--" or not tok2.startswith("-"):
+                break  # 옵션 영역 끝(구분자/피연산자 포함).
+            if tok2.startswith("--"):
+                if tok2 == "--recursive":
+                    recursive = True
+                elif tok2 == "--force":
+                    force = True
+            else:
+                cluster = tok2[1:]
+                if "r" in cluster or "R" in cluster:
+                    recursive = True
+                if "f" in cluster:
+                    force = True
+            if recursive and force:
+                return "rm_recursive_force", pos, pos + 2  # 스팬은 rm 키워드만.
+    return None
+
+
 def _match(command: str) -> tuple[str, int, int] | None:
     """첫 매치의 (패턴이름, start, end). 매치 없으면 None."""
+    rm_hit = _rm_recursive_force(command)
+    if rm_hit is not None:
+        return rm_hit
     for name, pat in _BUILTIN_PATTERNS + _load_extra_patterns():
         m = pat.search(command)
         if m:
@@ -169,23 +213,39 @@ def _mask(command: str, start: int, end: int) -> str:
 
 
 def _notify(url: str, token: str, payload: dict) -> None:
+    """통보 POST를 **하드 2초 데드라인**으로 경계한다.
+
+    urllib의 socket timeout만으로는 DNS 해석 단계 지연을 못 막는 플랫폼이 있어, POST
+    전체를 데몬 스레드에서 돌리고 메인은 join(2초)으로만 기다린다. 2초 안에 못 끝내면
+    스레드를 그대로 두고 반환한다 — 데몬 스레드라 프로세스 종료 시 함께 사라지므로
+    방치해도 무해하고, 훅이 Claude를 붙잡는 일은 없다.
+    """
     body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-AMX-Ingest-Token": token,
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
-            # 응답 본문은 읽지 않는다(불필요). 2xx 아니면 실패로 기록.
-            if resp.status >= 300:
-                _record_failure(f"ingest HTTP {resp.status}")
-    except Exception as exc:  # noqa: BLE001 - 절대 밖으로 던지지 않는다.
-        _record_failure(f"ingest error: {type(exc).__name__}")
+
+    def _do() -> None:
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-AMX-Ingest-Token": token,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
+                # 응답 본문은 읽지 않는다(불필요). 2xx 아니면 실패로 기록.
+                if resp.status >= 300:
+                    _record_failure(f"ingest HTTP {resp.status}")
+        except Exception as exc:  # noqa: BLE001 - 절대 밖으로 던지지 않는다.
+            _record_failure(f"ingest error: {type(exc).__name__}")
+
+    worker = threading.Thread(target=_do, daemon=True)
+    worker.start()
+    worker.join(_HTTP_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        # DNS/연결이 데드라인을 넘겼다. 데몬 스레드는 방치해도 무해하므로 그대로 둔다.
+        _record_failure("ingest timeout (hard 2s deadline)")
 
 
 def main() -> int:
@@ -212,14 +272,20 @@ def main() -> int:
         return 0
 
     try:
-        hit = _match(command)
+        # 병리적 초장문 입력이 패턴 검사 비용을 좌우하지 못하게 앞 8KB만 검사한다.
+        # sha256은 원문 전체로 계산해 dedupe 키 안정성을 지키고, 마스킹은 검사한
+        # 앞부분(매치가 이 안에 있음)으로 만든다.
+        truncated = len(command) > _MAX_SCAN_CHARS
+        scan = command[:_MAX_SCAN_CHARS] if truncated else command
+        hit = _match(scan)
         if hit is None:
             return 0
         pattern_name, start, end = hit
         out = {
             "patternName": pattern_name,
             "commandSha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
-            "commandMasked": _mask(command, start, end),
+            "commandMasked": _mask(scan, start, end),
+            "truncated": truncated,
             "sessionId": payload.get("session_id"),
             "cwd": payload.get("cwd"),
             "hostname": socket.gethostname(),

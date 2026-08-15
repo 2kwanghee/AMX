@@ -84,6 +84,59 @@ def test_benign_command_no_notify(hook, monkeypatch):
     assert _run(hook, monkeypatch, _bash("ls -la && git status")) is None
 
 
+def test_rm_separate_flags_match(hook, monkeypatch):
+    sent = _run(hook, monkeypatch, _bash("rm -r -f /tmp/x"))
+    assert sent is not None and sent["payload"]["patternName"] == "rm_recursive_force"
+
+
+def test_rm_long_flags_match(hook, monkeypatch):
+    sent = _run(hook, monkeypatch, _bash("rm --recursive --force /tmp/x"))
+    assert sent is not None and sent["payload"]["patternName"] == "rm_recursive_force"
+
+
+def test_rm_interactive_no_false_positive(hook, monkeypatch):
+    # W1: `rm -i frodo.txt` 는 재귀·강제가 아니므로 발화하면 안 된다.
+    assert _run(hook, monkeypatch, _bash("rm -i frodo.txt")) is None
+
+
+def test_rm_recursive_only_no_match(hook, monkeypatch):
+    # -r 만 있고 -f 없으면 발화하지 않는다(둘 다 필요).
+    assert _run(hook, monkeypatch, _bash("rm -r somedir")) is None
+
+
+def test_rm_double_dash_operand_no_match(hook, monkeypatch):
+    # `--` 이후는 옵션이 아니라 피연산자 — 이름이 -rf 인 파일 삭제는 재귀삭제가 아니다.
+    assert _run(hook, monkeypatch, _bash("rm -- -rf")) is None
+
+
+def test_long_command_truncated_flag(hook, monkeypatch):
+    # 8KB 초과 명령: 앞부분에 매치가 있으면 잡되 truncated=True.
+    cmd = "rm -rf /a" + " " + ("x" * 9000)
+    sent = _run(hook, monkeypatch, _bash(cmd))
+    assert sent is not None
+    assert sent["payload"]["truncated"] is True
+    import hashlib
+    # sha256 은 잘리지 않은 원문 전체로 계산된다.
+    assert sent["payload"]["commandSha256"] == hashlib.sha256(cmd.encode()).hexdigest()
+
+
+def test_short_command_not_truncated(hook, monkeypatch):
+    sent = _run(hook, monkeypatch, _bash("rm -rf /a"))
+    assert sent is not None and sent["payload"]["truncated"] is False
+
+
+def test_redos_input_is_linear(hook, monkeypatch):
+    # 적대 입력: 정규식 백트래킹이면 초 단위로 폭발한다. 토큰 스캔+8KB 컷으로 선형.
+    import time
+
+    payload = _bash("rm " + " -x" * 60000)  # ~180KB, r/f 없어 매치 아님.
+    start = time.monotonic()
+    result = _run(hook, monkeypatch, payload)
+    elapsed = time.monotonic() - start
+    assert result is None  # -x 뿐이라 재귀·강제 아님.
+    assert elapsed < 0.05, f"took {elapsed:.3f}s (expected <50ms)"
+
+
 def test_git_push_force_main_matches(hook, monkeypatch):
     sent = _run(hook, monkeypatch, _bash("git push --force origin main"))
     assert sent is not None and sent["payload"]["patternName"] == "git_push_force_main"
