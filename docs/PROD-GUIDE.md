@@ -530,8 +530,16 @@ bash deploy/fullstack-run.sh restart server --lan
   `X-AMS-Signature`와 상수시간 비교하고, `X-AMS-Timestamp`(유닉스 초)가 허용 시차(예:
   ±5분) 안인지 확인해 리플레이를 거른다. 페이로드는
   `{alertId, kind, status(open|resolved), tenantId, serverId, detail, occurredAt}`이다.
-- 실패는 지수 백오프로 재시도하고 상한 초과 시 폐기한다(무한 적재 없음). 시크릿은 서명
-  계산에만 쓰이고 로그에 남지 않는다.
+- **전달 의미론**: **at-least-once**(정확히 1회 아님)이고 **순서 미보장**이다 — 재시도·다중
+  인스턴스로 같은 전이가 중복 도착하거나 open/resolved가 뒤바뀐 순서로 올 수 있다. 수신자는
+  `(alertId, status, occurredAt)`를 멱등 키로 삼아 중복을 흡수하고, 더 이른 `occurredAt`이
+  나중에 도착해도 최신 상태를 되돌리지 않도록 처리한다.
+- 실패는 지수 백오프로 재시도하고 상한 초과 시 폐기한다(무한 적재 없음). 폐기 시에는
+  관측용 셀프 경보 `alert_webhook_dropped`가 열린다(이 경보 자체는 웹훅으로 내보내지 않아
+  재귀하지 않는다). 시크릿은 서명 계산에만 쓰이고 로그에 남지 않는다.
+- 드레인은 오프라인 탐지 루프와 **분리된 전용 태스크**로 돌아 불량 수신자가 다른 배경
+  작업을 지연시키지 않는다. 선택 변수: `AMX_ALERT_WEBHOOK_DRAIN_SECONDS`(기본 30, 최소 5),
+  `AMX_ALERT_WEBHOOK_TIMEOUT_SECONDS`(발송 POST 타임아웃, 기본 5).
 - **Langfuse 임계값 경보 3종**은 §9-2의 Langfuse 집계가 켜져 있을 때만 동작하며(활성
   게이트·폴 주기 공유), 임계값은 아래 변수로 조정한다(전부 선택, 기본값 존재). 이 경보들도
   위 웹훅으로 함께 나간다.
