@@ -149,6 +149,22 @@ message QuotaWindow {
   double pct = 2;                              // 0.0 – 100.0
   google.protobuf.Timestamp resets_at = 3;
   int32 window_minutes = 4;                    // window span in minutes
+  // Model identity for a per-model scoped weekly window (carried in
+  // AccountUsage.scoped_windows). Empty for the positional windows[] entries,
+  // which are not model-scoped. tsamx emits it as the scoped item's `name`.
+  string model = 5;
+}
+
+// Pay-as-you-go spend against a monthly cap (tsamx `spend`). Distinct from the
+// quota windows: it tracks credits/currency, not a rate-limit percentage, and is
+// never consulted by the switch driver. Present only for accounts with extra
+// usage enabled and all three numbers returned.
+message Spend {
+  double used = 1;                             // amount consumed this cycle
+  double limit = 2;                            // monthly cap
+  double pct = 3;                              // 0.0 – 100.0
+  string currency = 4;                         // ISO currency, e.g. "USD"
+  google.protobuf.Timestamp resets_at = 5;     // cycle reset (optional)
 }
 
 message AccountUsage {
@@ -164,6 +180,15 @@ message AccountUsage {
   // Generalized window list. For claude this carries the same data as
   // five_hour/seven_day (dual-recorded), ordered by window_minutes ascending.
   repeated QuotaWindow windows = 7;
+  // Pay-as-you-go spend (tsamx `spend`). Additive, informational: it never
+  // feeds the switch decision or PoolSummary. Absent when the account has no
+  // extra-usage spend to report.
+  Spend spend = 8;
+  // Per-model scoped weekly windows (tsamx `scoped`). Kept SEPARATE from
+  // windows[] on purpose: windows[] drives the reporter's max-utilization and
+  // eligible/all_exhausted switch decision, and a per-model weekly limit must
+  // never move that. Each entry carries its model in QuotaWindow.model.
+  repeated QuotaWindow scoped_windows = 9;
 }
 
 // Aggregate pool health (§6.5 poolSummary).
