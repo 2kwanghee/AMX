@@ -111,8 +111,11 @@ do_install() {
   elif [ -d "$HOME/.claude" ] \
      && { [ -e "$HOME/.claude/CLAUDE.md" ] || [ -d "$HOME/.claude/skills" ] || [ -d "$HOME/.claude/projects" ]; }; then
     echo "   겸용 PC 프로필 부트스트랩 (개인 프로필 감지)…"
-    if sh "$ROOT/deploy/bootstrap-profile.sh" --personal-dir "$HOME/.claude" --config-dir "$config_dir"; then
-      ok "프로필 부트스트랩 완료 (개인→러너 자산 링크)"
+    # 무인 호스트 자동 경로는 개인 메모리 링크를 기본 제외한다(--no-memory) —
+    # 러너 자동화의 개인 메모리 write 오염 표면 제거(BACKLOG G40).
+    if sh "$ROOT/deploy/bootstrap-profile.sh" --no-memory --personal-dir "$HOME/.claude" --config-dir "$config_dir"; then
+      ok "프로필 부트스트랩 완료 (개인→러너 자산 링크, 메모리 제외)"
+      echo "   겸용 PC에서 개인 메모리까지 공유하려면 수동 실행: sh $ROOT/deploy/bootstrap-profile.sh (옵션 없이)"
     else
       warn "프로필 부트스트랩 실패 — 자산 공유 없이 계속합니다. 나중에 deploy/bootstrap-profile.sh로 재시도하세요."
     fi
