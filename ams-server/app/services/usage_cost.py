@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -322,6 +322,90 @@ def sweep_usage_rollup(db: Session) -> int:
     )
     db.commit()
     return upserted
+
+
+# -- snapshot retention purge -------------------------------------------------
+# The retention sweep's own advisory-lock key (…05), distinct from the offline
+# (…01), sent-ack (…02), billing (…03) and rollup (…04) sweeps so one instance
+# owning the purge for a tick never blocks the others.
+_RETENTION_SWEEP_LOCK_KEY = 0x414D580F05
+# billing.sweep_billing's cursor kind. Referenced by value, not imported, to keep
+# usage_cost free of a billing-module dependency. Both sweeps read the raw
+# usage_snapshots, so a snapshot is only safe to purge once BOTH have sealed its
+# day — kept in sync with billing.KIND.
+_BILLING_CURSOR_KIND = "usage_daily"
+# Rows deleted per statement. The purge loops fixed-size batches (never one bulk
+# DELETE) so a first run over a large backlog holds only a bounded row-lock set
+# per transaction and commits incrementally.
+_RETENTION_BATCH = 5000
+
+
+def _settlement_boundary(db: Session) -> datetime | None:
+    """Instant strictly-before which every snapshot is fully settled, or None.
+
+    Both the rollup sweep (``ROLLUP_KIND``) and the billing sweep
+    (``_BILLING_CURSOR_KIND``) integrate the raw ``usage_snapshots``; a snapshot
+    is only past settlement once BOTH watermarks have advanced beyond it, so the
+    boundary is the MIN of the two. A missing cursor means that sweep has sealed
+    nothing yet — no snapshot is settled — so return None (purge nothing).
+    """
+    marks = {
+        kind: watermark
+        for kind, watermark in db.execute(
+            select(BillingCursor.kind, BillingCursor.watermark).where(
+                BillingCursor.kind.in_([ROLLUP_KIND, _BILLING_CURSOR_KIND])
+            )
+        ).all()
+    }
+    rollup = marks.get(ROLLUP_KIND)
+    billing = marks.get(_BILLING_CURSOR_KIND)
+    if rollup is None or billing is None:
+        return None
+    return min(rollup.astimezone(UTC), billing.astimezone(UTC))
+
+
+def sweep_snapshot_retention(db: Session) -> int:
+    """Purge usage_snapshots older than the retention window AND already settled.
+
+    Deletes every snapshot — ``usage`` and ``switch_event`` alike, since neither
+    the settlement sweeps (both filter ``report_type == "usage"``) nor the alert
+    engine reads a snapshot back once its day is sealed — whose ``reported_at`` is
+    before both ``now - retention`` and the settlement boundary. The settlement
+    guard is absolute: an unsettled snapshot is never deleted no matter how old,
+    so the rollup/billing integrals can never lose an input.
+    ``usage_snapshot_retention_days`` <= 0 disables the purge. Returns rows deleted.
+    """
+    days = get_settings().usage_snapshot_retention_days
+    if days <= 0:
+        return 0
+    if not _try_advisory_xact_lock(db, _RETENTION_SWEEP_LOCK_KEY):
+        return 0
+    boundary = _settlement_boundary(db)
+    if boundary is None:
+        return 0
+    delete_before = min(_now() - timedelta(days=days), boundary)
+
+    total = 0
+    while True:
+        ids = db.execute(
+            select(UsageSnapshot.id)
+            .where(UsageSnapshot.reported_at < delete_before)
+            .limit(_RETENTION_BATCH)
+        ).scalars().all()
+        if not ids:
+            break
+        db.execute(delete(UsageSnapshot).where(UsageSnapshot.id.in_(ids)))
+        db.commit()
+        total += len(ids)
+        if len(ids) < _RETENTION_BATCH:
+            break
+    if total:
+        _logger.info(
+            "snapshot retention purged %d expired snapshot(s) before %s",
+            total,
+            delete_before.isoformat(),
+        )
+    return total
 
 
 # -- month cost (PR3 consumes this) -------------------------------------------
