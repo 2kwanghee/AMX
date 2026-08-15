@@ -3,8 +3,8 @@
 The P2 completion criterion (design note §9) is a claim about three independent
 hosts: assign ten accounts 3/5/2 across servers A, B and C, deliver them through
 the channel, and each host's tsamx pool should end up holding exactly its share.
-Recall two of them and the assignments detach at AMS while the local records
-survive, disabled (the O2 decision).
+Recall two of them and the assignments detach at AMS while the local copies are
+fully removed (the O2 decision: recall = full detach).
 
 Nothing short of three real agent processes can settle that, so this suite runs
 the whole control plane as separate processes.
@@ -76,9 +76,10 @@ the locally derived AAD, staging the credential into the Claude config home, and
 2. Each host's `tsamx list --json` holds exactly its own three / five / two
    accounts — a set comparison, so a leak across hosts fails it too — and each
    host's `manifest.enc` agrees.
-3. After `:recall`, those assignments are `detached` at AMS while the local
-   tsamx record is still present and merely `disabled`, and the manifest record
-   is retained with `allocationStatus` INACTIVE and its ciphertext intact (O2).
+3. After `:recall`, those assignments are `detached` at AMS and the local copy
+   is fully removed — the account is gone from the host's `tsamx list` pool and
+   its `manifest.enc` record is deleted (O2, 2026-08-14: recall = full detach,
+   with history living only in the AMS-side detached row).
 4. Untouched assignments on the same host stay `active`.
 5. No delivered refresh token, and no `refreshToken` key at all, appears in any
    agent log or in the manifest's plaintext metadata (§7).
