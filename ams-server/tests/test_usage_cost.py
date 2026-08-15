@@ -12,8 +12,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from app.db import get_sessionmaker
-from app.models import Account, Server, UsageSnapshot
+from app.models import Account, Alert, BillingCursor, Server, UsageSnapshot
 from app.services import inventory, usage_cost
 from app.services.usage_cost import (
     account_utilization,
@@ -445,3 +447,56 @@ def test_sealed_plus_live_tail(app_env):
     # The month total reflects both the sealed day and the live tail (held > the
     # sealed day alone would contribute if the live tick were dropped).
     assert ac.total_held_util_seconds > Decimal("0")
+
+
+# -- G27 watermark-future alert ----------------------------------------------
+def _set_rollup_watermark(dt):
+    with _sm() as db:
+        cur = db.get(BillingCursor, usage_cost.ROLLUP_KIND)
+        if cur is None:
+            db.add(BillingCursor(kind=usage_cost.ROLLUP_KIND, watermark=dt))
+        else:
+            cur.watermark = dt
+        db.commit()
+
+
+def _watermark_alerts(tenant_id, status):
+    with _sm() as db:
+        return db.scalars(
+            select(Alert).where(
+                Alert.tenant_id == tenant_id,
+                Alert.kind == "billing_watermark_future",
+                Alert.status == status,
+            )
+        ).all()
+
+
+def test_watermark_future_alert_opens_and_resolves(app_env):
+    tenant_id, _account_id, _server_id = _seed_tenant_account_server("uc-wm@ex.com")
+    now = datetime.now(UTC)
+    # A forward clock step parks the watermark well past now (beyond skew).
+    _set_rollup_watermark(now + timedelta(hours=6))
+    with _sm() as db:
+        assert usage_cost.sweep_watermark_future(db) is True
+    opened = _watermark_alerts(tenant_id, "open")
+    assert len(opened) == 1
+    assert opened[0].severity == "warning"
+    assert opened[0].server_id is None  # system-scoped, not a per-server condition
+    assert opened[0].dedupe_key == f"{tenant_id}:billing_watermark_future"
+
+    # Watermark back at/below now -> auto-resolve, no lingering open alert.
+    _set_rollup_watermark(now - timedelta(days=1))
+    with _sm() as db:
+        assert usage_cost.sweep_watermark_future(db) is False
+    assert _watermark_alerts(tenant_id, "open") == []
+    assert len(_watermark_alerts(tenant_id, "resolved")) == 1
+
+
+def test_watermark_within_skew_no_alert(app_env):
+    tenant_id, _account_id, _server_id = _seed_tenant_account_server("uc-wm2@ex.com")
+    now = datetime.now(UTC)
+    # A tiny future offset inside the default 300s skew tolerance must not alert.
+    _set_rollup_watermark(now + timedelta(seconds=30))
+    with _sm() as db:
+        assert usage_cost.sweep_watermark_future(db) is False
+    assert _watermark_alerts(tenant_id, "open") == []

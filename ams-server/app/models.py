@@ -69,6 +69,7 @@ ALERT_KINDS = (
     "recall_failed",
     "command_send_failed",
     "self_update_failed",
+    "billing_watermark_future",
 )
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")

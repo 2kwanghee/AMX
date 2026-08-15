@@ -41,6 +41,11 @@ class Settings:
     # real gap (agent offline / report loss) is clamped to this ceiling so a stale
     # observation cannot dominate the time-weighted utilization integral.
     usage_max_gap_seconds: int = 600
+    # G27 watermark-future guard: the usage-rollup watermark is only flagged as
+    # parked in the future once it sits more than this many seconds ahead of the
+    # wall clock. The tolerance absorbs benign clock skew/jitter between the DB
+    # and the AMS host so a few seconds of drift never raises a spurious alert.
+    billing_watermark_skew_seconds: int = 300
     # Console install-command support. `advertise_host` is the host (or IP) the
     # agent should dial; combined with `grpc_port` it forms the endpoint shown in
     # the enroll-token modal. Absent host → no endpoint (the console renders a
@@ -167,6 +172,9 @@ def load_settings() -> Settings:
         ),
         usage_max_gap_seconds=int(
             os.environ.get("AMX_USAGE_MAX_GAP_SECONDS", "600")
+        ),
+        billing_watermark_skew_seconds=int(
+            os.environ.get("AMX_BILLING_WATERMARK_SKEW_SECONDS", "300")
         ),
         advertise_host=os.environ.get("AMX_ADVERTISE_HOST", "").strip() or None,
         grpc_port=int(os.environ.get("AMX_GRPC_PORT", "50051")),
