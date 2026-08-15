@@ -36,7 +36,16 @@ from app.db import get_sessionmaker, try_advisory_xact_lock as _try_advisory_xac
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
 from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
-from app.services import alerts, billing, commands, langfuse_metrics, reconcile, usage_cost
+from app.services import (
+    alert_webhook,
+    alerts,
+    billing,
+    commands,
+    langfuse_alerts,
+    langfuse_metrics,
+    reconcile,
+    usage_cost,
+)
 
 _logger = logging.getLogger("ams.grpc")
 
@@ -1205,6 +1214,34 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("langfuse metrics sweep iteration failed", exc_info=False)
+        # P5 Langfuse 임계값 경보(BACKLOG G41): 여덟 번째 형제 스윕이 usage_spike/stale/
+        # latency 3종을 실측 평가해 open/resolve 한다. langfuse 활성 게이트/폴 주기를
+        # 공유하고 자체 락(…09)·격리 try/except로 독립적이다(무설정 시 no-op).
+        try:
+            langfuse_alerted = await asyncio.to_thread(
+                _sweep_langfuse_alerts_once, session_factory
+            )
+            if langfuse_alerted:
+                _logger.info(
+                    "langfuse alert sweeper opened %d threshold alert(s)", langfuse_alerted
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("langfuse alert sweep iteration failed", exc_info=False)
+        # P5 경보 웹훅(BACKLOG G41): 아홉 번째 형제 스윕이 alert_webhook_outbox를 HTTP
+        # POST로 드레인한다. HTTP는 자체 락(…08) 밖에서 하고, 격리 try/except로
+        # 독립적이다(URL/시크릿 미설정 시 no-op).
+        try:
+            webhooks_sent = await asyncio.to_thread(
+                _sweep_alert_webhook_once, session_factory
+            )
+            if webhooks_sent:
+                _logger.info("alert webhook sweeper delivered %d event(s)", webhooks_sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("alert webhook sweep iteration failed", exc_info=False)
 
 
 # F3 multi-instance: the sweeps below are idempotent, but running them from every
@@ -1218,8 +1255,8 @@ async def _offline_sweeper(
 # error handling in the sweeper loop.
 _OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
 _SENT_SWEEP_LOCK_KEY = 0x414D580F02
-# …03 billing, …04 rollup, …05 snapshot-retention, …07 langfuse-metrics (in their
-# own modules).
+# …03 billing, …04 rollup, …05 snapshot-retention, …07 langfuse-metrics,
+# …08 alert-webhook, …09 langfuse-alerts (in their own modules).
 _WATERMARK_SWEEP_LOCK_KEY = 0x414D580F06
 
 
@@ -1266,6 +1303,22 @@ def _sweep_langfuse_metrics_once(session_factory: sessionmaker[Session]) -> int:
     # polls the external Metrics API and commits — a no-op when unconfigured.
     with session_factory() as db:
         return langfuse_metrics.sweep_langfuse_metrics(db)
+
+
+def _sweep_alert_webhook_once(session_factory: sessionmaker[Session]) -> int:
+    # alert_webhook.sweep_alert_webhook takes its own advisory lock (…08), drains
+    # the outbox with HTTP POSTs outside the lock, and commits — a no-op when the
+    # webhook is unconfigured.
+    with session_factory() as db:
+        return alert_webhook.sweep_alert_webhook(db)
+
+
+def _sweep_langfuse_alerts_once(session_factory: sessionmaker[Session]) -> int:
+    # langfuse_alerts.sweep_langfuse_alerts takes its own advisory lock (…09),
+    # shares the langfuse enable-gate/poll cadence, and commits — a no-op when
+    # langfuse is unconfigured.
+    with session_factory() as db:
+        return langfuse_alerts.sweep_langfuse_alerts(db)
 
 
 def _sweep_watermark_future_once(session_factory: sessionmaker[Session]) -> bool:
