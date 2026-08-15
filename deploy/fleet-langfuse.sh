@@ -48,9 +48,9 @@ info() { echo "fleet-langfuse: $*"; }
 while [ $# -gt 0 ]; do
 	case "$1" in
 		on|off|status) SUBCMD="$1" ;;
-		--hosts)       shift; HOSTS_FILE="${1:-}" ;;
-		--remote-repo) shift; REMOTE_REPO="${1:-}" ;;
-		--config-dir)  shift; CONFIG_DIR="${1:-}" ;;
+		--hosts)       [ $# -ge 2 ] || die "--hosts needs a value"; shift; HOSTS_FILE="$1" ;;
+		--remote-repo) [ $# -ge 2 ] || die "--remote-repo needs a value"; shift; REMOTE_REPO="$1" ;;
+		--config-dir)  [ $# -ge 2 ] || die "--config-dir needs a value"; shift; CONFIG_DIR="$1" ;;
 		-h|--help)     sed -n '2,40p' "$0"; exit 0 ;;
 		*) die "unknown argument: $1 (see --help)" ;;
 	esac

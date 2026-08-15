@@ -307,25 +307,36 @@ AMX_LANGFUSE_SECRET_KEY=sk-... \
 `--hosts`로 바꿀 수 있다. 실호스트가 든 파일은 커밋하지 말고, `deploy/fleet-hosts.txt.example`을
 복사해 채운다.
 
+시크릿은 명령줄에 직접 타이핑하지 말고 0600 env 파일에 담아 소싱한다. `on`은 값을
+원격 명령의 stdin으로만 흘려 로컬·원격 어느 쪽 `ps`(argv)에도 시크릿을 남기지 않지만,
+그건 어디까지나 프로세스 인자 이야기다. `LANGFUSE_SECRET_KEY=sk-... sh fleet-langfuse.sh on`
+처럼 셸에 직접 치면 그 한 줄이 통째로 `~/.bash_history`에 남는다. env 파일로 우회하면
+그 누출 경로가 사라진다.
+
 ```sh
-# 켜기 — 세 자격증명을 환경에 넣어 실행(argv·로그에 시크릿이 남지 않는다)
-LANGFUSE_BASE_URL=http://<langfuse-host>:3100 \
-LANGFUSE_PUBLIC_KEY=pk-... \
-LANGFUSE_SECRET_KEY=sk-... \
-  sh deploy/fleet-langfuse.sh on
+# secrets.env (chmod 600) — 커밋 금지
+cat > secrets.env <<'ENV'
+export LANGFUSE_BASE_URL=http://<langfuse-host>:3100
+export LANGFUSE_PUBLIC_KEY=pk-...
+export LANGFUSE_SECRET_KEY=sk-...
+ENV
+chmod 600 secrets.env
+
+. ./secrets.env && sh deploy/fleet-langfuse.sh on   # 히스토리에 키가 남지 않음
 
 sh deploy/fleet-langfuse.sh off       # 전 호스트에서 추적 회수
 sh deploy/fleet-langfuse.sh status    # 호스트별 amx-langfuse.env 존재 여부
 ```
 
-`on`은 세 자격증명을 원격 명령의 stdin으로 흘려 원격 env에만 채운다. 로컬이든 원격이든
-`ps`에 시크릿이 뜨지 않고, 스크립트도 이를 화면에 찍지 않는다. `off`는 각 호스트에서
-`install-langfuse-hook.sh --uninstall`을 돌려 env 파일과 Stop 훅 항목만 걷어낸다.
-`status`는 자격증명이 필요 없고, `--config-dir`을 주지 않으면 `~/.claude-amx` → `~/.claude`
-순으로 첫 env 파일을 찾아 보고한다.
+`off`는 각 호스트에서 `install-langfuse-hook.sh --uninstall`을 돌려 env 파일과 Stop 훅
+항목만 걷어낸다. `status`는 자격증명이 필요 없고, `--config-dir`을 주지 않으면
+`~/.claude-amx` → `~/.claude` 순으로 첫 env 파일을 찾아 보고한다. 다만 `status`는
+**`amx-langfuse.env` 파일이 있는지만** 본다 — `settings.json`의 Stop 훅 등록 여부나 키가
+실제로 유효한지는 확인하지 않으므로, 켜짐 표시가 곧 추적이 도는 증거는 아니다.
 
 원격 호스트의 AMX 체크아웃 경로는 기본 `$HOME/AMX`로 잡고, 다르면 `--remote-repo`로
-지정한다(`on`·`off`에만 쓰인다. `status`는 원격 저장소 없이도 돈다). ssh는
+지정한다(`on`·`off`에만 쓰인다. `status`는 원격 저장소 없이도 돈다). 개발용으로
+`~/AMX-agent`에 따로 체크아웃한 dev 호스트는 `--remote-repo ~/AMX-agent`를 붙여야 한다. ssh는
 `BatchMode=yes ConnectTimeout=5`로 붙어 암호 프롬프트에 걸려 멈추지 않는다. 한 호스트가
 실패해도 나머지는 계속 돌고, 마지막에 성공·실패 수와 실패 호스트를 집계한 뒤 실패가 하나라도
 있으면 종료코드 1로 끝난다.
