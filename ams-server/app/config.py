@@ -121,6 +121,12 @@ class Settings:
     alert_stale_minutes: int = 60
     # latency: Metrics API latency p95(최근 1시간)가 이 밀리초를 초과하면 open.
     alert_latency_p95_ms: float = 60_000.0
+    # P5 위험명령 통보 수신(danger_hook.py → POST /api/v1/ingest/danger-command).
+    # 정적 토큰만으로 인증하는 무인 에이전트 발 호출이다(TenantScope 아님). 토큰이
+    # **미설정이면 엔드포인트 자체가 비활성**(404)이라, 설정하지 않은 AMS는 이 경로가
+    # 없는 것처럼 행동한다. 레이트 제한은 테넌트가 아닌 전역 고정창(분당 상한).
+    danger_ingest_token: str | None = None
+    danger_rate_limit_per_min: int = 120
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -140,6 +146,10 @@ class Settings:
     @property
     def alert_webhook_enabled(self) -> bool:
         return bool(self.alert_webhook_url and self.alert_webhook_secret)
+
+    @property
+    def danger_ingest_enabled(self) -> bool:
+        return bool(self.danger_ingest_token)
 
 
 def _pubkey_from_seed(seed_b64: str) -> str:
@@ -282,6 +292,10 @@ def load_settings() -> Settings:
         ),
         alert_stale_minutes=int(os.environ.get("AMX_ALERT_STALE_MINUTES", "60")),
         alert_latency_p95_ms=float(os.environ.get("AMX_ALERT_LATENCY_P95_MS", "60000")),
+        danger_ingest_token=os.environ.get("AMX_DANGER_INGEST_TOKEN", "").strip() or None,
+        danger_rate_limit_per_min=int(
+            os.environ.get("AMX_DANGER_RATE_LIMIT_PER_MIN", "120")
+        ),
     )
 
 

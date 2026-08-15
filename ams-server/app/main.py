@@ -18,6 +18,7 @@ from app.api.v1 import (
     assignments,
     auth,
     billing,
+    ingest,
     langfuse,
     servers,
     tenants,
@@ -51,6 +52,9 @@ def create_app() -> FastAPI:
     app.include_router(billing.router, prefix=API_PREFIX)
     app.include_router(usage.router, prefix=API_PREFIX)
     app.include_router(langfuse.router, prefix=API_PREFIX)
+    # Token-gated, no admin bearer and no TenantScope: an unattended agent hook
+    # posts here (app/api/v1/ingest.py). Disabled (404) unless a token is set.
+    app.include_router(ingest.router, prefix=API_PREFIX)
     # Root paths, no prefix and no auth: the install one-liner runs before the
     # machine has any credential (app/api/download.py).
     app.include_router(download.router)

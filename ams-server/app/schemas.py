@@ -306,6 +306,7 @@ AlertKind = Literal[
     "langfuse_stale",
     "langfuse_latency",
     "alert_webhook_dropped",
+    "dangerous_command",
 ]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]
@@ -335,6 +336,25 @@ class AlertPage(Wire):
 
 class AlertAckRequest(Wire):
     acked_by: str | None = Field(default=None, max_length=200)
+
+
+# -- Danger-command ingest (P5, danger_hook.py 발) ----------------------------
+# 훅이 보내는 통보 본문. 원문 명령은 절대 담기지 않는다 — sha256 다이제스트와
+# 패턴에 매치된 부분만 남긴 마스킹본(최대 200자)만 온다. 무인 에이전트 발이라
+# TenantScope가 아니라 정적 토큰(X-AMX-Ingest-Token)으로만 인증한다.
+class DangerCommandIngest(Wire):
+    pattern_name: str = Field(min_length=1, max_length=64)
+    command_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    command_masked: str = Field(min_length=1, max_length=200)
+    session_id: str | None = Field(default=None, max_length=200)
+    cwd: str | None = Field(default=None, max_length=1024)
+    hostname: str = Field(min_length=1, max_length=253)
+    user_id: str | None = Field(default=None, max_length=320)
+    ts: str | None = Field(default=None, max_length=64)
+
+
+class DangerCommandIngestAck(Wire):
+    accepted: bool = True
 
 
 class EventPage(Wire):
