@@ -208,6 +208,16 @@ install_amx_cmd() {
 	sed "s|^AMX_DEFAULT_CONFIG_DIR=.*|AMX_DEFAULT_CONFIG_DIR=\"$_esc\"|" "$_src" > "$_bin/amx"
 	chmod +x "$_bin/amx"
 	info "copied amx ($_bin/amx, config dir=$CONFIG_DIR)"
+	# amx는 같은 디렉터리(우선) 또는 PATH에서 amx-claude 래퍼를 찾는다. 사본만
+	# 설치하면 래퍼를 못 찾아 즉시 실패하므로 래퍼도 나란히 설치한다(라이브
+	# 테스트에서 실측된 결함). 저장소 원본이 없으면 경고만.
+	if [ -f "$SCRIPT_DIR/amx-claude" ]; then
+		cp "$SCRIPT_DIR/amx-claude" "$_bin/amx-claude"
+		chmod +x "$_bin/amx-claude"
+		info "copied amx-claude ($_bin/amx-claude)"
+	else
+		warn "amx-claude 원본을 찾지 못함 ($SCRIPT_DIR/amx-claude) — amx가 PATH의 amx-claude에 의존합니다"
+	fi
 	case ":$PATH:" in
 		*":$_bin:"*) ;;
 		*) info "안내: $_bin 이 PATH에 없습니다 — 추가하면 어디서든 'amx'로 실행됩니다." ;;
