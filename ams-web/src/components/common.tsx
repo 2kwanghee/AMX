@@ -12,6 +12,7 @@ const KR_LABEL: Record<string, string> = {
   degraded: '성능 저하',
   quarantined: '격리됨',
   active: '활성',
+  assigned: '연결됨',
   available: '사용 가능',
   pending: '대기',
   delivering: '전달 중',
@@ -305,6 +306,57 @@ export function ProviderTag({ value }: { value: string }) {
       <Icon name={providerIcon(value)} size={13} />
       {krLabel(value)}
     </span>
+  );
+}
+
+// 랙 유닛 실루엣 — NMS 장비 은유. 케이스 + 가로 슬랫 3개 + 우측 상태 LED 3개.
+// currentColor stroke를 따르며 노드 헤드에서 서버 아이콘으로 쓴다.
+export function RackGlyph({ size = 26 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="4" y="3.5" width="16" height="17" rx="2.2" />
+      <line x1="7.2" y1="7.5" x2="14" y2="7.5" />
+      <line x1="7.2" y1="12" x2="14" y2="12" />
+      <line x1="7.2" y1="16.5" x2="14" y2="16.5" />
+      <circle cx="16.8" cy="7.5" r="0.95" fill="currentColor" stroke="none" />
+      <circle cx="16.8" cy="12" r="0.95" fill="currentColor" stroke="none" />
+      <circle cx="16.8" cy="16.5" r="0.95" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+// 에이전트 로봇 헤드 아바타 — 안테나 + 눈 2개 + 스마일 아크. 계정 노드의 캡슐
+// 아바타로 쓰며 프로바이더 색(claude=틸, codex=인디고)을 currentColor로 상속한다.
+export function RobotAvatar({ size = 24 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <line x1="12" y1="2.6" x2="12" y2="5" />
+      <circle cx="12" cy="2" r="1.1" fill="currentColor" stroke="none" />
+      <rect x="4.5" y="5" width="15" height="12" rx="3.2" />
+      <circle cx="9" cy="10.2" r="1.25" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="10.2" r="1.25" fill="currentColor" stroke="none" />
+      <path d="M8.8 13.2a3.4 3.4 0 0 0 6.4 0" />
+    </svg>
   );
 }
 
