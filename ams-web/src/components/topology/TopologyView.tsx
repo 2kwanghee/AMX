@@ -135,6 +135,24 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const providerOf = new Map(accounts.map((a) => [a.id, a.provider]));
   const activeByServer = currentActiveByServer(assignments, accounts);
 
+  // 계정 5h 소진율 배선 — 각 온라인 서버의 usage payload(accounts[].usage.fiveHour,
+  // 없으면 windowMinutes=300 창)를 계정 이메일로 모아 계정 노드 서브라인에 전달한다.
+  // 계정은 서버당 유일 할당이라 이메일→pct 는 충돌 없이 결정된다. 값이 없으면
+  // undefined 그대로 두어 서브라인은 프로바이더·상태만 표시(기존 degrade 유지).
+  const onlineIds = orderedServers.filter((s) => s.status === 'online').map((s) => s.id);
+  const { data: usageSnaps } = useSWR(
+    onlineIds.length ? ['topo-usage', tenantId, onlineIds.join(',')] : null,
+    () => Promise.all(onlineIds.map((id) => api.getUsage(tenantId, id).catch(() => null))),
+    { refreshInterval: 30000, shouldRetryOnError: false },
+  );
+  const usagePctByEmail = new Map<string, number>();
+  for (const snap of usageSnaps ?? []) {
+    for (const acc of snap?.payload?.accounts ?? []) {
+      const pct = acc.usage?.fiveHour?.pct ?? acc.usage?.windows?.find((w) => w.windowMinutes === 300)?.pct;
+      if (acc.email && pct != null) usagePctByEmail.set(acc.email, pct);
+    }
+  }
+
   const minServerIdx = new Map<string, number>();
   for (const a of assignments) {
     if (a.state === 'detached') continue; // 회수된 연결은 정렬 기준에서 제외
@@ -554,10 +572,13 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                 const key = `srv:${s.id}`;
                 const p = effectivePos(key);
                 const activeId = activeByServer.get(s.id);
+                // 호버 상세 카드가 캔버스 하단(overflow:hidden)에 잘리면 위로 뒤집는다.
+                const h = nodeSize.current.get(key)?.h ?? DEF_SIZE.srv.h;
+                const flip = canvasH > 0 && p.y + h + 168 > canvasH;
                 return (
                   <div
                     key={s.id}
-                    className={`topo-place srv ${dragging?.key === key ? 'dragging' : ''}`.trim()}
+                    className={`topo-place srv ${flip ? 'flip' : ''} ${dragging?.key === key ? 'dragging' : ''}`.trim().replace(/\s+/g, ' ')}
                     style={{ left: p.x, top: p.y, width: NODE_W }}
                     onPointerDown={startNodeDrag('srv', s.id)}
                   >
@@ -587,6 +608,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                       email={a.email}
                       status={a.status}
                       provider={a.provider}
+                      usagePct={usagePctByEmail.get(a.email)}
                       nodeRef={setNode(key)}
                       onClick={guardClick(() => onGo('accounts'))}
                       onPortDown={startDrag('account', a.id)}
@@ -628,6 +650,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                       email={a.email}
                       status={a.status}
                       provider={a.provider}
+                      usagePct={usagePctByEmail.get(a.email)}
                       nodeRef={setNode(`acc:${a.id}`)}
                       onClick={() => onGo('accounts')}
                       onPortDown={startDrag('account', a.id)}
