@@ -652,6 +652,69 @@ class ClaudeAccountSwitcher:
             config_file.unlink()
         self._delete_session_profile(account_num, email)
 
+    def _live_account_uuid(self) -> str:
+        """The live login's ``oauthAccount.accountUuid`` from ``.claude.json``.
+
+        Empty string when there is no live login or it carries no uuid. Read
+        from the same file :meth:`_get_current_account` uses.
+        """
+        config_path = self._get_claude_config_path()
+        if not config_path.exists():
+            return ""
+        data = self._read_json(config_path)
+        if not data:
+            return ""
+        return (data.get("oauthAccount", {}).get("accountUuid") or "").strip()
+
+    def _invalidate_live_credentials(self, account_num: str, email: str) -> None:
+        """Clear the live active login when it belongs to the removed slot.
+
+        Called ONLY on the AMS non-interactive recall path (``tsamx remove
+        --yes``, wired through ``remove_account(invalidate_live=True)``).
+        ``_delete_account_files`` drops only an account's *backups*; the live
+        login (``<config home>/.credentials.json`` + ``.claude.json``
+        ``oauthAccount``) belongs to whichever account is currently active and
+        survives a slot removal. When the removed slot is that live account, the
+        recalled account must not stay usable on the host — a later ``claude``
+        run would silently reuse it (G46). So we drop the live OAuth credential
+        and the stale ``oauthAccount`` identity.
+
+        Ownership is decided **uuid-first**, mirroring
+        ``_classify_outgoing_credential`` / ``_resolved_matches_slot_identity``:
+        the live ``oauthAccount.accountUuid`` must equal the removed slot's
+        stored uuid. uuids are stable where an email is recycled across sibling
+        accounts (same email, different org), so an email match would misfire —
+        removing slot-1 (khee/org-A) while slot-2 (khee/org-B) holds the live
+        login must NOT log slot-2 out. It also survives the (email, org uuid)
+        divergence that defeats the pool's active-account detection (AMS stages
+        with the uuid preserved but no org uuid), the original G46 scenario.
+
+        When the slot has no stored uuid we cannot prove ownership, so we skip
+        and warn: a surviving credential (recoverable by re-delivery) is safer
+        than deleting the wrong account's live login (fail-safe).
+        """
+        own_uuid = self.account_identity(account_num)["uuid"]
+        if not own_uuid:
+            self._logger.warning(
+                f"Account {account_num} ({email}): no stored uuid to confirm "
+                "live-login ownership; leaving the live credential in place"
+            )
+            return
+        if self._live_account_uuid() != own_uuid:
+            return  # a different (or no) account holds the live login
+        self._store._clear_oauth_credential()
+
+        def _drop_oauth(cfg: dict) -> None:
+            cfg.pop("oauthAccount", None)
+
+        try:
+            self._store._update_global_config(_drop_oauth)
+        except Exception as e:  # best-effort; credential file is already gone
+            self._logger.warning(
+                f"Failed to clear oauthAccount for {email}: {e}"
+            )
+        self._logger.info(f"Invalidated live login for recalled account {email}")
+
     def _prune_mappings(self, email: str, org_uuid: str) -> None:
         """Drop directory mappings for an identity that no longer has a slot.
 
@@ -2633,11 +2696,25 @@ class ClaudeAccountSwitcher:
             f"{muted('[personal]')} {muted(f'(from {source_label})')}"
         )
 
-    def remove_account(self, identifier: str, assume_yes: bool = False) -> None:
+    def remove_account(
+        self,
+        identifier: str,
+        assume_yes: bool = False,
+        invalidate_live: bool = False,
+    ) -> None:
         """Remove account from managed accounts.
 
-        When ``assume_yes`` is True the confirmation prompt is skipped (used by
-        the TUI, which collects confirmation before calling).
+        ``assume_yes`` skips the confirmation prompt (used by the TUI and
+        menubar, which collect confirmation before calling).
+
+        ``invalidate_live`` gates the G46 live-login invalidation and is the
+        axis that separates the AMS non-interactive recall path from every other
+        ``assume_yes`` caller: ONLY the CLI ``--yes`` path (the AMS agent) passes
+        True. When set and the removed slot holds the live login, the live
+        credential is invalidated so the recalled account can't be reused on the
+        host. TUI/menubar removals (``assume_yes=True`` but ``invalidate_live``
+        left False) keep their current behavior — backups only, live login
+        untouched — and so does the interactive CLI prompt.
         """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
@@ -2718,6 +2795,13 @@ class ClaudeAccountSwitcher:
 
         # Remove backup files
         self._delete_account_files(account_num, email)
+
+        # AMS non-interactive recall (CLI --yes): if the removed slot still holds
+        # the live login, invalidate it so the recalled account can't be reused
+        # on the host (G46). Gated on invalidate_live (not assume_yes) so TUI /
+        # menubar removals and the interactive prompt are unaffected.
+        if invalidate_live:
+            self._invalidate_live_credentials(account_num, email)
 
         # Update sequence.json
         del data["accounts"][account_num]
