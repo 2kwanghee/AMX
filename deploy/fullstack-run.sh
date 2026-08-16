@@ -152,10 +152,14 @@ db_up() {
   elif docker ps -a --format '{{.Names}}' | grep -qx "$DB_CONTAINER"; then
     docker start "$DB_CONTAINER" >/dev/null && ok "db 재시작 ($DB_CONTAINER)"
   else
+    # 데이터는 네임드 볼륨에 둔다 — 컨테이너가 삭제돼도(down/전소 사고) 데이터가 남고,
+    # 다음 up에서 그대로 재부착된다. 진짜 초기화가 필요하면 볼륨을 직접 지운다:
+    #   docker volume rm amx-dev-pgdata
     docker run -d --name "$DB_CONTAINER" \
       -e POSTGRES_USER="$DB_USER" -e POSTGRES_PASSWORD="$AMX_DB_PASSWORD" \
-      -e POSTGRES_DB="$DB_NAME" -p "$DB_PORT:5432" "$DB_IMAGE" >/dev/null \
-      && ok "db 컨테이너 생성 ($DB_CONTAINER, host:$DB_PORT)"
+      -e POSTGRES_DB="$DB_NAME" -p "$DB_PORT:5432" \
+      -v amx-dev-pgdata:/var/lib/postgresql/data "$DB_IMAGE" >/dev/null \
+      && ok "db 컨테이너 생성 ($DB_CONTAINER, host:$DB_PORT, 볼륨 amx-dev-pgdata)"
   fi
   info "${c_dim}db 준비 대기…${c_rst}"
   for _ in $(seq 1 30); do
