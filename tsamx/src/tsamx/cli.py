@@ -97,6 +97,32 @@ def _translate_subcommand(argv: list[str]) -> list[str]:
     return argv
 
 
+def _warn_if_langfuse_untracked() -> None:
+    """Warn (stderr) when a `tsamx run` session will escape Langfuse tracing.
+
+    Langfuse tracing (see docs/DEPLOYMENT-RUNNER.md §8) only attaches to
+    sessions launched through the `amx-claude` wrapper, which exports the keys
+    from ``<config home>/amx-langfuse.env`` into the session's environment. A
+    session started via ``tsamx run`` bypasses that wrapper, so even on a host
+    where tracing is configured the session is silently excluded. If the env
+    file is present we surface that gap with a one-line notice instead of
+    letting the session drop off the traces unannounced.
+
+    Fail-open: any error resolving the path is swallowed so the notice can
+    never block a launch.
+    """
+    try:
+        env_file = paths.get_claude_config_home() / "amx-langfuse.env"
+        if env_file.exists():
+            print(
+                "이 세션은 Langfuse 추적에서 제외됩니다 — "
+                "추적하려면 amx 명령을 사용하세요",
+                file=sys.stderr,
+            )
+    except OSError:
+        pass
+
+
 def _run_command(argv: list[str]) -> None:
     """Handle `tsamx run NUM|EMAIL [--no-share] [-- <claude args>]`.
 
@@ -172,6 +198,7 @@ Examples:
     try:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
         _guard_root(switcher)
+        _warn_if_langfuse_untracked()
 
         from tsamx.session import SessionManager
 
