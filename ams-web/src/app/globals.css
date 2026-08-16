@@ -674,6 +674,11 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 }
 @keyframes topo-flow { to { stroke-dashoffset: -24; } }
 @keyframes topo-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+/* 상태 LED·활성 점 맥동 — 링 확산. reduced-motion 시 정지. */
+@keyframes topo-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 0%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 24%, transparent); }
+}
 
 .topo-accounts, .topo-servers { position: relative; z-index: 1; min-width: 0; }
 .topo-col-head {
@@ -703,34 +708,83 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-node .email-text { color: var(--canvas-ink); }
 .topo-node .email-sub { color: var(--canvas-muted); }
 
-/* 계정 노드 — 이메일 칩(가변) + 프로바이더 태그(고정). 서버당 Codex 1계정
-   규칙이 있어 연결을 끌기 전에 어느 쪽 계정인지 보여야 한다. */
-.topo-acc { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.topo-acc .email-cell { min-width: 0; }
-.topo-prov {
-  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
-  font-size: 10px; line-height: 1.7; letter-spacing: .02em; padding: 0 6px;
-  border-radius: 5px; border: 1px solid var(--canvas-border);
-  background: var(--canvas-bg-3); color: var(--canvas-muted);
+/* 계정 노드 — 에이전트 캡슐(pill). 로봇 헤드 아바타 + 이메일 + "프로바이더 ·
+   상태 · 5h n%" 서브라인. 프로바이더 색으로 아바타·테두리 톤을 구분한다. */
+.topo-acc {
+  display: flex; align-items: center; gap: 10px;
+  border-radius: 999px; padding: 8px 14px 8px 10px;
 }
-.topo-prov svg { flex: 0 0 auto; }
-/* 아이콘 색만 프로바이더별로 구분 — 다크 캔버스 가독성 유지 */
-.topo-prov.claude svg { color: var(--canvas-accent); }
-.topo-prov.codex { border-color: var(--canvas-accent); color: var(--canvas-accent); background: var(--canvas-accent-soft); }
-.topo-prov.codex svg { color: var(--canvas-indigo); }
+.topo-acc-avatar {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 999px;
+  background: var(--canvas-bg-3); box-shadow: inset 0 0 0 1px var(--canvas-border);
+  color: var(--canvas-muted);
+}
+.topo-acc-body { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.topo-acc-email {
+  font-size: 13px; font-weight: 600; color: var(--canvas-ink-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topo-acc-sub {
+  font-size: 10.5px; letter-spacing: .02em; color: var(--canvas-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 우상단 맥동 점 — 활성(assigned)만. reduced-motion 시 정지(아래 블록). */
+.topo-acc-live {
+  position: absolute; top: -3px; right: -3px; width: 10px; height: 10px;
+  border-radius: 999px; background: var(--canvas-ok); color: var(--canvas-ok);
+  animation: topo-pulse 1.8s ease-in-out infinite;
+}
+/* 프로바이더 색 — claude=틸, codex=인디고. 아바타 색 + 좌측 강조 테두리. */
+.topo-acc.claude .topo-acc-avatar { color: var(--canvas-accent); }
+.topo-acc.codex .topo-acc-avatar { color: var(--canvas-indigo); }
+/* 상태 스타일 — 활성=실선(기본), 대기=점선, 격리·비활성=붉은 테두리+회색조. */
+.topo-acc.status-available { border-style: dashed; }
+.topo-acc.status-quarantined, .topo-acc.status-disabled {
+  border-color: color-mix(in srgb, var(--canvas-crit) 55%, var(--canvas-border));
+  filter: saturate(.45); opacity: .82;
+}
+.topo-acc.status-quarantined .topo-acc-avatar,
+.topo-acc.status-disabled .topo-acc-avatar { color: var(--canvas-crit); }
 
-/* 서버 노드 */
-.topo-srv { display: flex; flex-direction: column; gap: 10px; }
+/* 서버 노드 — NMS 장비 카드. 랙 아이콘 + 이름 / 상태·전환모드 / 미니 게이지 2줄
+   / 활성 계정. 현행보다 작고 밀도 높게(자유 배치에서 작은 노드가 유리). */
+.topo-srv { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; }
 .topo-srv.offline { border-color: color-mix(in srgb, var(--canvas-crit) 40%, var(--canvas-border)); }
-.topo-srv-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.topo-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--canvas-muted); flex: 0 0 auto; }
-.topo-dot.online { background: var(--canvas-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-ok) 22%, transparent); }
-.topo-dot.degraded { background: var(--canvas-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-warn) 22%, transparent); }
-.topo-dot.offline { background: var(--canvas-crit); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-crit) 22%, transparent); }
-.topo-srv-name { font-weight: 700; font-size: 14px; color: var(--canvas-ink-strong); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.topo-srv-head .mode-pill { flex: 0 0 auto; }
+.topo-srv.offline .topo-srv-glyph { color: var(--canvas-muted); }
+.topo-srv-head { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.topo-srv-glyph { flex: 0 0 auto; display: inline-flex; color: var(--canvas-accent); }
+/* 우상단 상태 LED — online 초록(맥동)·offline 붉은·degraded 호박. */
+.topo-srv-led {
+  position: absolute; top: 10px; right: 12px;
+  width: 9px; height: 9px; border-radius: 999px; background: var(--canvas-muted); flex: 0 0 auto;
+}
+.topo-srv-led.online { background: var(--canvas-ok); color: var(--canvas-ok); animation: topo-pulse 1.8s ease-in-out infinite; }
+.topo-srv-led.degraded { background: var(--canvas-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-warn) 22%, transparent); }
+.topo-srv-led.offline { background: var(--canvas-crit); box-shadow: 0 0 0 3px color-mix(in srgb, var(--canvas-crit) 22%, transparent); }
+.topo-srv-name { font-weight: 700; font-size: 13.5px; color: var(--canvas-ink-strong); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 12px; }
+.topo-srv-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.topo-srv-status { font-size: 11px; letter-spacing: .02em; color: var(--canvas-muted); }
+.topo-srv-status.online { color: var(--canvas-ok); }
+.topo-srv-status.degraded { color: var(--canvas-warn); }
+.topo-srv-status.offline { color: var(--canvas-crit); }
+.topo-srv-meta .mode-pill { flex: 0 0 auto; margin-left: auto; }
+
+/* 호버 상세 카드 — 게이지 4종 전체. 기본 숨김, 노드 호버·포커스 시 표출. */
+.topo-srv-detail {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 7;
+  padding: 10px 12px; background: var(--canvas-bg-2);
+  border: 1px solid var(--canvas-accent); border-radius: 10px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / .45);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity .12s, transform .12s, visibility .12s;
+  pointer-events: none;
+}
+.topo-srv-detail-head { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--canvas-muted); margin-bottom: 8px; }
+.topo-srv:hover .topo-srv-detail, .topo-srv:focus-visible .topo-srv-detail { opacity: 1; visibility: visible; transform: translateY(0); }
 
 .topo-gauges { display: flex; flex-direction: column; gap: 6px; }
+.topo-gauges.mini { gap: 5px; }
 .gauge-row { display: grid; grid-template-columns: 42px 1fr 40px; align-items: center; gap: 8px; height: 18px; }
 .gauge-label { font-size: 10px; letter-spacing: .04em; color: var(--canvas-muted); }
 .gauge-track { height: 5px; border-radius: 999px; background: var(--canvas-bg-3); overflow: hidden; box-shadow: inset 0 0 0 1px var(--canvas-border); }
@@ -759,6 +813,10 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
   .topo-flow { animation: none; opacity: 0; }
   .topo-edge.pending { animation: none; }
   .topo-canvas .topo-stat:hover, .topo-canvas .topo-node:hover { transform: none; }
+  /* 맥동 정지 — 애니메이션이 그리던 링을 정적 링으로 대체해 상태 표시는 유지. */
+  .topo-srv-led.online, .topo-acc-live {
+    animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent);
+  }
 }
 @media (max-width: 720px) {
   .topo-grid { gap: 48px; }
@@ -810,7 +868,13 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 }
 .topo-place { position: absolute; z-index: 1; touch-action: none; cursor: grab; }
 .topo-place > .topo-node { width: 100%; }
+/* 호버 노드(와 그 상세 카드)를 아래쪽 형제 노드 위로 올린다. */
+.topo-place:hover { z-index: 6; }
 .topo-place.dragging { z-index: 5; cursor: grabbing; }
+/* 캔버스 하단 근처 노드는 상세 카드를 위로 뒤집어 overflow:hidden 잘림을 피한다. */
+.topo-place.flip .topo-srv-detail { top: auto; bottom: calc(100% + 6px); transform: translateY(4px); }
+.topo-place.flip .topo-srv:hover .topo-srv-detail,
+.topo-place.flip .topo-srv:focus-visible .topo-srv-detail { transform: translateY(0); }
 .topo-place.dragging > .topo-node { border-color: var(--canvas-accent); box-shadow: 0 8px 24px rgb(0 0 0 / 0.4); }
 .topo-free.drag-from-server .topo-acc, .topo-free.drag-from-account .topo-srv {
   border-color: var(--canvas-accent); box-shadow: 0 0 0 2px var(--canvas-accent-soft);

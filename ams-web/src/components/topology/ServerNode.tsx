@@ -4,7 +4,7 @@ import type { PointerEvent as ReactPointerEvent, Ref } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import type { Server, UsageSnapshot } from '@/lib/api-client/types';
-import { EmailChip, Icon, SwitchModePill } from '../common';
+import { EmailChip, Icon, krLabel, RackGlyph, SwitchModePill } from '../common';
 
 // 게이지 색 임계: 90%↑ crit, 70%↑ warn, 그 외 accent.
 function gaugeTone(pct: number): '' | 'warn' | 'crit' {
@@ -13,10 +13,11 @@ function gaugeTone(pct: number): '' | 'warn' | 'crit' {
   return '';
 }
 
-// 얇은 수평 게이지 한 줄. pct가 undefined면 같은 높이의 "메트릭 미보고" 폴백을
-// 렌더해 카드 높이가 흔들리지 않게 한다.
-function Gauge({ label, pct }: { label: string; pct?: number }) {
-  if (pct === undefined || Number.isNaN(pct)) {
+// 얇은 수평 게이지 한 줄. pct가 없으면(undefined/null) 같은 높이의 "메트릭 미보고"
+// 폴백을 렌더해 카드 높이가 흔들리지 않게 한다. null도 걸러야 0% 막대 오표시를
+// 막는다(== null 은 undefined·null 모두 매칭).
+function Gauge({ label, pct }: { label: string; pct?: number | null }) {
+  if (pct == null || Number.isNaN(pct)) {
     return (
       <div className="gauge-row">
         <span className="gauge-label">{label}</span>
@@ -37,9 +38,11 @@ function Gauge({ label, pct }: { label: string; pct?: number }) {
   );
 }
 
-// 서버 노드 카드 — 이름·상태 도트·전환 모드 알약 / CPU·MEM·DISK·토큰 게이지 /
-// 활성 계정 칩. 토큰 게이지는 서버별 사용량 보고(getUsage)의 풀 최대 사용률을
-// 사용한다. 이 SWR 키(['usage',t,id])는 사용량 모달과 동일하며 신규 API가 아니다.
+// 서버 노드 카드 — NMS 장비 은유. 랙 실루엣 아이콘 + 서버명 / 상태 텍스트·전환
+// 모드 / 우상단 상태 LED(맥동) / 미니 게이지 2줄(CPU·풀 최대 소진율) / 활성 계정 칩.
+// 상세 게이지 4종(CPU·MEM·DISK·토큰)은 호버 팝오버로 옮겼다. 토큰(소진) 게이지는
+// 서버별 사용량 보고(getUsage)의 풀 최대 사용률을 쓴다. 이 SWR 키(['usage',t,id])는
+// 사용량 모달과 동일하며 신규 API가 아니다.
 export function ServerNode({
   tenantId,
   server,
@@ -74,16 +77,19 @@ export function ServerNode({
       onClick={onClick}
     >
       <span className="topo-port right" aria-label="연결점" onPointerDown={onPortDown} />
+      {/* 우상단 상태 LED — online 초록(맥동)·offline 붉은·degraded 호박. */}
+      <span className={`topo-srv-led ${server.status}`} aria-hidden="true" />
       <div className="topo-srv-head">
-        <span className={`topo-dot ${server.status}`} aria-hidden="true" />
+        <span className="topo-srv-glyph"><RackGlyph size={26} /></span>
         <span className="topo-srv-name">{server.name}</span>
+      </div>
+      <div className="topo-srv-meta">
+        <span className={`topo-srv-status ${server.status}`}>{krLabel(server.status)}</span>
         <SwitchModePill mode={server.switchMode} />
       </div>
-      <div className="topo-gauges">
+      <div className="topo-gauges mini">
         <Gauge label="CPU" pct={server.cpuPct} />
-        <Gauge label="MEM" pct={server.memPct} />
-        <Gauge label="DISK" pct={server.diskPct} />
-        <Gauge label="토큰" pct={tokenPct} />
+        <Gauge label="풀" pct={tokenPct} />
       </div>
       <div className="topo-srv-active">
         {activeEmail ? (
@@ -94,6 +100,16 @@ export function ServerNode({
             활성 계정 없음
           </span>
         )}
+      </div>
+      {/* 호버 상세 카드 — 게이지 4종 전체. 기존 팝오버 스타일 계열. */}
+      <div className="topo-srv-detail" role="presentation">
+        <div className="topo-srv-detail-head">호스트 텔레메트리</div>
+        <div className="topo-gauges">
+          <Gauge label="CPU" pct={server.cpuPct} />
+          <Gauge label="MEM" pct={server.memPct} />
+          <Gauge label="DISK" pct={server.diskPct} />
+          <Gauge label="토큰" pct={tokenPct} />
+        </div>
       </div>
     </button>
   );

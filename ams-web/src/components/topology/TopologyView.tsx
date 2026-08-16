@@ -41,15 +41,17 @@ const NODE_W = 264; // 자유 배치 시 노드 폭(= 11*GRID)
 const SERVER_X = GRID; // 서버 밴드 좌측 x
 const ACCOUNT_X = SERVER_X + NODE_W + 4 * GRID; // 계정 밴드 좌측 x (사이 96px)
 const BAND_TOP = 2 * GRID; // 밴드 라벨 아래 첫 노드 y
-const SERV_STEP = 8 * GRID; // 서버 노드 세로 간격(192px)
-const ACC_STEP = 4 * GRID; // 계정 노드 세로 간격(96px)
+// NMS 리뉴얼로 서버 노드는 더 작고(≈156px), 계정 노드는 캡슐(≈52px)로 얇아졌다.
+// 자동 안착 간격을 실측 높이 + 여백에 맞춰 좁혀 밀도를 높인다.
+const SERV_STEP = 7 * GRID; // 서버 노드 세로 간격(168px)
+const ACC_STEP = 3 * GRID; // 계정 노드 세로 간격(72px)
 const CANVAS_PAD = 2 * GRID; // 캔버스 하단 여백
 const FREE_MIN = 900; // 이 폭 미만이면 자동 배치(현행 grid) 폴백
 const LAYOUT_VERSION = 1;
 // 미측정 노드 기본 크기(높이 추정) — 첫 렌더/드롭 겹침 검사 폴백.
 const DEF_SIZE: Record<'srv' | 'acc', { w: number; h: number }> = {
-  srv: { w: NODE_W, h: 176 },
-  acc: { w: NODE_W, h: 64 },
+  srv: { w: NODE_W, h: 156 },
+  acc: { w: NODE_W, h: 52 },
 };
 
 const snap = (v: number) => Math.round(v / GRID) * GRID;
@@ -132,6 +134,24 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const emailOf = new Map(accounts.map((a) => [a.id, a.email]));
   const providerOf = new Map(accounts.map((a) => [a.id, a.provider]));
   const activeByServer = currentActiveByServer(assignments, accounts);
+
+  // 계정 5h 소진율 배선 — 각 온라인 서버의 usage payload(accounts[].usage.fiveHour,
+  // 없으면 windowMinutes=300 창)를 계정 이메일로 모아 계정 노드 서브라인에 전달한다.
+  // 계정은 서버당 유일 할당이라 이메일→pct 는 충돌 없이 결정된다. 값이 없으면
+  // undefined 그대로 두어 서브라인은 프로바이더·상태만 표시(기존 degrade 유지).
+  const onlineIds = orderedServers.filter((s) => s.status === 'online').map((s) => s.id);
+  const { data: usageSnaps } = useSWR(
+    onlineIds.length ? ['topo-usage', tenantId, onlineIds.join(',')] : null,
+    () => Promise.all(onlineIds.map((id) => api.getUsage(tenantId, id).catch(() => null))),
+    { refreshInterval: 30000, shouldRetryOnError: false },
+  );
+  const usagePctByEmail = new Map<string, number>();
+  for (const snap of usageSnaps ?? []) {
+    for (const acc of snap?.payload?.accounts ?? []) {
+      const pct = acc.usage?.fiveHour?.pct ?? acc.usage?.windows?.find((w) => w.windowMinutes === 300)?.pct;
+      if (acc.email && pct != null) usagePctByEmail.set(acc.email, pct);
+    }
+  }
 
   const minServerIdx = new Map<string, number>();
   for (const a of assignments) {
@@ -552,10 +572,13 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                 const key = `srv:${s.id}`;
                 const p = effectivePos(key);
                 const activeId = activeByServer.get(s.id);
+                // 호버 상세 카드가 캔버스 하단(overflow:hidden)에 잘리면 위로 뒤집는다.
+                const h = nodeSize.current.get(key)?.h ?? DEF_SIZE.srv.h;
+                const flip = canvasH > 0 && p.y + h + 168 > canvasH;
                 return (
                   <div
                     key={s.id}
-                    className={`topo-place srv ${dragging?.key === key ? 'dragging' : ''}`.trim()}
+                    className={`topo-place srv ${flip ? 'flip' : ''} ${dragging?.key === key ? 'dragging' : ''}`.trim().replace(/\s+/g, ' ')}
                     style={{ left: p.x, top: p.y, width: NODE_W }}
                     onPointerDown={startNodeDrag('srv', s.id)}
                   >
@@ -585,6 +608,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                       email={a.email}
                       status={a.status}
                       provider={a.provider}
+                      usagePct={usagePctByEmail.get(a.email)}
                       nodeRef={setNode(key)}
                       onClick={guardClick(() => onGo('accounts'))}
                       onPortDown={startDrag('account', a.id)}
@@ -626,6 +650,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                       email={a.email}
                       status={a.status}
                       provider={a.provider}
+                      usagePct={usagePctByEmail.get(a.email)}
                       nodeRef={setNode(`acc:${a.id}`)}
                       onClick={() => onGo('accounts')}
                       onPortDown={startDrag('account', a.id)}
