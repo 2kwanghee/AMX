@@ -665,6 +665,49 @@ class TestRunCommand:
         assert "boom" in capsys.readouterr().err
 
 
+class TestLangfuseUntrackedWarning:
+    """G36 guard: `tsamx run` warns when the session escapes Langfuse tracing."""
+
+    def test_warns_when_env_file_present(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "amx-langfuse.env").write_text("TRACE_TO_LANGFUSE=true\n")
+
+        cli._warn_if_langfuse_untracked()
+
+        err = capsys.readouterr().err
+        assert "Langfuse" in err
+        assert "amx" in err
+
+    def test_silent_when_env_file_absent(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+        cli._warn_if_langfuse_untracked()
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+    def test_run_dispatch_emits_warning_on_stderr(self, tmp_path, monkeypatch, capsys):
+        """The guard fires on the real `run` path, before the session starts."""
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "amx-langfuse.env").write_text("TRACE_TO_LANGFUSE=true\n")
+
+        class FakeSessionManager:
+            def __init__(self, switcher):
+                pass
+
+            def run(self, identifier, claude_args, share=True, share_history=False):
+                pass
+
+        with patch("tsamx.session.SessionManager", FakeSessionManager), \
+             patch("tsamx.cli.ClaudeAccountSwitcher"), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["tsamx", "run", "2"]):
+            cli.main()
+
+        assert "Langfuse" in capsys.readouterr().err
+
+
 class TestSubcommandAliases:
     """Memorable subcommands (`tsamx switch`, `tsamx list`, ...) → classic flags."""
 
