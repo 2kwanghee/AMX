@@ -1732,7 +1732,7 @@ class ClaudeAccountSwitcher:
             return None
         data = self._get_sequence_data() or {}
         email, org_uuid = identity
-        return self._find_account_slot(data, email, org_uuid)
+        return self._resolve_active_slot(data, email, org_uuid)
 
     def has_live_login(self) -> bool:
         """Whether ``~/.claude.json`` carries any live account identity."""
@@ -2054,6 +2054,31 @@ class ClaudeAccountSwitcher:
                     account.get("organizationUuid", "") == organization_uuid):
                 return num
         return None
+
+    def _resolve_active_slot(
+        self, data: dict, email: str, organization_uuid: str
+    ) -> str | None:
+        """Slot number of the live login, uuid-first.
+
+        The live ``oauthAccount.accountUuid`` is matched against each slot's
+        stored ``uuid`` before the (email, organizationUuid) composite key.
+        An accountUuid is stable where the org uuid is not: AMS stages an
+        account with its accountUuid preserved but no org uuid (claude.go
+        ``StageCredential`` — the proto AccountRef carries no org uuid), while
+        Claude Code later fills the live org uuid from the server. The
+        composite key then diverges (slot org "" vs live org <real>) and the
+        active slot goes undetected, so ``list``'s ``active`` flag — the same
+        signal AMA's switch-away gate reads — drops to none and the runner is
+        never switched off a recalled account (G49). uuid-first survives that
+        divergence. Slots with no stored uuid (add-token placeholders,
+        pre-uuid lineage) fall back to the composite key, unchanged.
+        """
+        live_uuid = self._live_account_uuid()
+        if live_uuid:
+            for num, account in data.get("accounts", {}).items():
+                if (account.get("uuid") or "").strip() == live_uuid:
+                    return num
+        return self._find_account_slot(data, email, organization_uuid)
 
     def _account_exists(self, email: str, organization_uuid: str) -> bool:
         """Check if account exists by (email, organizationUuid) composite key."""
@@ -2801,6 +2826,24 @@ class ClaudeAccountSwitcher:
         # on the host (G46). Gated on invalidate_live (not assume_yes) so TUI /
         # menubar removals and the interactive prompt are unaffected.
         if invalidate_live:
+            # G46 fail-safe gap: a uuid-less slot (add-token placeholder,
+            # pre-uuid lineage) can't be confirmed as the live-login owner, so
+            # _invalidate_live_credentials skips it and the recalled account's
+            # live login survives. When the live login still matches this slot's
+            # (email, org) identity, adopt its accountUuid onto the slot first so
+            # the uuid-first ownership check can then fire. backfill_account_uuid
+            # only fills an empty uuid and re-verifies (email, org) under the
+            # lock, so a slot re-added in the gap is never mis-stamped; on no
+            # identity match the existing skip-and-warn fail-safe still holds.
+            if not (account_info.get("uuid") or "").strip():
+                slot_org = account_info.get("organizationUuid", "") or ""
+                if self._live_identity_matches(email, slot_org):
+                    live_uuid = self._live_account_uuid()
+                    if live_uuid:
+                        self.backfill_account_uuid(
+                            account_num, live_uuid,
+                            expected_email=email, expected_org=slot_org,
+                        )
             self._invalidate_live_credentials(account_num, email)
 
         # Update sequence.json
@@ -2825,11 +2868,13 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data_migrated() or {}
         current_identity = self._get_current_account()
 
-        # Find active account number by (email, organizationUuid) composite key
+        # Active slot, uuid-first (see _resolve_active_slot): survives the
+        # (email, org) divergence AMS staging leaves, which otherwise drops the
+        # active flag and defeats AMA's switch-away-before-recall gate (G49).
         active_num = None
         if current_identity is not None:
             current_email, current_org_uuid = current_identity
-            active_num = self._find_account_slot(data, current_email, current_org_uuid)
+            active_num = self._resolve_active_slot(data, current_email, current_org_uuid)
 
         accounts_info: list[tuple[int, str, str, str, bool, str, str]] = []
         # Reset each build; set below only when the active slot's OAuth Keychain
