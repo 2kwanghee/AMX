@@ -441,8 +441,11 @@ func (h *Handler) swapAndRestart(runner SelfUpdateRunner, cfg *SelfUpdateConfig,
 
 // reinstallTsamx force-reinstalls tsamx from the checkout so the runner's tsamx
 // tracks the same commit the agent binary was just built from. It mirrors
-// deploy/agent-setup.sh's install step (`uv tool install --force --from
-// <repo>/tsamx tsamx`). It is deliberately fire-and-warn: any failure — uv not on
+// deploy/agent-setup.sh's install step (`uv tool install --force --reinstall
+// --from <repo>/tsamx tsamx`). --reinstall is required because tsamx's pinned
+// version does not change on every code change, so without it uv reuses a cached
+// wheel and --force alone silently keeps the stale build (measured in G49). It is
+// deliberately fire-and-warn: any failure — uv not on
 // PATH, a build error, a timeout — is logged and swallowed so it can NEVER turn a
 // converged self_update into a failure. The next self_update retries it. Runs
 // under the engine lock (its caller holds it) so no tsamx mutation is in flight.
@@ -451,7 +454,7 @@ func (h *Handler) reinstallTsamx(runner SelfUpdateRunner, cfg *SelfUpdateConfig)
 	out, err := runner.Run(context.Background(), RunSpec{
 		Dir:     cfg.RepoDir,
 		Name:    "uv",
-		Args:    []string{"tool", "install", "--force", "--from", tsamxSrc, "tsamx"},
+		Args:    []string{"tool", "install", "--force", "--reinstall", "--from", tsamxSrc, "tsamx"},
 		Timeout: tsamxStepTimeout,
 	})
 	if err != nil {

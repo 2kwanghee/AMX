@@ -19,7 +19,7 @@ deliver가 credential을 교체하는 동안 러너(Claude Code)가 신규 계�
 있다는 것이 문제의 핵심이다.
 
 > tsamx는 에이전트 설치·자기갱신과 함께 갱신된다. `deploy/agent-setup.sh install`은
-> `uv tool install --force`로 체크아웃 기준 재설치하고, 에이전트 self_update도 ama
+> `uv tool install --force --reinstall`로 체크아웃 기준 재설치하고, 에이전트 self_update도 ama
 > 바이너리 스왑 뒤 같은 방식으로 tsamx를 재설치한다. 그래서 저장소의 tsamx 변경이
 > 러너에 자동 반영되며(BACKLOG G48 해소), 함대(fleet) 재배포 때도 별도 tsamx 갱신
 > 절차가 필요 없다.
