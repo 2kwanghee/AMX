@@ -62,12 +62,14 @@ do_install() {
 
   echo "── 2/4 tsamx 설치 ───────────────────────────"
   if [ -z "$tsamx_bin" ]; then
-    # --force로 무조건 체크아웃의 tsamx를 재설치한다. 이미 설치돼 있어도 갱신해야
-    # 저장소의 tsamx 변경(예: #85 remove --yes)이 러너에 반영된다 — 예전처럼
+    # --force --reinstall로 무조건 체크아웃의 tsamx를 재설치한다. 이미 설치돼 있어도
+    # 갱신해야 저장소의 tsamx 변경(예: #85 remove --yes)이 러너에 반영된다 — 예전처럼
     # "이미 있으면 건너뛰기"는 러너를 stale 상태로 남겨 recall DIVERGED를 냈다
-    # (BACKLOG G48). 멱등: 몇 번을 돌려도 체크아웃 기준으로 수렴한다.
-    uv tool install --force --from "$ROOT/tsamx" tsamx >/dev/null \
-      || die "tsamx 설치 실패 — 'uv tool install --force --from $ROOT/tsamx tsamx' 출력을 확인하세요"
+    # (BACKLOG G48). --reinstall이 없으면 tsamx 버전이 고정된 채 코드만 바뀔 때 uv가
+    # 캐시된 휠을 재사용해 --force만으로는 신규 코드가 반영되지 않는다(G49 실측).
+    # 멱등: 몇 번을 돌려도 체크아웃 기준으로 수렴한다.
+    uv tool install --force --reinstall --from "$ROOT/tsamx" tsamx >/dev/null \
+      || die "tsamx 설치 실패 — 'uv tool install --force --reinstall --from $ROOT/tsamx tsamx' 출력을 확인하세요"
     # uv tool 설치 경로가 아직 PATH에 없을 수 있어 절대 경로로 고정한다.
     command -v tsamx >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"
     command -v tsamx >/dev/null 2>&1 || die "tsamx가 PATH에 없습니다 — ~/.local/bin을 PATH에 추가하세요"

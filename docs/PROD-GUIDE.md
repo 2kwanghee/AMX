@@ -274,12 +274,12 @@ cd ~/AMX && git pull && bash deploy/agent-setup.sh install \
   --ca ./ca.crt
 ```
 
-`install`이 하는 일: 사전점검(go·uv) → tsamx 설치·갱신(`uv tool install --force`로
+`install`이 하는 일: 사전점검(go·uv) → tsamx 설치·갱신(`uv tool install --force --reinstall`로
 체크아웃 기준 재설치 — 이미 있어도 최신으로 맞춘다) → 에이전트 빌드·기동
 (Claude 설정 홈 `~/.claude-amx` 자동 연결) → 성공 판정 출력.
 
 > tsamx는 에이전트 설치·자기갱신(self_update)과 함께 갱신된다 — self_update가 ama
-> 바이너리를 스왑한 뒤 체크아웃의 tsamx도 `uv tool install --force`로 재설치하므로,
+> 바이너리를 스왑한 뒤 체크아웃의 tsamx도 `uv tool install --force --reinstall`로 재설치하므로,
 > 저장소의 tsamx 변경이 러너에 자동 반영된다(BACKLOG G48 해소).
 
 **성공 판정**: 스크립트 끝의 판정 + 관리자 화면 `서버` 메뉴에서 이 서버가 **온라인**.

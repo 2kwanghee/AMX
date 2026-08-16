@@ -524,7 +524,7 @@ func TestSelfUpdateReinstallsTsamxFromTheCheckout(t *testing.T) {
 		t.Fatalf("tsamx was not reinstalled (ran %v)", f.calls)
 	}
 	spec := f.specFor(t, "uv tool install")
-	want := []string{"tool", "install", "--force", "--from", filepath.Join(repoDir, "tsamx"), "tsamx"}
+	want := []string{"tool", "install", "--force", "--reinstall", "--from", filepath.Join(repoDir, "tsamx"), "tsamx"}
 	if fmt.Sprint(spec.Args) != fmt.Sprint(want) {
 		t.Fatalf("uv args = %v, want %v", spec.Args, want)
 	}
