@@ -2072,12 +2072,26 @@ class ClaudeAccountSwitcher:
         never switched off a recalled account (G49). uuid-first survives that
         divergence. Slots with no stored uuid (add-token placeholders,
         pre-uuid lineage) fall back to the composite key, unchanged.
+
+        accountUuid is the account's identity but not a slot's: one Anthropic
+        account can occupy two slots at once (its personal context and an org
+        context share the same accountUuid). So when more than one slot carries
+        the live uuid, the live organizationUuid breaks the tie; if even that is
+        ambiguous the composite key decides, never dict iteration order.
         """
         live_uuid = self._live_account_uuid()
         if live_uuid:
-            for num, account in data.get("accounts", {}).items():
-                if (account.get("uuid") or "").strip() == live_uuid:
-                    return num
+            matches = [
+                num for num, account in data.get("accounts", {}).items()
+                if (account.get("uuid") or "").strip() == live_uuid
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                for num in matches:
+                    if (data["accounts"][num].get("organizationUuid", "") or "") \
+                            == organization_uuid:
+                        return num
         return self._find_account_slot(data, email, organization_uuid)
 
     def _account_exists(self, email: str, organization_uuid: str) -> bool:
@@ -4187,7 +4201,7 @@ class ClaudeAccountSwitcher:
                 "active": {"email": current_email, "managed": False},
             }
 
-        account_num = self._find_account_slot(data, current_email, current_org_uuid)
+        account_num = self._resolve_active_slot(data, current_email, current_org_uuid)
         if not account_num:
             return {
                 "schemaVersion": SCHEMA_VERSION,
@@ -4244,7 +4258,7 @@ class ClaudeAccountSwitcher:
             print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
             return None
 
-        account_num = self._find_account_slot(data, current_email, current_org_uuid)
+        account_num = self._resolve_active_slot(data, current_email, current_org_uuid)
         org_name = ""
         if account_num is not None:
             org_name = data["accounts"][account_num].get("organizationName", "") or ""
@@ -4451,8 +4465,15 @@ class ClaudeAccountSwitcher:
 
         current_email, current_org_uuid = identity
 
-        # Check if current account is managed
-        if not self._account_exists(current_email, current_org_uuid):
+        # Check if current account is managed. uuid-first (G51): recognizes the
+        # live slot even when AMS org-staging left the slot's org uuid diverged
+        # from the live one — the composite (email, org) key alone misses that
+        # slot and would wrongly treat the live account as unmanaged, then
+        # auto-add a duplicate (non-JSON) or refuse to rotate (JSON). Sharing
+        # the same signal as the reference point at 4494 below keeps this path
+        # from answering "who is live" two different ways.
+        data = self._get_sequence_data() or {}
+        if self._resolve_active_slot(data, current_email, current_org_uuid) is None:
             # In JSON mode, don't silently auto-add (a surprising side effect in
             # automation) — report it as a structured no-op instead.
             if json_output:
@@ -4477,7 +4498,7 @@ class ClaudeAccountSwitcher:
 
         if len(sequence) < 2:
             if json_output:
-                num = self._find_account_slot(data, current_email, current_org_uuid)
+                num = self._resolve_active_slot(data, current_email, current_org_uuid)
                 return self._switch_noop(
                     strategy=strategy_label,
                     reason="only-one-account",
@@ -4491,7 +4512,7 @@ class ClaudeAccountSwitcher:
         # Where the user actually is right now (live identity), falling back to
         # the recorded active slot. Used so usage-aware switching never moves
         # them onto an account worse than their current one.
-        current_num = self._find_account_slot(data, current_email, current_org_uuid)
+        current_num = self._resolve_active_slot(data, current_email, current_org_uuid)
         if current_num is None:
             current_num = str(active_account) if active_account is not None else None
 
@@ -4808,7 +4829,7 @@ class ClaudeAccountSwitcher:
         if not force and data:
             identity = self._get_current_account()
             if identity is not None:
-                cur_slot = self._find_account_slot(data, identity[0], identity[1])
+                cur_slot = self._resolve_active_slot(data, identity[0], identity[1])
                 if cur_slot == target_account:
                     action, provenance = self._self_switch_action(
                         target_account, identity[0]
@@ -4940,7 +4961,7 @@ class ClaudeAccountSwitcher:
         if identity is None:
             return result
         data = self._get_sequence_data() or {}
-        slot = self._find_account_slot(data, identity[0], identity[1])
+        slot = self._resolve_active_slot(data, identity[0], identity[1])
         if slot is None:
             return result
         backup = self._read_account_credentials(slot, identity[0])
@@ -5237,7 +5258,7 @@ class ClaudeAccountSwitcher:
             current_identity = self._get_current_account()
             if current_identity is not None:
                 current_email, current_org_uuid = current_identity
-                current_account = self._find_account_slot(
+                current_account = self._resolve_active_slot(
                     data, current_email, current_org_uuid
                 )
 

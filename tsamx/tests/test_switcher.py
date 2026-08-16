@@ -4145,15 +4145,18 @@ class TestListAccountsOrgDisplay:
         self, temp_home, mock_credentials_file, capsys
     ):
         """Only the account matching the live login should be marked (active)
-        when two slots share an email across orgs. Detection is uuid-first
-        (an accountUuid is globally unique, unlike the org uuid AMS staging may
-        leave diverged — G49), so the slot whose stored uuid equals the live
-        ``accountUuid`` wins; here the live login is the personal one."""
+        when two slots share an email across orgs. Detection is uuid-first: an
+        accountUuid identifies the account (unlike the org uuid AMS staging may
+        leave diverged — G49). One account can occupy two slots that share that
+        uuid (its personal + an org context), so a live org tie-break resolves
+        that case (see ``_resolve_active_slot``); here the two slots are two
+        *different* accounts with distinct uuids, so the uuid alone already
+        disambiguates and the personal live login wins."""
         from tsamx.switcher import ClaudeAccountSwitcher
         from unittest.mock import patch
 
-        # Realistic data: an org slot and a personal slot share an email but are
-        # distinct accounts with distinct accountUuids (the real invariant).
+        # Realistic data: an org slot and a personal slot share an email but,
+        # here, are two distinct accounts with distinct accountUuids.
         seq = {
             "activeAccountNumber": 1,
             "lastUpdated": "2024-01-01T00:00:00Z",
@@ -8658,4 +8661,156 @@ class TestResolveActiveSlot:
         )
         data = switcher._get_sequence_data()
         assert switcher._resolve_active_slot(data, "khee@x.com", "") == "1"
+
+    def test_same_uuid_across_orgs_broken_by_live_org(self, temp_home):
+        """One Anthropic account occupies two slots (personal + org) sharing the
+        same accountUuid; the live organizationUuid breaks the tie so the right
+        slot is picked deterministically (not by dict iteration order)."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", "org-B"),
+            [(1, "khee@x.com", "U1", ""), (2, "khee@x.com", "U1", "org-B")],
+        )
+        data = switcher._get_sequence_data()
+        assert switcher._resolve_active_slot(data, "khee@x.com", "org-B") == "2"
+        # And the personal context of the same account resolves to its own slot.
+        assert switcher._resolve_active_slot(data, "khee@x.com", "") == "1"
+
+    def test_same_uuid_ambiguous_org_defers_to_composite(self, temp_home):
+        """Two same-uuid slots and a live org matching neither: defer to the
+        composite key rather than returning a dict-order-dependent first match.
+        Here the composite also misses, so the answer is a deterministic None."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", "org-Z"),
+            [(1, "khee@x.com", "U1", "org-A"), (2, "khee@x.com", "U1", "org-B")],
+        )
+        data = switcher._get_sequence_data()
+        assert switcher._resolve_active_slot(data, "khee@x.com", "org-Z") is None
+
+
+class TestG51ActiveUnify:
+    """G51: the *live-slot* call sites answer "who is live" uuid-first, matching
+    the list/gate signal (G49), so org divergence — AMS stages the slot org ""
+    while Claude Code fills the live org — no longer makes them miss.
+
+    Each test drives one converted entry point with a diverged live login
+    (slot org "" but same accountUuid) where the (email, org) composite key
+    alone would miss the slot.
+    """
+
+    _seed = TestResolveActiveSlot._seed
+    _install_store_patches = staticmethod(
+        TestPerformSwitchPostDisplay._install_store_patches
+    )
+
+    def _diverged(self, temp_home, single=False):
+        accounts = [(1, "khee@x.com", "U1", "")]
+        if not single:
+            accounts.append((2, "other@x.com", "U2", ""))
+        return self._seed(
+            temp_home, ("khee@x.com", "U1", "org-live-9"), accounts, active_num=1
+        )
+
+    def test_status_json_marks_managed_under_org_divergence(self, temp_home):
+        """Site _build_status_payload: managed:true on the correct slot instead
+        of the composite-miss managed:false."""
+        switcher = self._diverged(temp_home)
+        data = switcher._get_sequence_data()
+        assert switcher._find_account_slot(data, "khee@x.com", "org-live-9") is None
+        with patch.object(switcher, "_active_account_usage",
+                          return_value=UsageEntry()):
+            payload = switcher.status(json_output=True)
+        active = payload["active"]
+        assert active["managed"] is True
+        assert active["number"] == 1
+
+    def test_status_human_shows_slot_under_org_divergence(self, temp_home, capsys):
+        """Site status(): the human line names Account-1, not "(not managed)"."""
+        switcher = self._diverged(temp_home)
+        with patch.object(switcher, "_active_account_usage",
+                          return_value=UsageEntry()):
+            switcher.status(json_output=False)
+        out = capsys.readouterr().out
+        assert "Account-1" in out
+        assert "not managed" not in out
+
+    def test_autoswitch_recognizes_active_slot_under_org_divergence(self, temp_home):
+        """Sites 'is-managed' gate + best-strategy reference point: the diverged
+        live account is recognized as managed and its slot is the reference
+        (pre-fix it was rejected as an unmanaged account)."""
+        switcher = self._diverged(temp_home)
+        with patch.object(switcher, "_usage_by_account", return_value={}), \
+             patch.object(switcher, "_warn_inert_models"), \
+             patch.object(switcher, "_select_best_switchable",
+                          return_value=(None, "current-unavailable")):
+            res = switcher.switch(json_output=True, strategy="best")
+        assert res["reason"] != "unmanaged-account"
+        assert res["from"]["number"] == 1
+        assert res["to"]["number"] == 1
+
+    def test_only_one_account_noop_ref_under_org_divergence(self, temp_home):
+        """Site only-one-account noop: the reference slot is resolved (number 1)
+        rather than dropped to null."""
+        switcher = self._diverged(temp_home, single=True)
+        res = switcher.switch(json_output=True, strategy="rotation")
+        assert res["reason"] == "only-one-account"
+        assert res["to"]["number"] == 1
+
+    def test_self_switch_guard_blocks_reswitch_under_org_divergence(self, temp_home):
+        """Site self-switch guard: switching to the slot the diverged live login
+        already occupies is a no-op (pre-fix the composite miss let it fall
+        through into a real switch)."""
+        switcher = self._diverged(temp_home)
+        backup = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-1", "refreshToken": "rt-1"}})
+        with patch.object(switcher, "_read_credentials", return_value=backup), \
+             patch.object(switcher, "_read_account_credentials", return_value=backup), \
+             patch.object(switcher, "_perform_switch") as perform:
+            res = switcher.switch_to("1", json_output=True)
+        assert res["switched"] is False
+        assert res["reason"] == "already-active"
+        perform.assert_not_called()
+
+    def test_prefetch_locates_diverged_slot(self, temp_home):
+        """Site _prefetch_live_identity: the live login's slot is located (its
+        backup is read) instead of returning early on a composite miss."""
+        switcher = self._diverged(temp_home)
+        live = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-1", "refreshToken": "rt-1"}})
+        read_backup = MagicMock(return_value=live)  # backup == live -> local, no fetch
+        with patch.object(switcher, "_read_credentials", return_value=live), \
+             patch.object(switcher, "_read_account_credentials", read_backup):
+            result = switcher._prefetch_live_identity()
+        read_backup.assert_called_once_with("1", "khee@x.com")
+        assert result["resolved"] is None
+
+    def test_perform_switch_backs_up_diverged_outgoing_slot(self, temp_home):
+        """Site _perform_switch: the outgoing (diverged live) account resolves to
+        its slot, so it is backed up as Account-1 rather than treated as an
+        unmanaged live login (from-ref number null)."""
+        switcher = self._diverged(temp_home)
+        live = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-1", "refreshToken": "rt-1"}})
+        creds_store = {
+            ("1", "khee@x.com"): live,  # backup == live -> own-bytes, no network
+            ("2", "other@x.com"): json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2", "refreshToken": "rt-2"}}),
+        }
+        configs_store = {
+            ("1", "khee@x.com"): json.dumps({"oauthAccount": {
+                "emailAddress": "khee@x.com", "accountUuid": "U1"}}),
+            ("2", "other@x.com"): json.dumps({"oauthAccount": {
+                "emailAddress": "other@x.com", "accountUuid": "U2"}}),
+        }
+        live_state = {"creds": live}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state)
+        try:
+            op = switcher._perform_switch("2", emit_output=False)
+        finally:
+            for p in patches:
+                p.stop()
+        assert op["from"]["number"] == 1
+        assert op["to"]["number"] == 2
 
