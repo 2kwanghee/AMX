@@ -56,6 +56,8 @@ tags:
     description: AMA server CRUD, enrollment tokens, switch mode and usage (AMS-4).
   - name: assignments
     description: Account-to-server assignment lifecycle (AMS-6, §5.2).
+  - name: audit
+    description: Read-only admin audit trail of mutating REST calls (console-test gap G53).
   - name: alerts
     description: Alert console — list and acknowledge (P4, design note §4).
   - name: billing
@@ -782,6 +784,20 @@ paths:
                 $ref: '#/components/schemas/Assignment'
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [assignments]
+      operationId: deleteAssignment
+      summary: Delete a detached assignment
+      description: |
+        Removes a `detached` assignment history row. Only `detached` is
+        deletable — any live state is rejected with 409
+        (`assignment.not_deletable`); recall it to `detached` first. The
+        deletion is preserved by the audit trail, so the row is removed outright.
+      responses:
+        '204':
+          description: Deleted.
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /tenants/{tenantId}/assignments/{assignmentId}:deliver:
     parameters:
@@ -937,6 +953,53 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  # ---------------------------------------------------------------------------
+  # Audit log (console-test gap G53)
+  # ---------------------------------------------------------------------------
+  /tenants/{tenantId}/audit-logs:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+    get:
+      tags: [audit]
+      operationId: listAuditLogs
+      summary: List admin audit-log entries
+      description: |
+        The mutating-action trail for this tenant, newest first. One row is
+        written per POST/PATCH/DELETE that reaches the API (`/auth/login`,
+        `/ingest/danger-command` and `/healthz` excepted). The request body is
+        never stored — only method, path, matched route, trailing UUID, caller
+        email and status code. A tenant-admin sees only its tenant's rows; a
+        global-admin additionally sees the global (tenant-less) rows.
+      parameters:
+        - name: from
+          in: query
+          description: Inclusive lower bound on `createdAt`.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Exclusive upper bound on `createdAt`.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: Page of audit-log entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogPage'
+        '404': { $ref: '#/components/responses/NotFound' }
 
   # ---------------------------------------------------------------------------
   # Alerts (P4, design note §4)
@@ -1722,6 +1785,53 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Assignment'
+        pageInfo:
+          $ref: '#/components/schemas/PageInfo'
+
+    # -- Audit log (console-test gap G53) -------------------------------------
+    AuditLog:
+      description: |
+        One mutating-action record. The request body is never stored (§7); only
+        routing metadata is kept. `adminEmail` is the caller's identity — a real
+        address, or `<root-token>` for the bootstrap root token — and is null
+        only when the request failed auth before a principal was resolved.
+      type: object
+      required: [id, method, path, action, statusCode, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        adminEmail:
+          type: string
+          nullable: true
+        method:
+          type: string
+          examples: [POST, PATCH, DELETE]
+        path:
+          description: The actual request path.
+          type: string
+        action:
+          description: The matched route template, `"{METHOD} {route path}"`.
+          type: string
+        targetId:
+          description: The last UUID path segment, when present.
+          type: string
+          format: uuid
+          nullable: true
+        statusCode:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    AuditLogPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
         pageInfo:
           $ref: '#/components/schemas/PageInfo'
 

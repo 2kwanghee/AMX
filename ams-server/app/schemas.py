@@ -362,6 +362,23 @@ class EventPage(Wire):
     page_info: PageInfo | None = None
 
 
+# -- Admin audit log (console-test gap G53) -----------------------------------
+class AuditLog(Wire):
+    id: uuid.UUID
+    admin_email: str | None = None
+    method: str
+    path: str
+    action: str
+    target_id: uuid.UUID | None = None
+    status_code: int
+    created_at: datetime
+
+
+class AuditLogPage(Wire):
+    items: list[AuditLog]
+    page_info: PageInfo | None = None
+
+
 # -- F5 billing ---------------------------------------------------------------
 BillingStatus = Literal["pending", "exported"]
 
