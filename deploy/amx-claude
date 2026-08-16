@@ -109,6 +109,13 @@ if [ -f "$LF_ENV_FILE" ] && [ -r "$LF_ENV_FILE" ]; then
 			export LANGFUSE_USER_ID LANGFUSE_TRACING_ENVIRONMENT
 			export CC_LANGFUSE_MAX_CHARS CC_LANGFUSE_DEBUG
 		fi
+		# 위험 명령어 훅(PreToolUse)의 통보 대상. Langfuse 추적(TRACE_TO_LANGFUSE)과는
+		# 별개 기능이라 그 게이트 밖에서, env 파일에 값이 있을 때만 export한다.
+		# 이 두 변수가 없으면 danger 훅은 자체적으로 즉시 no-op이다.
+		if [ -n "${AMX_DANGER_INGEST_URL:-}" ]; then
+			export AMX_DANGER_INGEST_URL
+			[ -n "${AMX_DANGER_INGEST_TOKEN:-}" ] && export AMX_DANGER_INGEST_TOKEN
+		fi
 	fi
 	set -e
 fi
