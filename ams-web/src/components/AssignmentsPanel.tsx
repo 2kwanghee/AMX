@@ -128,6 +128,16 @@ export function AssignmentsPanel({ tenantId }: { tenantId: string }) {
   const items = data?.items ?? [];
   const activeByServer = currentActiveByServer(items, accounts?.items ?? []);
 
+  // detached(회수 완료) 연결만 삭제 가능. confirm 후 성공하면 목록을 갱신하고,
+  // detached가 아니면 서버가 409(assignment.not_deletable)로 막아 오류 표시된다.
+  async function doDelete(id: string, email: string) {
+    if (!window.confirm(`${email} 연결 기록을 영구 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    await act.run(
+      () => api.deleteAssignment(tenantId, id),
+      () => mutate(),
+    );
+  }
+
   async function doAction(id: string, verb: Verb) {
     await act.run(
       () => api.assignmentAction(tenantId, id, verb),
@@ -192,6 +202,16 @@ export function AssignmentsPanel({ tenantId }: { tenantId: string }) {
                           {VERB_LABEL[v]}
                         </button>
                       ))}
+                      {a.state === 'detached' && (
+                        <button
+                          className="vbtn warn"
+                          disabled={act.busy}
+                          onClick={() => doDelete(a.id, email)}
+                        >
+                          <span className="vbtn-icon"><Icon name="trash" size={14} /></span>
+                          삭제
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>

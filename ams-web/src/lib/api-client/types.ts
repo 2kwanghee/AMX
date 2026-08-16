@@ -381,6 +381,23 @@ export interface LangfuseUsage {
   uiUrl?: string | null;
 }
 
+// -- 감사 로그 (관리 API 감사 추적) ------------------------------------------
+// GET /tenants/{id}/audit-logs?from&to&limit&pageToken. 관리자가 콘솔·API로
+// 수행한 변경 연산의 추적 기록이다. from/to는 ISO 8601(생략 시 서버 기본 범위).
+// 각 행은 한 번의 관리 요청 — method/path는 원 HTTP 요청, action은 서버가 분류한
+// 도메인 동작명, targetId는 대상 리소스 id(없으면 null).
+export interface AuditLogEntry {
+  id: string;
+  adminEmail: string;
+  method: string;
+  path: string;
+  action: string;
+  targetId?: string | null;
+  statusCode: number;
+  createdAt: string;
+}
+export type AuditLogPage = Page<AuditLogEntry>;
+
 export interface ApiError {
   type?: string;
   title?: string;

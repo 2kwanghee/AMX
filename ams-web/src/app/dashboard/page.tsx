@@ -19,6 +19,7 @@ import { ServersPanel } from '@/components/ServersPanel';
 import { SetupGuidePanel } from '@/components/SetupGuidePanel';
 import { UsageCostPanel } from '@/components/UsageCostPanel';
 import { LangfuseUsagePanel } from '@/components/LangfuseUsagePanel';
+import { AuditLogPanel } from '@/components/AuditLogPanel';
 import { TopologyView } from '@/components/topology/TopologyView';
 import {
   ConsoleHeader,
@@ -42,6 +43,7 @@ type Tab =
   | 'assignments'
   | 'alerts'
   | 'usage'
+  | 'audit'
   | 'guide';
 
 const MENU: { id: Tab; label: string; icon: IconName }[] = [
@@ -52,6 +54,7 @@ const MENU: { id: Tab; label: string; icon: IconName }[] = [
   { id: 'assignments', label: '할당', icon: 'link' },
   { id: 'alerts', label: '알림', icon: 'bell' },
   { id: 'usage', label: '사용량', icon: 'gauge' },
+  { id: 'audit', label: '감사', icon: 'activity' },
   { id: 'guide', label: '설치 가이드', icon: 'help' },
 ];
 
@@ -63,6 +66,7 @@ const TITLES: Record<Tab, string> = {
   assignments: '할당',
   alerts: '알림',
   usage: '사용량',
+  audit: '감사 로그',
   guide: '설치·운영 가이드',
 };
 
@@ -161,6 +165,7 @@ export default function Dashboard() {
             <LangfuseUsagePanel tenantId={active} />
           </>
         )}
+        {active && tab === 'audit' && <AuditLogPanel key={active} tenantId={active} />}
         {tab === 'guide' && <SetupGuidePanel />}
       </main>
 

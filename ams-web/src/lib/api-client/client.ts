@@ -13,6 +13,7 @@ import type {
   AssignmentCreate,
   AssignmentPage,
   AssignmentState,
+  AuditLogPage,
   CommandAccepted,
   EnrollTokenResponse,
   EventPage,
@@ -124,6 +125,9 @@ export const api = {
     bff<Assignment>('POST', `tenants/${t}/assignments`, b),
   assignmentAction: (t: string, id: string, verb: AssignmentActionVerb, body?: unknown) =>
     bff<Assignment | CommandAccepted>('POST', `tenants/${t}/assignments/${id}:${verb}`, body),
+  // detached 연결만 삭제 가능. 그 외 상태는 서버가 409 assignment.not_deletable.
+  deleteAssignment: (t: string, id: string) =>
+    bff<void>('DELETE', `tenants/${t}/assignments/${id}`),
 
   // Usage cost — month is YYYY-MM; omitted means the current UTC month
   // (ams-server fills it in). The caller only ever builds valid months.
@@ -145,6 +149,21 @@ export const api = {
     bff<AlertPage>('GET', `tenants/${t}/alerts${status ? `?status=${status}` : ''}`),
   ackAlert: (t: string, id: string) =>
     bff<Alert>('POST', `tenants/${t}/alerts/${id}:ack`),
+
+  // 감사 로그 — from/to는 ISO 8601. UI가 언제나 유효한 값만 만든다. pageToken이
+  // 있으면 '더 보기'로 다음 페이지를 이어 받는다.
+  getAuditLogs: (
+    t: string,
+    params: { from?: string; to?: string; limit?: number; pageToken?: string } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.limit != null) qs.set('limit', String(params.limit));
+    if (params.pageToken) qs.set('pageToken', params.pageToken);
+    const q = qs.toString();
+    return bff<AuditLogPage>('GET', `tenants/${t}/audit-logs${q ? `?${q}` : ''}`);
+  },
 };
 
 // -- 오류 코드 한글화 ---------------------------------------------------------
@@ -160,6 +179,8 @@ const KR_API_ERROR: Record<string, string> = {
     '붙여넣은 auth.json은 다른 계정의 자격증명입니다. 입력한 이메일과 auth.json이 같은 계정의 것인지 확인하세요.',
   'account.codex_email_requires_credential':
     'Codex 계정의 이메일을 바꾸려면 새 auth.json을 같은 요청에 함께 넣어야 합니다. 자격증명 칸에 바뀐 계정의 auth.json을 붙여넣으세요.',
+  'assignment.not_deletable':
+    'detached(회수 완료) 상태의 할당만 삭제할 수 있습니다. 먼저 회수한 뒤 다시 시도하세요.',
   'assignment.server_codex_capacity':
     '이 서버에는 이미 Codex 계정이 연결돼 있습니다. Codex는 호스트당 자격증명을 하나만 두므로, 기존 Codex 연결을 회수한 뒤 다시 연결하세요.',
 };
