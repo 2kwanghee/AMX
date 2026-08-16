@@ -2072,12 +2072,26 @@ class ClaudeAccountSwitcher:
         never switched off a recalled account (G49). uuid-first survives that
         divergence. Slots with no stored uuid (add-token placeholders,
         pre-uuid lineage) fall back to the composite key, unchanged.
+
+        accountUuid is the account's identity but not a slot's: one Anthropic
+        account can occupy two slots at once (its personal context and an org
+        context share the same accountUuid). So when more than one slot carries
+        the live uuid, the live organizationUuid breaks the tie; if even that is
+        ambiguous the composite key decides, never dict iteration order.
         """
         live_uuid = self._live_account_uuid()
         if live_uuid:
-            for num, account in data.get("accounts", {}).items():
-                if (account.get("uuid") or "").strip() == live_uuid:
-                    return num
+            matches = [
+                num for num, account in data.get("accounts", {}).items()
+                if (account.get("uuid") or "").strip() == live_uuid
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                for num in matches:
+                    if (data["accounts"][num].get("organizationUuid", "") or "") \
+                            == organization_uuid:
+                        return num
         return self._find_account_slot(data, email, organization_uuid)
 
     def _account_exists(self, email: str, organization_uuid: str) -> bool:

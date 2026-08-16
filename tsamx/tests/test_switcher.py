@@ -4145,15 +4145,18 @@ class TestListAccountsOrgDisplay:
         self, temp_home, mock_credentials_file, capsys
     ):
         """Only the account matching the live login should be marked (active)
-        when two slots share an email across orgs. Detection is uuid-first
-        (an accountUuid is globally unique, unlike the org uuid AMS staging may
-        leave diverged — G49), so the slot whose stored uuid equals the live
-        ``accountUuid`` wins; here the live login is the personal one."""
+        when two slots share an email across orgs. Detection is uuid-first: an
+        accountUuid identifies the account (unlike the org uuid AMS staging may
+        leave diverged — G49). One account can occupy two slots that share that
+        uuid (its personal + an org context), so a live org tie-break resolves
+        that case (see ``_resolve_active_slot``); here the two slots are two
+        *different* accounts with distinct uuids, so the uuid alone already
+        disambiguates and the personal live login wins."""
         from tsamx.switcher import ClaudeAccountSwitcher
         from unittest.mock import patch
 
-        # Realistic data: an org slot and a personal slot share an email but are
-        # distinct accounts with distinct accountUuids (the real invariant).
+        # Realistic data: an org slot and a personal slot share an email but,
+        # here, are two distinct accounts with distinct accountUuids.
         seq = {
             "activeAccountNumber": 1,
             "lastUpdated": "2024-01-01T00:00:00Z",
@@ -8658,6 +8661,32 @@ class TestResolveActiveSlot:
         )
         data = switcher._get_sequence_data()
         assert switcher._resolve_active_slot(data, "khee@x.com", "") == "1"
+
+    def test_same_uuid_across_orgs_broken_by_live_org(self, temp_home):
+        """One Anthropic account occupies two slots (personal + org) sharing the
+        same accountUuid; the live organizationUuid breaks the tie so the right
+        slot is picked deterministically (not by dict iteration order)."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", "org-B"),
+            [(1, "khee@x.com", "U1", ""), (2, "khee@x.com", "U1", "org-B")],
+        )
+        data = switcher._get_sequence_data()
+        assert switcher._resolve_active_slot(data, "khee@x.com", "org-B") == "2"
+        # And the personal context of the same account resolves to its own slot.
+        assert switcher._resolve_active_slot(data, "khee@x.com", "") == "1"
+
+    def test_same_uuid_ambiguous_org_defers_to_composite(self, temp_home):
+        """Two same-uuid slots and a live org matching neither: defer to the
+        composite key rather than returning a dict-order-dependent first match.
+        Here the composite also misses, so the answer is a deterministic None."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", "org-Z"),
+            [(1, "khee@x.com", "U1", "org-A"), (2, "khee@x.com", "U1", "org-B")],
+        )
+        data = switcher._get_sequence_data()
+        assert switcher._resolve_active_slot(data, "khee@x.com", "org-Z") is None
 
 
 class TestG51ActiveUnify:
