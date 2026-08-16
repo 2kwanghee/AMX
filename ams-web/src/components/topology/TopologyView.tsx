@@ -1,7 +1,7 @@
 'use client';
 
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
 import { allowedAssignmentActions, api, krApiError } from '@/lib/api-client/client';
 import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
@@ -28,6 +28,67 @@ type AEdge = { id: string; d: string; kind: EdgeKind; mx: number; my: number };
 type MEdge = { id: string; d: string };
 type Ghost = { x0: number; y0: number; x: number; y: number };
 type DragFrom = { from: 'server' | 'account'; id: string } | null;
+
+// -- 자유 배치(P1) ----------------------------------------------------------
+// 노드 좌표 소유권을 CSS Grid → JS 상태로. 서버·계정 노드만 이동, 테넌트는 좌측
+// 고정. 좌표는 gridRef(전체 3열 컨테이너) 기준 캔버스 영역 로컬 픽셀.
+type Pos = { x: number; y: number };
+type Layout = Record<string, Pos>; // key: `srv:<id>` | `acc:<id>`
+type Dragging = { key: string; pos: Pos } | null;
+
+const GRID = 24; // 스냅 격자(px). 설정 노출은 후속.
+const NODE_W = 264; // 자유 배치 시 노드 폭(= 11*GRID)
+const SERVER_X = GRID; // 서버 밴드 좌측 x
+const ACCOUNT_X = SERVER_X + NODE_W + 4 * GRID; // 계정 밴드 좌측 x (사이 96px)
+const BAND_TOP = 2 * GRID; // 밴드 라벨 아래 첫 노드 y
+const SERV_STEP = 8 * GRID; // 서버 노드 세로 간격(192px)
+const ACC_STEP = 4 * GRID; // 계정 노드 세로 간격(96px)
+const CANVAS_PAD = 2 * GRID; // 캔버스 하단 여백
+const FREE_MIN = 900; // 이 폭 미만이면 자동 배치(현행 grid) 폴백
+const LAYOUT_VERSION = 1;
+// 미측정 노드 기본 크기(높이 추정) — 첫 렌더/드롭 겹침 검사 폴백.
+const DEF_SIZE: Record<'srv' | 'acc', { w: number; h: number }> = {
+  srv: { w: NODE_W, h: 176 },
+  acc: { w: NODE_W, h: 64 },
+};
+
+const snap = (v: number) => Math.round(v / GRID) * GRID;
+const layoutStorageKey = (tenantId: string) => `amx.topo.layout.${tenantId}`;
+
+function loadLayout(tenantId: string): Layout {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(layoutStorageKey(tenantId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { version?: number; nodes?: Layout };
+    if (parsed?.version !== LAYOUT_VERSION || !parsed.nodes) return {};
+    return parsed.nodes;
+  } catch {
+    return {};
+  }
+}
+
+function saveLayout(tenantId: string, nodes: Layout) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      layoutStorageKey(tenantId),
+      JSON.stringify({ version: LAYOUT_VERSION, nodes }),
+    );
+  } catch {
+    // 저장 실패(용량·프라이빗 모드)는 무시 — 배치는 세션 내 유지된다.
+  }
+}
+
+// 두 박스가 margin 여유를 두고 겹치는지(AABB).
+function overlaps(ap: Pos, as: { w: number; h: number }, bp: Pos, bs: { w: number; h: number }, m = 8): boolean {
+  return (
+    ap.x - m < bp.x + bs.w &&
+    ap.x + as.w + m > bp.x &&
+    ap.y - m < bp.y + bs.h &&
+    ap.y + as.h + m > bp.y
+  );
+}
 
 // 마스터 콘솔 토폴로지 편집기. 좌 테넌트 · 중 서버 · 우 계정 3열. 테넌트→서버는
 // 정적 소속선, 서버↔계정은 편집 가능한 할당선. 포트 드래그로 연결 생성, 선 클릭으로
@@ -96,6 +157,147 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     else nodeRefs.current.delete(id);
   }, []);
 
+  // -- 자유 배치 상태 -------------------------------------------------------
+  const [layout, setLayout] = useState<Layout>({});
+  const [dragging, setDragging] = useState<Dragging>(null);
+  const [freeMode, setFreeMode] = useState(false);
+  const [canvasH, setCanvasH] = useState(0);
+  const draggingRef = useRef<Dragging>(null);
+  const suppressClickRef = useRef(false);
+  // 측정된 노드 크기(px) — 겹침 검사·캔버스 높이 계산에 사용. measure()에서 갱신.
+  const nodeSize = useRef<Map<string, { w: number; h: number }>>(new Map());
+
+  const setDrag = useCallback((v: Dragging) => {
+    draggingRef.current = v;
+    setDragging(v);
+  }, []);
+
+  // 테넌트 전환 시 저장된 배치를 로드(신규 테넌트는 빈 맵).
+  useEffect(() => {
+    setDrag(null);
+    setLayout(loadLayout(tenantId));
+  }, [tenantId, setDrag]);
+
+  // 좌표 없는 노드의 자동 안착 위치 — 현행 정렬 순서를 열별로 세로 배치.
+  const autoPos = useMemo(() => {
+    const m = new Map<string, Pos>();
+    orderedServers.forEach((s, i) => m.set(`srv:${s.id}`, { x: SERVER_X, y: snap(BAND_TOP + i * SERV_STEP) }));
+    orderedAccounts.forEach((a, i) => m.set(`acc:${a.id}`, { x: ACCOUNT_X, y: snap(BAND_TOP + i * ACC_STEP) }));
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderedServers.map((s) => s.id).join(','), orderedAccounts.map((a) => a.id).join(',')]);
+
+  const effectivePos = useCallback(
+    (key: string): Pos => {
+      if (draggingRef.current?.key === key) return draggingRef.current.pos;
+      return layout[key] ?? autoPos.get(key) ?? { x: 0, y: 0 };
+    },
+    [layout, autoPos],
+  );
+
+  const sizeOf = (key: string) =>
+    nodeSize.current.get(key) ?? DEF_SIZE[key.startsWith('srv:') ? 'srv' : 'acc'];
+
+  // 드롭 지점에서 가장 가까운 빈 스냅 위치로 밀어내기(격자 나선 탐색, 상한 있음).
+  const resolveOverlap = useCallback(
+    (key: string, pos: Pos): Pos => {
+      const size = sizeOf(key);
+      const others: { pos: Pos; size: { w: number; h: number } }[] = [];
+      for (const s of orderedServers) if (`srv:${s.id}` !== key) others.push({ pos: effectivePos(`srv:${s.id}`), size: sizeOf(`srv:${s.id}`) });
+      for (const a of orderedAccounts) if (`acc:${a.id}` !== key) others.push({ pos: effectivePos(`acc:${a.id}`), size: sizeOf(`acc:${a.id}`) });
+      const free = (p: Pos) => !others.some((o) => overlaps(p, size, o.pos, o.size));
+      if (free(pos)) return pos;
+      // 세로 우선 탐색(열 정렬 유지), 실패 시 가로까지 확장.
+      for (let r = 1; r <= 60; r++) {
+        for (const dy of [r, -r]) {
+          const p = { x: pos.x, y: Math.max(0, pos.y + dy * GRID) };
+          if (free(p)) return p;
+        }
+      }
+      for (let rx = 1; rx <= 20; rx++) {
+        for (const dx of [rx, -rx]) {
+          for (let ry = 0; ry <= 60; ry++) {
+            for (const dy of ry === 0 ? [0] : [ry, -ry]) {
+              const p = { x: Math.max(0, pos.x + dx * GRID), y: Math.max(0, pos.y + dy * GRID) };
+              if (free(p)) return p;
+            }
+          }
+        }
+      }
+      return pos; // 탐색 실패 시 그대로(겹침 허용) — 데이터 손실보다 낫다.
+    },
+    [orderedServers, orderedAccounts, effectivePos],
+  );
+
+  const commitPos = useCallback(
+    (key: string, pos: Pos) => {
+      setLayout((prev) => {
+        const next = { ...prev, [key]: pos };
+        saveLayout(tenantId, next);
+        return next;
+      });
+    },
+    [tenantId],
+  );
+
+  const resetLayout = useCallback(() => {
+    setDrag(null);
+    setLayout({});
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.removeItem(layoutStorageKey(tenantId));
+      } catch {
+        /* noop */
+      }
+    }
+  }, [tenantId, setDrag]);
+
+  // 노드 본문 드래그 이동 — 포트(연결 생성) 위 시작은 제외한다.
+  const startNodeDrag = (kind: 'srv' | 'acc', id: string) => (e: ReactPointerEvent) => {
+    if (!freeMode) return;
+    if ((e.target as HTMLElement).closest('.topo-port')) return;
+    const key = `${kind}:${id}`;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origin = effectivePos(key);
+    let moved = false;
+    suppressClickRef.current = false;
+
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) > 4) moved = true;
+      if (!moved) return;
+      suppressClickRef.current = true;
+      setDrag({ key, pos: { x: Math.max(0, snap(origin.x + dx)), y: Math.max(0, snap(origin.y + dy)) } });
+    };
+    const finish = (commit: boolean) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', keydown);
+      const d = draggingRef.current;
+      setDrag(null);
+      if (commit && d && moved) commitPos(d.key, resolveOverlap(d.key, d.pos));
+    };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
+    const keydown = (ev: KeyboardEvent) => { if (ev.key === 'Escape') finish(false); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', keydown);
+  };
+
+  // 드래그 직후의 click(내비게이션)을 1회 무시한다.
+  const guardClick = (fn: () => void) => () => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    fn();
+  };
+
   const edgeSpecs = assignments
     .filter((a) => a.state !== 'detached' && serverIndex.has(a.serverId) && emailOf.has(a.accountId))
     .map((a) => {
@@ -105,6 +307,13 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
       else if (activeByServer.get(a.serverId) === a.accountId) kind = 'active';
       return { id: a.id, accId: a.accountId, srvId: a.serverId, kind };
     });
+
+  // measure 재실행 트리거 — 노드 유효 좌표·자유배치 여부가 바뀌면 엣지·캔버스 재측정.
+  const posKey =
+    `free:${freeMode}|` +
+    orderedServers.map((s) => { const p = effectivePos(`srv:${s.id}`); return `${s.id}@${p.x},${p.y}`; }).join(';') +
+    '#' +
+    orderedAccounts.map((a) => { const p = effectivePos(`acc:${a.id}`); return `${a.id}@${p.x},${p.y}`; }).join(';');
 
   const measure = useCallback(() => {
     const grid = gridRef.current;
@@ -145,11 +354,26 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
       const my = 0.125 * y1 + 0.375 * y1 + 0.375 * y2 + 0.125 * y2;
       nextA.push({ id: spec.id, kind: spec.kind, mx, my, d: `M${x1},${y1} C${c1x},${y1} ${c2x},${y2} ${x2},${y2}` });
     }
+    // 노드 크기 기록(자유 배치 겹침·캔버스 높이 계산용).
+    for (const [k, el] of nodeRefs.current) {
+      const r = el.getBoundingClientRect();
+      if (r.width && r.height) nodeSize.current.set(k, { w: r.width, h: r.height });
+    }
+    const wide = grid.offsetWidth >= FREE_MIN;
+    setFreeMode(wide);
+    // 자유 배치는 absolute라 컨테이너가 붕괴 — 노드 최하단 + 여백으로 높이 산정.
+    let bottom = 0;
+    if (wide) {
+      for (const s of orderedServers) bottom = Math.max(bottom, effectivePos(`srv:${s.id}`).y + (nodeSize.current.get(`srv:${s.id}`)?.h ?? DEF_SIZE.srv.h));
+      for (const a of orderedAccounts) bottom = Math.max(bottom, effectivePos(`acc:${a.id}`).y + (nodeSize.current.get(`acc:${a.id}`)?.h ?? DEF_SIZE.acc.h));
+      bottom += CANVAS_PAD;
+    }
+    setCanvasH(bottom);
     setMEdges(nextM);
     setAEdges(nextA);
-    setSize({ w: grid.offsetWidth, h: grid.offsetHeight });
+    setSize({ w: grid.offsetWidth, h: Math.max(grid.offsetHeight, bottom) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutKey(edgeSpecs, orderedServers.map((s) => s.id))]);
+  }, [layoutKey(edgeSpecs, orderedServers.map((s) => s.id)) + '§' + posKey]);
 
   useLayoutEffect(() => {
     measure();
@@ -235,9 +459,16 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
         <p className="topo-empty">서버·계정이 없습니다. 서버를 등록하고 계정을 추가하면 여기서 연결을 편집할 수 있습니다.</p>
       )}
 
+      {hasContent && freeMode && (
+        <div className="topo-toolbar">
+          <span className="topo-toolbar-hint">노드를 끌어 배치 · 24px 격자 스냅</span>
+          <button type="button" className="topo-reset" onClick={resetLayout}>정렬 초기화</button>
+        </div>
+      )}
+
       {hasContent && (
         <div
-          className={`topo-grid3 ${dragFrom ? `drag-from-${dragFrom.from}` : ''}`.trim()}
+          className={`${freeMode ? 'topo-free' : 'topo-grid3'} ${dragFrom ? `drag-from-${dragFrom.from}` : ''}`.trim()}
           ref={gridRef}
         >
           <svg
@@ -273,45 +504,99 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
             <TenantNode name={tenantName} serverCount={servers.length} nodeRef={setNode('tenant')} />
           </div>
 
-          <div className="topo-col topo-servers">
-            <div className="topo-col-head">서버 <span className="topo-col-count">{orderedServers.length}</span></div>
-            <div className="topo-srv-grid">
+          {freeMode ? (
+            // 자유 배치: 서버·계정 노드를 캔버스에 absolute로 배치. 좌표는 JS 상태 소유.
+            <div className="topo-canvas-area" style={{ minHeight: canvasH || undefined }}>
+              <div className="topo-band-label" style={{ left: SERVER_X }}>서버 <span className="topo-col-count">{orderedServers.length}</span></div>
+              <div className="topo-band-label" style={{ left: ACCOUNT_X }}>계정 <span className="topo-col-count">{orderedAccounts.length}</span></div>
               {orderedServers.map((s) => {
+                const key = `srv:${s.id}`;
+                const p = effectivePos(key);
                 const activeId = activeByServer.get(s.id);
                 return (
-                  <ServerNode
+                  <div
                     key={s.id}
-                    tenantId={tenantId}
-                    server={s}
-                    activeEmail={activeId ? emailOf.get(activeId) : undefined}
-                    nodeRef={setNode(`srv:${s.id}`)}
-                    onClick={() => onGo('servers')}
-                    onPortDown={startDrag('server', s.id)}
-                  />
+                    className={`topo-place srv ${dragging?.key === key ? 'dragging' : ''}`.trim()}
+                    style={{ left: p.x, top: p.y, width: NODE_W }}
+                    onPointerDown={startNodeDrag('srv', s.id)}
+                  >
+                    <ServerNode
+                      tenantId={tenantId}
+                      server={s}
+                      activeEmail={activeId ? emailOf.get(activeId) : undefined}
+                      nodeRef={setNode(key)}
+                      onClick={guardClick(() => onGo('servers'))}
+                      onPortDown={startDrag('server', s.id)}
+                    />
+                  </div>
                 );
               })}
-              {orderedServers.length === 0 && <div className="topo-col-empty">서버 없음</div>}
+              {orderedAccounts.map((a) => {
+                const key = `acc:${a.id}`;
+                const p = effectivePos(key);
+                return (
+                  <div
+                    key={a.id}
+                    className={`topo-place acc ${dragging?.key === key ? 'dragging' : ''}`.trim()}
+                    style={{ left: p.x, top: p.y, width: NODE_W }}
+                    onPointerDown={startNodeDrag('acc', a.id)}
+                  >
+                    <AccountNode
+                      id={a.id}
+                      email={a.email}
+                      status={a.status}
+                      provider={a.provider}
+                      nodeRef={setNode(key)}
+                      onClick={guardClick(() => onGo('accounts'))}
+                      onPortDown={startDrag('account', a.id)}
+                    />
+                  </div>
+                );
+              })}
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="topo-col topo-servers">
+                <div className="topo-col-head">서버 <span className="topo-col-count">{orderedServers.length}</span></div>
+                <div className="topo-srv-grid">
+                  {orderedServers.map((s) => {
+                    const activeId = activeByServer.get(s.id);
+                    return (
+                      <ServerNode
+                        key={s.id}
+                        tenantId={tenantId}
+                        server={s}
+                        activeEmail={activeId ? emailOf.get(activeId) : undefined}
+                        nodeRef={setNode(`srv:${s.id}`)}
+                        onClick={() => onGo('servers')}
+                        onPortDown={startDrag('server', s.id)}
+                      />
+                    );
+                  })}
+                  {orderedServers.length === 0 && <div className="topo-col-empty">서버 없음</div>}
+                </div>
+              </div>
 
-          <div className="topo-col topo-accounts">
-            <div className="topo-col-head">계정 <span className="topo-col-count">{orderedAccounts.length}</span></div>
-            <div className="topo-acc-grid">
-              {orderedAccounts.map((a) => (
-                <AccountNode
-                  key={a.id}
-                  id={a.id}
-                  email={a.email}
-                  status={a.status}
-                  provider={a.provider}
-                  nodeRef={setNode(`acc:${a.id}`)}
-                  onClick={() => onGo('accounts')}
-                  onPortDown={startDrag('account', a.id)}
-                />
-              ))}
-              {orderedAccounts.length === 0 && <div className="topo-col-empty">계정 없음</div>}
-            </div>
-          </div>
+              <div className="topo-col topo-accounts">
+                <div className="topo-col-head">계정 <span className="topo-col-count">{orderedAccounts.length}</span></div>
+                <div className="topo-acc-grid">
+                  {orderedAccounts.map((a) => (
+                    <AccountNode
+                      key={a.id}
+                      id={a.id}
+                      email={a.email}
+                      status={a.status}
+                      provider={a.provider}
+                      nodeRef={setNode(`acc:${a.id}`)}
+                      onClick={() => onGo('accounts')}
+                      onPortDown={startDrag('account', a.id)}
+                    />
+                  ))}
+                  {orderedAccounts.length === 0 && <div className="topo-col-empty">계정 없음</div>}
+                </div>
+              </div>
+            </>
+          )}
 
           {selectedEdge && selectedAssignment && (
             <EdgePopover
