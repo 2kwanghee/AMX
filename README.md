@@ -13,6 +13,7 @@
 | 문서 | 무엇인가 |
 |---|---|
 | [docs/OVERVIEW.md](docs/OVERVIEW.md) | 전문용어 없이 프로젝트 전체를 그리는 사람용 안내서. 처음 왔거나 길을 잃었을 때 |
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | 모듈별 기동 방법. 한 명령 풀스택부터 서버·웹·에이전트·tsamx 개별 기동, 시험 실행, 문서 지도 |
 | [docs/AMX-DESIGN.md](docs/AMX-DESIGN.md) | 설계의 원본이자 현행 동작의 **최종 기준(SSOT)**. 정확한 사양이 필요할 때 |
 | [docs/PROD-GUIDE.md](docs/PROD-GUIDE.md) | 실제 장비에 올려 운영하는 절차. 중앙 서버·에이전트 설치부터 제거까지 |
 | [docs/DEV-TEST-GUIDE.md](docs/DEV-TEST-GUIDE.md) | 개발·시험 환경이 운영과 다른 부분(평문 기동 등)만 모은 차이분 |
