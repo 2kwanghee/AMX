@@ -401,7 +401,8 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
 | `POST /api/v1/tenants/{tid}/accounts:oauth-start` / `:oauth-complete` | 중앙 OAuth 등록 플로우 (§5.5): authorize URL 발급 / 코드 교환·저장 |
 | `POST/GET /api/v1/tenants/{tid}/servers` · `GET/PATCH/DELETE …/{sid}` | AMA 서버 CRUD |
 | `POST /api/v1/tenants/{tid}/servers/{sid}/enroll-token` | 1회성 등록 토큰 발급 |
-| `POST/GET /api/v1/tenants/{tid}/assignments` | 배정 생성·목록 (예: 10개 중 A:3 / B:5 / C:2) |
+| `POST/GET /api/v1/tenants/{tid}/assignments` · `DELETE …/{id}` | 배정 생성·목록 (예: 10개 중 A:3 / B:5 / C:2) · detached 이력 행 삭제(그 외 상태는 409, §5.2) |
+| `GET /api/v1/tenants/{tid}/audit-logs` | 변경성 관리 액션 감사 로그 조회 (§5.6.4) |
 | `POST …/assignments/{id}:deliver` / `:recall` / `:activate` / `:deactivate` / `:recover` | 상태 전이 (`:recover`는 quarantined → active 복귀, §5.2) |
 | `POST …/assignments/{id}:switch-now` | 수동 스위칭 (특정 계정으로) |
 | `POST …/servers/{sid}:switch-mode` | auto ↔ manual 전환 |
@@ -662,6 +663,32 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
   관리자가 ack/resolve). §5.6.2 웹훅 프리미티브(`open_event_alert`)를 통과하므로 아웃박스에도
   스테이징돼 웹훅으로 함께 나간다(알림이 목적). detail에는 마스킹본·해시·세션·호스트만
   담고 원문은 저장하지 않는다.
+
+#### 5.6.4 관리 감사 로그 (콘솔 테스트 갭 G53)
+
+관리자가 변경성 REST를 호출하면 응답 직후 `admin_audit_logs`에 한 행을 남긴다. 콘솔 테스트에서
+"누가 언제 무엇을 바꿨는가"를 되짚을 수단이 없다는 갭이 드러나 넣은 장치다. 기록은 미들웨어
+(`app/api/audit.py`)가 맡고, 라우터·서비스는 손대지 않는다.
+
+- **대상과 제외**: POST·PATCH·PUT·DELETE만 남기고 GET류 조회는 남기지 않는다. 세 경로는 뺀다 —
+  비밀번호가 실리는 `/auth/login`, 정적 토큰으로 인증하는 무인 에이전트 발 `/ingest/danger-command`,
+  무인증 헬스체크 `/healthz`. 실패한 요청도 그 상태 코드와 함께 남긴다. 4xx·5xx가 오히려 감사
+  가치가 높기 때문이다.
+- **한 행에 담는 것**: `tenant_id`(전역 액션은 NULL), `admin_email`(세션 principal에서 —
+  루트 토큰은 `<root-token>` 센티널), `method`, `path`(실제 경로), `action`(매칭된 라우트
+  템플릿 `"{METHOD} {route path}"`), `target_id`(경로 끝 UUID 세그먼트, 있으면), `status_code`,
+  `created_at`. **요청 바디는 저장하지 않는다** — 자격증명 세트(`POST …/accounts`)와 인가 코드
+  (`:oauth-complete`)가 그 안에 실려, §7이 금하는 시크릿 잔존을 만든다. 마스킹 저장이 필요해지면
+  별도 설계로 다룬다.
+- **테넌트 삭제와 무관하게 보존**: `tenant_id`는 FK를 걸지 않는다. 전역 액션(테넌트 생성·관리자
+  CRUD)은 매달 테넌트가 없고, 감사 이력은 대상 테넌트가 지워진 뒤에도 남아야 한다. CASCADE로
+  이력이 함께 사라지면 감사의 의미가 없다.
+- **기록 실패는 요청을 깨지 않는다**: 행 쓰기가 실패하면 경고만 남기고 넘어간다. 감사가 정상
+  동작을 500으로 되돌리는 일은 없어야 한다.
+- **조회**: `GET /api/v1/tenants/{tid}/audit-logs?from&to&limit&pageToken` (TenantScope). 최신순으로
+  돌려주고 `[from, to)` 반열림 구간으로 `created_at`을 거른다. 해당 테넌트 행은 항상 포함하되,
+  전역(`tenant_id` NULL) 행은 global-admin일 때만 함께 준다 — tenant-admin이 자기 테넌트와
+  무관한 액션을 볼 이유가 없다.
 
 ### 5.7 Credential 역동기화 (O9 회전형 대응, **구현 완료** — p2b-cred-resync)
 
