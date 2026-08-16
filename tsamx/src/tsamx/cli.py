@@ -119,7 +119,7 @@ def _warn_if_langfuse_untracked() -> None:
                 "추적하려면 amx 명령을 사용하세요",
                 file=sys.stderr,
             )
-    except OSError:
+    except Exception:  # noqa: BLE001 — 경고는 부가 기능, 어떤 오류도 run 기동을 막지 않는다
         pass
 
 
