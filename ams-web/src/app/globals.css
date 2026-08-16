@@ -777,6 +777,47 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-col-empty { color: var(--canvas-muted); font-size: 12px; padding: 8px 2px; }
 .topo-canvas .topo-node { position: relative; overflow: visible; }
 
+/* -- 자유 배치(P1): 좌 테넌트 고정 + 우 캔버스에 노드 absolute 배치 ---------- */
+.topo-toolbar {
+  display: flex; align-items: center; justify-content: flex-end; gap: 12px;
+  margin: 0 0 12px;
+}
+.topo-toolbar-hint { font-size: 12px; color: var(--canvas-muted); margin-right: auto; }
+.topo-reset {
+  font-size: 12px; padding: 6px 12px; border-radius: 8px;
+  background: var(--canvas-bg-2); border: 1px solid var(--canvas-border); color: var(--canvas-ink);
+  cursor: pointer; transition: border-color .12s, transform .12s;
+}
+/* 전역 button:hover:not(:disabled)(surface-2)를 이기려면 .topo-canvas 접두 + 배경 명시. */
+.topo-canvas .topo-reset:hover { background: var(--canvas-bg-2); border-color: var(--canvas-accent); color: var(--canvas-ink-strong); }
+.topo-reset:focus-visible { outline: 2px solid var(--canvas-accent); outline-offset: 1px; }
+
+.topo-free {
+  position: relative;
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 72px; align-items: stretch;
+}
+.topo-canvas-area {
+  position: relative; z-index: 1; min-width: 0; padding-top: 28px; border-radius: 12px;
+  /* 스냅 격자를 흐린 점 배경으로 — 24px 반복. */
+  background-image: radial-gradient(color-mix(in srgb, var(--canvas-border) 70%, transparent) 1px, transparent 1.4px);
+  background-size: 24px 24px; background-position: 0 28px;
+}
+.topo-band-label {
+  position: absolute; top: 4px; z-index: 2;
+  font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--canvas-muted);
+}
+.topo-place { position: absolute; z-index: 1; touch-action: none; cursor: grab; }
+.topo-place > .topo-node { width: 100%; }
+.topo-place.dragging { z-index: 5; cursor: grabbing; }
+.topo-place.dragging > .topo-node { border-color: var(--canvas-accent); box-shadow: 0 8px 24px rgb(0 0 0 / 0.4); }
+.topo-free.drag-from-server .topo-acc, .topo-free.drag-from-account .topo-srv {
+  border-color: var(--canvas-accent); box-shadow: 0 0 0 2px var(--canvas-accent-soft);
+}
+.topo-free.drag-from-server .topo-acc .topo-port,
+.topo-free.drag-from-account .topo-srv .topo-port { background: var(--canvas-accent); }
+
 /* 테넌트 노드 (세로 사각) */
 .topo-tenants { display: flex; flex-direction: column; }
 .topo-tenant {
