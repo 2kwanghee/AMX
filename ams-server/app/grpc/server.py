@@ -39,6 +39,7 @@ from app.models import Account, AgentCommand, Assignment, Server, UsageSnapshot
 from app.services import (
     alert_webhook,
     alerts,
+    audit,
     billing,
     commands,
     inventory,
@@ -1246,6 +1247,21 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("assignment retention sweep iteration failed", exc_info=False)
+        # Audit retention: a tenth sibling sweep purges admin audit rows older than
+        # AMX_AUDIT_RETENTION_DAYS (G53). Own advisory lock (…0B) and isolated
+        # try/except keep it independent; a no-op unless retention is opt-in (>0).
+        try:
+            audit_purged = await asyncio.to_thread(
+                _sweep_audit_retention_once, session_factory
+            )
+            if audit_purged:
+                _logger.info(
+                    "audit retention sweeper purged %d audit log(s)", audit_purged
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("audit retention sweep iteration failed", exc_info=False)
         # NOTE: 경보 웹훅 드레인은 이 공유 루프에 두지 않는다 — 불량 수신자로 인한 HTTP
         # 지연이 오프라인 탐지·명령 복구를 밀어내지 못하게, 전용 백그라운드 태스크
         # (_alert_webhook_drainer, 자체 주기)로 분리했다. 락 …08은 그대로 유지한다.
@@ -1296,8 +1312,8 @@ async def _alert_webhook_drainer(
 _OFFLINE_SWEEP_LOCK_KEY = 0x414D580F01
 _SENT_SWEEP_LOCK_KEY = 0x414D580F02
 # …03 billing, …04 rollup, …05 snapshot-retention, …07 langfuse-metrics,
-# …08 alert-webhook, …09 langfuse-alerts, …0A assignment-retention (in their
-# own modules).
+# …08 alert-webhook, …09 langfuse-alerts, …0A assignment-retention,
+# …0B audit-retention (in their own modules).
 _WATERMARK_SWEEP_LOCK_KEY = 0x414D580F06
 
 
@@ -1360,6 +1376,14 @@ def _sweep_assignment_retention_once(session_factory: sessionmaker[Session]) -> 
     # detached assignment history (G54); a no-op when retention is disabled.
     with session_factory() as db:
         return inventory.sweep_assignment_retention(db)
+
+
+def _sweep_audit_retention_once(session_factory: sessionmaker[Session]) -> int:
+    # audit.sweep_audit_retention takes its own advisory lock (…0B) and commits
+    # per batch. Purges aged-out admin audit rows (G53); a no-op unless
+    # AMX_AUDIT_RETENTION_DAYS > 0 (default keeps the trail forever).
+    with session_factory() as db:
+        return audit.sweep_audit_retention(db)
 
 
 def _sweep_langfuse_alerts_once(session_factory: sessionmaker[Session]) -> int:

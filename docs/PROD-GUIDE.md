@@ -168,10 +168,13 @@ bash deploy/fullstack-run.sh bootstrap-admin admin@example.com '강한비밀번�
 
 ```
 AMX_ASSIGNMENT_RETENTION_DAYS=90   # detached 행을 이 일수 경과 후 삭제 (기본 90)
+AMX_AUDIT_RETENTION_DAYS=0         # 감사 로그 보존 상한 (기본 0 = 무기한 보존)
 ```
 
-`0` 이하로 두면 자동 청소를 끄고 이력을 모두 남긴다. 삭제 자체는 감사 로그
-(`admin_audit_logs`)에 남으므로 "누가 언제 지웠는가"는 그대로 추적된다.
+`AMX_ASSIGNMENT_RETENTION_DAYS`를 `0` 이하로 두면 배정 이력 청소를 끄고 모두 남긴다.
+삭제 자체는 감사 로그(`admin_audit_logs`)에 남으므로 "누가 언제 지웠는가"는 그대로
+추적된다. 감사 로그는 성격상 기본 무기한 보존이라 `AMX_AUDIT_RETENTION_DAYS` 기본값이
+`0`이며, 규정상 보존 상한이 필요할 때만 양수로 둔다.
 
 ---
 

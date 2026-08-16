@@ -15,7 +15,7 @@ from sqlalchemy import func, select, update
 
 from app.core.auth import ROOT_PRINCIPAL_EMAIL
 from app.models import AdminAuditLog, Assignment
-from app.services import admins, inventory
+from app.services import admins, audit, inventory
 from tests.test_api_crud import make_account, make_server, make_tenant
 
 API = "/api/v1"
@@ -74,6 +74,16 @@ def test_read_and_excluded_paths_are_not_recorded(client, db):
     assert all(r.method not in ("GET", "HEAD", "OPTIONS") for r in rows)
     assert all(r.path != f"{API}/auth/login" for r in rows)
     assert all(r.path != "/healthz" for r in rows)
+
+
+def test_unauthenticated_mutation_is_not_recorded(client, db):
+    # A rejected-before-auth request has no principal; it must leave no trail
+    # (anonymous attempts are an unbounded-growth vector, not audit material).
+    resp = client.post(
+        f"{API}/tenants", json={"name": "anon"}, headers={"Authorization": "Bearer nope"}
+    )
+    assert resp.status_code == 401
+    assert _audit_rows(db) == []
 
 
 def test_audit_write_failure_does_not_break_the_request(client, monkeypatch):
@@ -144,6 +154,49 @@ def test_audit_read_endpoint_itself_is_not_recorded(client, db):
     tid = make_tenant(client, name="no-self-log")
     client.get(f"{API}/tenants/{tid}/audit-logs")
     assert all("audit-logs" not in r.path for r in _audit_rows(db))
+
+
+def test_naive_datetime_bounds_are_coerced_to_utc(client, db):
+    # A bound without a timezone must be accepted and treated as UTC, not depend
+    # on the DB session's timezone.
+    tid = make_tenant(client, name="naive-tz")
+    all_rows = client.get(f"{API}/tenants/{tid}/audit-logs?from=2000-01-01T00:00:00").json()
+    assert len(all_rows["items"]) >= 1  # naive `from` in the past keeps everything
+    empty = client.get(f"{API}/tenants/{tid}/audit-logs?to=2000-01-01T00:00:00").json()
+    assert empty["items"] == []  # naive `to` in the past excludes everything
+
+
+# -- G53: audit retention sweep -----------------------------------------------
+def _age_all_audit_rows(db, *, days):
+    db.execute(
+        update(AdminAuditLog).values(created_at=inventory._now() - timedelta(days=days))
+    )
+    db.commit()
+
+
+def _audit_count(db):
+    db.expire_all()
+    return db.scalar(select(func.count()).select_from(AdminAuditLog))
+
+
+def test_audit_retention_sweep_purges_aged_rows_when_enabled(client, db, monkeypatch):
+    make_tenant(client, name="aud-ret")
+    _age_all_audit_rows(db, days=100)
+    assert _audit_count(db) >= 1
+    monkeypatch.setattr(audit, "get_settings", lambda: SimpleNamespace(audit_retention_days=90))
+    purged = audit.sweep_audit_retention(db)
+    assert purged >= 1
+    assert _audit_count(db) == 0
+
+
+def test_audit_retention_default_zero_keeps_everything(client, db, monkeypatch):
+    make_tenant(client, name="aud-keep")
+    _age_all_audit_rows(db, days=100000)
+    before = _audit_count(db)
+    assert before >= 1
+    monkeypatch.setattr(audit, "get_settings", lambda: SimpleNamespace(audit_retention_days=0))
+    assert audit.sweep_audit_retention(db) == 0
+    assert _audit_count(db) == before
 
 
 # -- G54: detached assignment delete ------------------------------------------

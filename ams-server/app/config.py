@@ -58,6 +58,12 @@ class Settings:
     # from growing without bound. 0 or negative disables the sweep (keep every
     # detached row); the DELETE endpoint remains the manual path either way.
     assignment_retention_days: int = 90
+    # Audit-log retention (console-test gap G53). The sibling sweep (…0B)
+    # batch-deletes admin_audit_logs rows older than this many days. Unlike the
+    # snapshot/assignment sweeps this defaults to 0 = **keep forever**: the audit
+    # trail is a compliance record whose value is precisely its longevity, so a
+    # bounded window is opt-in. Set > 0 only to satisfy an explicit retention cap.
+    audit_retention_days: int = 0
     # Console install-command support. `advertise_host` is the host (or IP) the
     # agent should dial; combined with `grpc_port` it forms the endpoint shown in
     # the enroll-token modal. Absent host → no endpoint (the console renders a
@@ -277,6 +283,7 @@ def load_settings() -> Settings:
         assignment_retention_days=int(
             os.environ.get("AMX_ASSIGNMENT_RETENTION_DAYS", "90")
         ),
+        audit_retention_days=int(os.environ.get("AMX_AUDIT_RETENTION_DAYS", "0")),
         advertise_host=os.environ.get("AMX_ADVERTISE_HOST", "").strip() or None,
         grpc_port=int(os.environ.get("AMX_GRPC_PORT", "50051")),
         ams_pubkey=_derive_ams_pubkey(),

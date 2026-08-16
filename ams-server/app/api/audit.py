@@ -77,7 +77,15 @@ def _record(request: Request, status_code: int) -> None:
         tenant_id = _parse_uuid(path_params.get("tenant_id"))
 
         principal = getattr(request.state, "principal", None)
-        admin_email = principal.email if isinstance(principal, Principal) else None
+        if not isinstance(principal, Principal):
+            # No resolved principal → the request never authenticated (401/403
+            # before require_admin returned). Anonymous attempts are dropped on
+            # purpose: recording every unauthenticated mutation is an
+            # unbounded-growth vector (a probe loop inflates the trail without
+            # bound) and buys little, since intrusion attempts belong to the
+            # access log, not the admin audit trail.
+            return
+        admin_email = principal.email
 
         with get_sessionmaker()() as session:
             session.add(
