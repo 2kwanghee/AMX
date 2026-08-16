@@ -60,9 +60,17 @@ function loadLayout(tenantId: string): Layout {
   try {
     const raw = window.localStorage.getItem(layoutStorageKey(tenantId));
     if (!raw) return {};
-    const parsed = JSON.parse(raw) as { version?: number; nodes?: Layout };
-    if (parsed?.version !== LAYOUT_VERSION || !parsed.nodes) return {};
-    return parsed.nodes;
+    const parsed = JSON.parse(raw) as { version?: number; nodes?: unknown };
+    if (parsed?.version !== LAYOUT_VERSION || !parsed.nodes || typeof parsed.nodes !== 'object') return {};
+    // 값 검증 — {x,y}가 유한수인 항목만 채택(손상·비정상 값은 버림).
+    const out: Layout = {};
+    for (const [k, v] of Object.entries(parsed.nodes as Record<string, unknown>)) {
+      if (v && typeof v === 'object') {
+        const { x, y } = v as { x?: unknown; y?: unknown };
+        if (Number.isFinite(x) && Number.isFinite(y)) out[k] = { x: x as number, y: y as number };
+      }
+    }
+    return out;
   } catch {
     return {};
   }
@@ -142,6 +150,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
 
   // -- 측정 & 상태 ----------------------------------------------------------
   const gridRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Map<string, HTMLElement>>(new Map());
   const [aEdges, setAEdges] = useState<AEdge[]>([]);
   const [mEdges, setMEdges] = useState<MEdge[]>([]);
@@ -177,6 +186,28 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     setDrag(null);
     setLayout(loadLayout(tenantId));
   }, [tenantId, setDrag]);
+
+  // 현재 노드 집합에 없는 저장 키 가지치기. 데이터 로드 후에만 수행(로딩 중
+  // 빈 목록으로 전량 삭제되는 것을 막는다).
+  const nodeIdKey = servers.map((s) => s.id).join(',') + '#' + accounts.map((a) => a.id).join(',');
+  useEffect(() => {
+    if (!serversData || !accountsData) return;
+    const valid = new Set<string>();
+    for (const s of servers) valid.add(`srv:${s.id}`);
+    for (const a of accounts) valid.add(`acc:${a.id}`);
+    setLayout((prev) => {
+      let changed = false;
+      const next: Layout = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (valid.has(k)) next[k] = v;
+        else changed = true;
+      }
+      if (!changed) return prev;
+      saveLayout(tenantId, next);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, serversData, accountsData, nodeIdKey]);
 
   // 좌표 없는 노드의 자동 안착 위치 — 현행 정렬 순서를 열별로 세로 배치.
   const autoPos = useMemo(() => {
@@ -261,6 +292,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     const startY = e.clientY;
     const origin = effectivePos(key);
     let moved = false;
+    let last: Pos | null = null;
     suppressClickRef.current = false;
 
     const move = (ev: PointerEvent) => {
@@ -269,7 +301,14 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
       if (!moved && Math.hypot(dx, dy) > 4) moved = true;
       if (!moved) return;
       suppressClickRef.current = true;
-      setDrag({ key, pos: { x: Math.max(0, snap(origin.x + dx)), y: Math.max(0, snap(origin.y + dy)) } });
+      // x는 [0, 캔버스폭−노드폭]로 클램프(가로 이탈 방지, 캔버스 확장 안 함).
+      const maxX = Math.max(0, (canvasRef.current?.clientWidth ?? Number.POSITIVE_INFINITY) - NODE_W);
+      const nx = Math.min(maxX, Math.max(0, snap(origin.x + dx)));
+      const ny = Math.max(0, snap(origin.y + dy));
+      // 스냅 좌표가 직전과 같으면 리렌더·measure 리플로 스킵.
+      if (last && last.x === nx && last.y === ny) return;
+      last = { x: nx, y: ny };
+      setDrag({ key, pos: last });
     };
     const finish = (commit: boolean) => {
       window.removeEventListener('pointermove', move);
@@ -462,7 +501,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
       {hasContent && freeMode && (
         <div className="topo-toolbar">
           <span className="topo-toolbar-hint">노드를 끌어 배치 · 24px 격자 스냅</span>
-          <button type="button" className="topo-reset" onClick={resetLayout}>정렬 초기화</button>
+          <button type="button" className="topo-reset" title="자동 배치로 되돌립니다" onClick={resetLayout}>정렬 초기화</button>
         </div>
       )}
 
@@ -506,7 +545,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
 
           {freeMode ? (
             // 자유 배치: 서버·계정 노드를 캔버스에 absolute로 배치. 좌표는 JS 상태 소유.
-            <div className="topo-canvas-area" style={{ minHeight: canvasH || undefined }}>
+            <div className="topo-canvas-area" ref={canvasRef} style={{ minHeight: canvasH || undefined }}>
               <div className="topo-band-label" style={{ left: SERVER_X }}>서버 <span className="topo-col-count">{orderedServers.length}</span></div>
               <div className="topo-band-label" style={{ left: ACCOUNT_X }}>계정 <span className="topo-col-count">{orderedAccounts.length}</span></div>
               {orderedServers.map((s) => {
