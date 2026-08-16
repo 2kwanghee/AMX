@@ -98,6 +98,11 @@ func TestSelfUpdateBinaryHappyPath(t *testing.T) {
 	if string(got) != "NEW-BINARY" {
 		t.Fatalf("installed binary = %q, want NEW-BINARY", got)
 	}
+	// Package (binary) installs have no checkout to build tsamx from — the tsamx
+	// reinstall is a git-mode-only step and must not fire here.
+	if f.ran("uv tool install") {
+		t.Fatalf("binary mode must not reinstall tsamx (ran %v)", f.calls)
+	}
 }
 
 func TestSelfUpdateBinaryRejectsForgedAndMalformedSignature(t *testing.T) {
