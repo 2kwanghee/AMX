@@ -386,6 +386,69 @@ def test_unknown_usage_type_ignored(app_env, monkeypatch):
     assert (m.output_tokens, m.cache_read_tokens, m.cache_creation_tokens) == (0, 0, 0)
 
 
+# -- row_limit 상한 명시 (G37) ------------------------------------------------
+def _bare_settings():
+    return replace(
+        _real_get_settings(),
+        langfuse_base_url=_BASE,
+        langfuse_public_key=_PK,
+        langfuse_secret_key=_SK,
+    )
+
+
+def test_every_query_pins_row_limit_config(app_env):
+    # 페이지네이션이 없는 Metrics API의 기본 100행 무언 잘림을 막기 위해 모든 쿼리가
+    # config.row_limit=1000을 실어야 한다. _query_metrics 단일 통로에서 주입된다.
+    seen = {}
+
+    def handler(request):
+        q = json.loads(request.url.params["query"])
+        seen["config"] = q.get("config")
+        return httpx.Response(200, json=_payload([]))
+
+    data = langfuse_metrics._query_metrics(
+        _mock_client(handler), _bare_settings(), {"view": "observations"}
+    )
+    assert data == []
+    assert seen["config"] == {"row_limit": 1000}
+
+
+def test_row_limit_reached_warns_but_loads_rows(app_env, monkeypatch):
+    # 응답 행 수가 상한과 같으면 잘림 가능성 경고를 남기되, 받은 행은 그대로 반환한다.
+    monkeypatch.setattr(langfuse_metrics, "_ROW_LIMIT", 2)
+    logger = logging.getLogger("ams.langfuse")
+    handler_rec = _RecordCollector()
+    logger.addHandler(handler_rec)
+    prev_level, prev_disabled = logger.level, logger.disabled
+    logger.setLevel(logging.DEBUG)
+    logger.disabled = False
+    try:
+        def at_cap(request):
+            return httpx.Response(200, json=_payload(
+                [{"providedModelName": "a"}, {"providedModelName": "b"}]))
+
+        def under_cap(request):
+            return httpx.Response(200, json=_payload([{"providedModelName": "a"}]))
+
+        capped = langfuse_metrics._query_metrics(
+            _mock_client(at_cap), _bare_settings(),
+            {"view": "observations", "dimensions": [{"field": "providedModelName"}]},
+        )
+        under = langfuse_metrics._query_metrics(
+            _mock_client(under_cap), _bare_settings(), {"view": "observations"}
+        )
+    finally:
+        logger.removeHandler(handler_rec)
+        logger.setLevel(prev_level)
+        logger.disabled = prev_disabled
+
+    assert len(capped) == 2  # 상한 도달 시에도 받은 행은 정상 반환
+    assert len(under) == 1
+    warnings = [m for m in handler_rec.messages if "row_limit" in m]
+    assert len(warnings) == 1  # 상한 미만(1행)에서는 경고 없음
+    assert "결과가 잘렸을 수 있음" in warnings[0]
+
+
 # -- 마지막 정상 스윕 마커 (langfuse_stale 판정 소스) --------------------------
 def test_sync_marker_advances_on_clean_tick(app_env, monkeypatch):
     # 정상 왕복이면 데이터가 없어도(무활동) 마커가 _NOW로 상향된다.
