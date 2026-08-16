@@ -439,7 +439,9 @@ claude -p "작업 내용"  # 배치
 
 이 전역 `export`·`alias`는 러너 **전용** 서버 전제다. 개인 `~/.claude`와 러너를 한
 대에서 겸용하는 PC라면 이 방식을 쓰지 말고(개인 `claude`까지 러너로 끌려간다)
-`docs/DEPLOYMENT-RUNNER.md` §9의 `amx` 명령을 쓴다.
+`docs/DEPLOYMENT-RUNNER.md` §9의 `amx` 명령을 쓴다. 세션 실행 alias(전용/겸용)와
+풀 조작 alias(`tsclaude`·`tsamx-amx`·`amx-list`)를 한 표로 본 정리는 같은 §9의
+"셸 alias 총정리"다.
 
 자동화(웹훅·cron·systemd) 진입점도 `amx-claude`를 호출하게 한다.
 래퍼를 우회한 직접 실행까지 차단하려면 `deploy/install-runner-guard.sh`

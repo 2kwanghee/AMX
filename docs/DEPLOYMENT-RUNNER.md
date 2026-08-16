@@ -513,3 +513,57 @@ Code가 작업 디렉터리 기준으로 읽으므로, `claude`로 열든 `amx`�
 그래서 `tsamx run`은 러너 홈에 `amx-langfuse.env`가 있으면(=이 호스트가 추적 대상이면)
 "이 세션은 Langfuse 추적에서 제외됩니다 — 추적하려면 amx 명령을 사용하세요"를 stderr로
 한 줄 띄운다. 세션 자체는 그대로 뜨고, 경고는 추적 공백을 조용히 넘기지 않으려는 안내다.
+
+### 셸 alias 총정리 (세션 실행 vs 풀 조작)
+
+호스트를 설정할 때 alias는 두 축으로 갈린다. 하나는 **claude 세션을 어떻게 띄우느냐**(전용
+서버냐 겸용 PC냐), 다른 하나는 **러너 풀을 어떻게 조회·전환하느냐**다. 앞의 §4·§8과 위
+"amx 명령"에 흩어진 관례를 여기 한 표로 모은다. 설정 위치는 각자의 `~/.bashrc`·`~/.zshrc`다.
+
+**축 1 — claude 세션 실행.** 전용 서버와 겸용 PC의 규칙이 정반대라 한 대에서 섞지 않는다.
+
+- **러너 전용 서버**(PROD-GUIDE §8-2 관례): 그 호스트에 개인 프로필이 없으므로 `claude`가 곧
+  러너다. 전역으로 홈을 고정하고 `claude`를 래퍼에 건다.
+
+  ```sh
+  export CLAUDE_CONFIG_DIR=~/.claude-amx        # 셸 전역
+  alias claude="$HOME/AMX/deploy/amx-claude"    # claude = 래퍼
+  ```
+
+- **겸용 PC**: 전역 `export`도, `claude` alias도 걸지 않는다 — 걸면 개인 세션까지 러너
+  프로필로 끌려가고 deliver 락에 묶인다(위 "러너 전용 서버와 겸용 PC는 설정이 다르다"). 개인
+  `claude`는 손대지 말고, 러너로 띄울 때만 `amx`(#81·#89로 설치)를 쓴다. `amx`가 홈만 러너
+  프로필로 갈아 끼운 뒤 `amx-claude` 래퍼로 넘긴다.
+
+**축 2 — 러너 풀 조회·전환.** 세션 실행과 별개로, `tsamx`(계정 목록·전환·상태)는 러너
+프로필(`~/.claude-amx`)을 봐야 콘솔이 배분한 계정과 같은 뷰가 나온다. 매번 `CLAUDE_CONFIG_DIR`을
+앞에 붙이는 대신 셋 중 하나를 쓴다 — 모두 같은 프로필을 가리키므로 결과가 일치한다.
+
+- **`tsclaude`(권장, 자동 설치)**: `deploy/agent-setup.sh install`이 설치 시점의 `--config-dir`
+  값을 각인해 `~/.local/bin/tsclaude`를 만든다(§8-1). 설치된 서버에서는 별도 alias 없이 바로
+  쓴다.
+
+  ```sh
+  tsclaude list          # 배분 계정 목록 + (active) 표시
+  tsclaude status        # 현재 활성 계정·한도
+  tsclaude switch 2      # 2번 계정으로 전환
+  ```
+
+- **`tsamx-amx`(수동 alias)**: git 클론 없이 tsamx만 설치한 장비 등 `tsclaude`가 없을 때는
+  같은 동작을 alias로 만든다.
+
+  ```sh
+  alias tsamx-amx='CLAUDE_CONFIG_DIR=~/.claude-amx tsamx'
+  tsamx-amx list        # tsclaude list 와 동일
+  tsamx-amx status
+  tsamx-amx switch 2
+  ```
+
+- **`amx-list`(웹 설치가이드 축약)**: 콘솔의 설치가이드 패널(SetupGuidePanel)이 겸용 PC용으로
+  권하는 `alias amx-list='CLAUDE_CONFIG_DIR=~/.claude-amx tsamx list'`는 위 둘의 **조회 전용**
+  축약이다. `amx-list` = `tsclaude list` = `tsamx-amx list`로 같은 목록을 본다. 그 패널은
+  세션용 `amx-claude` alias도 함께 안내하는데, 이는 축 1의 겸용 PC 경로와 같은 목적이다.
+
+정리하면 이름이 갈리는 이유는 설치 방식 차이일 뿐이다. 세션은 전용 서버 `claude`(alias) 또는
+겸용 PC `amx`로, 풀 조작은 `tsclaude`(자동 설치)·`tsamx-amx`(수동)·`amx-list`(조회 축약) 중
+호스트에 있는 것으로 한다. 자동 러너(AMA)는 이 alias들과 무관하게 데몬이 직접 tsamx를 호출한다.
