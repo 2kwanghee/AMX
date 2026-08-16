@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -21,8 +22,10 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.core import crypto, kek
 from app.core.errors import bad_request, conflict, not_found
+from app.db import try_advisory_xact_lock as _try_advisory_xact_lock
 from app.models import (
     Account,
     Admin,
@@ -47,6 +50,19 @@ _ACTIVE_ASSIGNMENT_STATES = (
     "quarantined",
     "recalling",
 )
+
+
+_logger = logging.getLogger(__name__)
+
+# Assignment-history retention sweep (console-test gap G54). Its own advisory
+# lock key, next after the alert-webhook (…08) and langfuse-alert (…09) sweeps,
+# so one instance owning the purge for a tick never blocks the others.
+_ASSIGNMENT_RETENTION_SWEEP_LOCK_KEY = 0x414D580F0A
+# Rows deleted per statement — the purge loops fixed-size batches (never one bulk
+# DELETE) so a first run over a large backlog never pins a table-wide row-lock
+# set in one long transaction; each batch commits on its own (snapshot-retention
+# convention, usage_cost.sweep_snapshot_retention).
+_ASSIGNMENT_RETENTION_BATCH = 5000
 
 
 def _now() -> datetime:
@@ -869,3 +885,72 @@ def update_assignment(
     db.commit()
     db.refresh(assignment)
     return assignment
+
+
+def delete_assignment(db: Session, tenant_id: uuid.UUID, assignment_id: uuid.UUID) -> None:
+    """Delete a ``detached`` assignment history row (console-test gap G54).
+
+    Only ``detached`` is deletable: any other state is a live assignment whose
+    account/server the row still governs, and removing it would drop the very
+    invariant the partial unique index (`uq_assignments_active_account`)
+    enforces. A non-detached row is a 409 (``assignment.not_deletable``); recall
+    it to ``detached`` first. The row is deleted outright rather than flagged —
+    the audit trail (`admin_audit_logs`) preserves the record that it was
+    removed, so the assignment table itself need not carry tombstones.
+    """
+    assignment = get_assignment(db, tenant_id, assignment_id)
+    if assignment.state != "detached":
+        raise conflict(
+            "assignment.not_deletable",
+            "Only a detached assignment can be deleted; recall it first.",
+        )
+    db.delete(assignment)
+    db.commit()
+
+
+def sweep_assignment_retention(db: Session) -> int:
+    """Purge `detached` assignment rows older than the retention window (G54).
+
+    Automatic counterpart to the manual DELETE endpoint: detached rows are pure
+    history (a recalled account, no longer installed anywhere), so those whose
+    `updated_at` has aged past `AMX_ASSIGNMENT_RETENTION_DAYS` are batch-deleted.
+    Only `detached` is ever touched — every live state is left intact, so the
+    partial unique index invariant cannot be affected. `days <= 0` disables the
+    sweep and returns 0. Returns the number of rows deleted.
+
+    Batches commit one at a time, each re-acquiring the transaction-scoped
+    advisory lock the previous commit released; failing to re-acquire means
+    another instance took over this tick, so we yield the remaining batches.
+    """
+    days = get_settings().assignment_retention_days
+    if days <= 0:
+        return 0
+    delete_before = _now() - timedelta(days=days)
+
+    total = 0
+    while True:
+        if not _try_advisory_xact_lock(db, _ASSIGNMENT_RETENTION_SWEEP_LOCK_KEY):
+            break
+        ids = db.execute(
+            select(Assignment.id)
+            .where(
+                Assignment.state == "detached",
+                Assignment.updated_at < delete_before,
+            )
+            .limit(_ASSIGNMENT_RETENTION_BATCH)
+        ).scalars().all()
+        if not ids:
+            db.rollback()  # release the lock; nothing left to delete
+            break
+        db.execute(delete(Assignment).where(Assignment.id.in_(ids)))
+        db.commit()  # releases the advisory lock until the next batch re-takes it
+        total += len(ids)
+        if len(ids) < _ASSIGNMENT_RETENTION_BATCH:
+            break
+    if total:
+        _logger.info(
+            "assignment retention purged %d detached assignment(s) older than %s",
+            total,
+            delete_before.isoformat(),
+        )
+    return total
