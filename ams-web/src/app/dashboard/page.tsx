@@ -165,7 +165,7 @@ export default function Dashboard() {
             <LangfuseUsagePanel tenantId={active} />
           </>
         )}
-        {active && tab === 'audit' && <AuditLogPanel tenantId={active} />}
+        {active && tab === 'audit' && <AuditLogPanel key={active} tenantId={active} />}
         {tab === 'guide' && <SetupGuidePanel />}
       </main>
 

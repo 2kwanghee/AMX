@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, krApiError } from '@/lib/api-client/client';
 import type { AuditLogEntry } from '@/lib/api-client/types';
-import { Icon, LiveDot, TimeCell, markDataArrived } from './common';
+import { Icon, TimeCell, markDataArrived } from './common';
 
 // 감사 로그는 라이브 폴링 대상이 아니다(과거 기록의 추적). 필터·'더 보기'로만
 // 새로 읽고, 폴링은 두지 않아 상황판·사용량 패널의 폴링 총량을 늘리지 않는다.
@@ -41,9 +41,15 @@ export function AuditLogPanel({ tenantId }: { tenantId: string }) {
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
 
+  // 요청 경합 가드 — 날짜 변경(첫 페이지 재조회)과 '더 보기'가 교차하면 늦게 온
+  // 응답이 stale 항목을 섞을 수 있다. 매 요청에 증가하는 세대(reqId)를 붙이고,
+  // 응답 적용 직전에 최신 세대인지 확인해 뒤늦은 응답은 통째로 버린다.
+  const reqIdRef = useRef(0);
+
   // 첫 페이지(필터 변경 시 초기화) / 다음 페이지(pageToken 이어받기)를 함께 처리.
   const load = useCallback(
     async (pageToken?: string) => {
+      const myReq = ++reqIdRef.current;
       setLoading(true);
       setError('');
       try {
@@ -53,15 +59,17 @@ export function AuditLogPanel({ tenantId }: { tenantId: string }) {
           limit: PAGE_SIZE,
           pageToken,
         });
+        if (myReq !== reqIdRef.current) return; // 뒤늦은 응답 — 무시
         const rows = res.items ?? [];
         setItems((prev) => (pageToken ? [...prev, ...rows] : rows));
         setNextToken(res.pageInfo?.nextPageToken || undefined);
         setLoaded(true);
         markDataArrived();
       } catch (e) {
+        if (myReq !== reqIdRef.current) return;
         setError(krApiError(e));
       } finally {
-        setLoading(false);
+        if (myReq === reqIdRef.current) setLoading(false);
       }
     },
     [tenantId, from, to],
@@ -77,7 +85,7 @@ export function AuditLogPanel({ tenantId }: { tenantId: string }) {
   return (
     <div className="panel">
       <div className="panel-head">
-        <h2>감사 로그<LiveDot /></h2>
+        <h2>감사 로그</h2>
         <div className="actions">
           <label className="muted" style={{ fontSize: 12 }}>
             시작
