@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -414,3 +415,45 @@ def test_sync_marker_not_advanced_on_error(app_env, monkeypatch):
     assert n == 0
     with _sm() as db:
         assert langfuse_metrics.last_metrics_sync_at(db) is None
+
+
+class _RecordCollector(logging.Handler):
+    """Captures ams.langfuse messages directly, independent of caplog quirks
+    (alembic's fileConfig disables existing loggers — see test_billing.py)."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+# -- 미지 usageType 경고는 프로세스 수명 동안 값별 1회만 (G38) ------------------
+def test_unknown_usage_type_warning_suppressed_per_value(monkeypatch):
+    # 프로세스-로컬 seen set을 비워 다른 테스트의 잔여 상태와 격리한다.
+    monkeypatch.setattr(langfuse_metrics, "_WARNED_UNKNOWN_USAGE_TYPES", set())
+    logger = logging.getLogger("ams.langfuse")
+    handler = _RecordCollector()
+    logger.addHandler(handler)
+    prev_level, prev_disabled = logger.level, logger.disabled
+    logger.setLevel(logging.DEBUG)
+    logger.disabled = False
+    try:
+        tenant_id = uuid.uuid4()
+        row_a = {"usageType": "brand_new_type", "sum_usageByType": 1, "count_count": 1}
+        row_b = {"usageType": "another_type", "sum_usageByType": 1, "count_count": 1}
+        # 같은 값이 두 번 등장(같은/다음 스윕 모사) → 경고 1회. 다른 값은 각각 1회.
+        langfuse_metrics._assemble(tenant_id, _TODAY, "model", "m", [row_a])
+        langfuse_metrics._assemble(tenant_id, _TODAY, "model", "m", [row_a])
+        langfuse_metrics._assemble(tenant_id, _TODAY, "user", "u", [row_b])
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prev_level)
+        logger.disabled = prev_disabled
+
+    warnings = [m for m in handler.messages if "unknown usageType" in m]
+    assert len(warnings) == 2
+    assert sum("brand_new_type" in m for m in warnings) == 1
+    assert sum("another_type" in m for m in warnings) == 1
+    assert "이후 동일 값 경고는 억제됨" in warnings[0]
