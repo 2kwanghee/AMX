@@ -8386,3 +8386,134 @@ class TestDisableEnableAccount:
         assert rows[2].get("disabled") is True
         # Additive: absent (not False) on enabled rows.
         assert "disabled" not in rows[1]
+
+
+class TestRemoveInvalidatesLiveLogin:
+    """G46: `tsamx remove --yes` (the AMS non-interactive recall path) of the
+    account holding the live login must not leave the recalled account usable on
+    the host. Ownership is decided uuid-first; every non-AMS caller (TUI,
+    menubar, interactive prompt) is unaffected."""
+
+    def _seed(self, temp_home, live, accounts, active_num):
+        """Write the live login ``live`` (``(email, uuid, org)``) and a pool of
+        ``accounts`` (each ``(num, email, uuid, org)``)."""
+        live_email, live_uuid, live_org = live
+        config = {
+            "oauthAccount": {
+                "emailAddress": live_email,
+                "accountUuid": live_uuid,
+                "organizationUuid": live_org,
+                "organizationName": "",
+            }
+        }
+        (temp_home / ".claude.json").write_text(json.dumps(config))
+        cred_path = temp_home / ".claude" / ".credentials.json"
+        cred_path.write_text(json.dumps({"claudeAiOauth": {"refreshToken": "r"}}))
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        data = switcher._get_sequence_data()
+        for num, email, uuid, org in accounts:
+            data["accounts"][str(num)] = {
+                "email": email,
+                "uuid": uuid,
+                "organizationUuid": org,
+                "organizationName": "",
+                "added": "2024-01-01T00:00:00Z",
+            }
+        data["sequence"] = [num for num, *_ in accounts]
+        data["activeAccountNumber"] = active_num
+        switcher._write_json(switcher.sequence_file, data)
+        return switcher, cred_path
+
+    def test_uuid_match_invalidates_live_login(self, temp_home):
+        switcher, cred = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", ""),
+            [(1, "khee@x.com", "U1", ""),
+             (2, "modarra9@x.com", "U2", ""),
+             (3, "yunsic@x.com", "U3", "")],
+            1,
+        )
+        switcher.remove_account("1", assume_yes=True, invalidate_live=True)
+        assert not cred.exists()
+        cfg = json.loads((temp_home / ".claude.json").read_text())
+        assert "oauthAccount" not in cfg
+
+    def test_org_divergence_still_invalidates_by_uuid(self, temp_home):
+        """Original G46 scenario: the live config carries an organizationUuid the
+        slot record lacks (AMS stages personal, uuid preserved). The (email, org)
+        active-detection misses the slot, but the uuid match still invalidates."""
+        switcher, cred = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", "org-live-9"),
+            [(1, "khee@x.com", "U1", ""), (2, "modarra9@x.com", "U2", "")],
+            1,
+        )
+        switcher.remove_account("1", assume_yes=True, invalidate_live=True)
+        assert not cred.exists()
+        cfg = json.loads((temp_home / ".claude.json").read_text())
+        assert "oauthAccount" not in cfg
+
+    def test_sibling_slot_by_number_does_not_invalidate(self, temp_home):
+        """Adversary sibling attack: slot-1 and slot-2 share an email across orgs.
+        Removing slot-1 by NUMBER while slot-2 holds the live login must NOT log
+        slot-2 out — email would misfire, uuid does not."""
+        switcher, cred = self._seed(
+            temp_home,
+            ("khee@x.com", "U2", "org-B"),           # live == slot-2
+            [(1, "khee@x.com", "U1", "org-A"),
+             (2, "khee@x.com", "U2", "org-B")],
+            2,
+        )
+        switcher.remove_account("1", assume_yes=True, invalidate_live=True)
+        assert cred.exists()
+        cfg = json.loads((temp_home / ".claude.json").read_text())
+        assert cfg.get("oauthAccount", {}).get("accountUuid") == "U2"
+
+    def test_slot_without_uuid_skips_and_warns(self, temp_home):
+        """Fail-safe: a slot with no stored uuid cannot prove ownership, so the
+        live login is left in place and a warning is logged rather than risking a
+        wrong-account logout."""
+        switcher, cred = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", ""),
+            [(1, "khee@x.com", "", ""), (2, "modarra9@x.com", "U2", "")],
+            1,
+        )
+        with patch.object(switcher._logger, "warning") as warn:
+            switcher.remove_account("1", assume_yes=True, invalidate_live=True)
+        assert cred.exists()
+        cfg = json.loads((temp_home / ".claude.json").read_text())
+        assert cfg.get("oauthAccount", {}).get("accountUuid") == "U1"
+        assert warn.called
+        assert "uuid" in " ".join(str(c) for c in warn.call_args[0]).lower()
+
+    def test_tui_path_keeps_live_login(self, temp_home):
+        """TUI/menubar removal: assume_yes=True but invalidate_live defaults False
+        — live login untouched (behavior unchanged)."""
+        switcher, cred = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", ""),
+            [(1, "khee@x.com", "U1", ""), (2, "modarra9@x.com", "U2", "")],
+            1,
+        )
+        switcher.remove_account("1", assume_yes=True)  # invalidate_live default False
+        assert cred.exists()
+        cfg = json.loads((temp_home / ".claude.json").read_text())
+        assert cfg.get("oauthAccount", {}).get("accountUuid") == "U1"
+
+    def test_interactive_path_keeps_live_login(self, temp_home):
+        """Human CLI prompt: neither assume_yes nor invalidate_live — unchanged."""
+        switcher, cred = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", ""),
+            [(1, "khee@x.com", "U1", ""), (2, "modarra9@x.com", "U2", "")],
+            1,
+        )
+        with patch("builtins.input", return_value="y"):
+            switcher.remove_account("1")
+        assert cred.exists()
+        cfg = json.loads((temp_home / ".claude.json").read_text())
+        assert cfg.get("oauthAccount", {}).get("accountUuid") == "U1"
+

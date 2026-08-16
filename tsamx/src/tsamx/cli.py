@@ -1273,7 +1273,11 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 slot=args.slot,
             )
         elif args.remove_account:
-            switcher.remove_account(args.remove_account, assume_yes=args.yes)
+            switcher.remove_account(
+                args.remove_account,
+                assume_yes=args.yes,
+                invalidate_live=args.yes,
+            )
         elif args.disable_account is not None:
             switcher.set_account_disabled(args.disable_account, True)
         elif args.enable_account is not None:
