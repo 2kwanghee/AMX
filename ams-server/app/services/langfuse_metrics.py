@@ -77,6 +77,14 @@ _LANGFUSE_SWEEP_LOCK_KEY = 0x414D580F07
 
 _METRICS_PATH = "/api/public/v2/metrics"
 
+# Metrics API row cap. The API defaults to config.row_limit=100 (max 1000) and has
+# NO pagination, so every query MUST pin the max or the grouped model axis
+# (providedModelName × usageType) is silently truncated. 1000 rows ÷ 5 usageType
+# values ≈ 200 distinct models per day — ample headroom. A response whose length
+# reaches this cap is logged as possibly-truncated (see _query_metrics); the rows
+# received are still loaded normally.
+_ROW_LIMIT = 1000
+
 # billing_cursors 관례를 재사용한 "마지막 정상 스윕" 마커의 kind. langfuse_stale 경보가
 # 롤업 max(updated_at)(무활동 주말이면 오발) 대신 이 마커의 신선도를 판정 소스로 쓴다.
 _METRICS_SYNC_CURSOR_KIND = "langfuse_metrics_sync"
@@ -139,7 +147,14 @@ def _int(row: dict, key: str) -> int:
 
 
 def _query_metrics(client: httpx.Client, settings, query: dict) -> list[dict]:
-    """One Metrics API call. Raises httpx.HTTPError on transport or >=400 status."""
+    """One Metrics API call. Raises httpx.HTTPError on transport or >=400 status.
+
+    Pins ``config.row_limit`` to the API max on every query (single choke point for
+    the model, user and latency axes) because the Metrics API defaults to 100 rows
+    and has no pagination. If the response length reaches the cap the result may be
+    truncated — logged as a warning — but the received rows are returned as usual.
+    """
+    query = {**query, "config": {"row_limit": _ROW_LIMIT}}
     response = client.get(
         settings.langfuse_base_url + _METRICS_PATH,
         params={"query": json.dumps(query)},
@@ -148,7 +163,16 @@ def _query_metrics(client: httpx.Client, settings, query: dict) -> list[dict]:
     )
     response.raise_for_status()
     body = response.json()
-    return body.get("data", []) if isinstance(body, dict) else []
+    data = body.get("data", []) if isinstance(body, dict) else []
+    if len(data) >= _ROW_LIMIT:
+        _logger.warning(
+            "langfuse metrics: 응답 행 수가 row_limit(%d)에 도달 (view=%s dims=%s) — "
+            "결과가 잘렸을 수 있음; 받은 행은 정상 적재",
+            _ROW_LIMIT,
+            query.get("view"),
+            [d.get("field") for d in query.get("dimensions", [])],
+        )
+    return data
 
 
 def _base_query(from_ts: str, to_ts: str) -> dict:
