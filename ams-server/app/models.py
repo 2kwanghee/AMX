@@ -781,6 +781,53 @@ class BillingEvent(Base):
     )
 
 
+class AdminAuditLog(Base):
+    """Append-only trail of every mutating admin REST call (console-test gap G53).
+
+    One row per POST/PATCH/DELETE that reaches the API, written by the audit
+    middleware (``app.api.audit``) *after* the response so the real
+    ``status_code`` is recorded — a rejected 4xx/5xx is logged exactly like a
+    successful 2xx, since "who tried to do what" is the point.
+
+    ``tenant_id`` is nullable and carries **no** foreign key on purpose: a
+    global action (e.g. ``POST /tenants``, an admin CRUD call) belongs to no
+    tenant, and the trail must outlive the tenant it references — deleting a
+    tenant must never cascade its audit history away. ``admin_email`` is the
+    caller's identity (``Principal.email``; the root token stamps the
+    ``ROOT_PRINCIPAL_EMAIL`` sentinel), NULL only when the request failed auth
+    before a principal was resolved.
+
+    The request body is deliberately never stored: it carries credential sets
+    (``POST /accounts``) and authorization codes (``:oauth-complete``), and §7
+    forbids credential material in any at-rest record or log. ``action`` is the
+    matched route template (``"{METHOD} {route.path}"``) and ``target_id`` is the
+    last UUID path segment when present, so the trail stays queryable without the
+    body.
+    """
+
+    __tablename__ = "admin_audit_logs"
+    __table_args__ = (
+        # The read endpoint filters by tenant (a tenant's rows, plus the global
+        # NULL-tenant rows for a global-admin) and orders by created_at; the
+        # composite serves both the equality and the NULL scan with the ordering.
+        Index("ix_admin_audit_logs_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    # No FK (see class docstring): a global action has no tenant, and audit
+    # history must survive the deletion of the tenant it names.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    admin_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    method: Mapped[str] = mapped_column(String(8), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class BillingCursor(Base):
     """Watermark for the F5 billing sweep — one row per ``kind`` ("usage_daily").
 

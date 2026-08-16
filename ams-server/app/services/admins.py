@@ -42,11 +42,17 @@ def principal_for_admin(admin: Admin) -> Principal:
     an over-broad Principal.
     """
     if admin.role == "global-admin":
-        return Principal(role="global-admin", all_tenants=True, tenant_ids=frozenset())
+        return Principal(
+            role="global-admin",
+            all_tenants=True,
+            tenant_ids=frozenset(),
+            email=admin.email,
+        )
     return Principal(
         role="tenant-admin",
         all_tenants=False,
         tenant_ids=frozenset({str(admin.tenant_id)}),
+        email=admin.email,
     )
 
 

@@ -114,9 +114,10 @@ def clean_tables(app_env, engine):
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE billing_events, billing_cursors, admin_sessions, admins, "
-                "alert_webhook_outbox, alerts, usage_snapshots, assignments, "
-                "accounts, servers, tenant_deks, tenants RESTART IDENTITY CASCADE"
+                "TRUNCATE billing_events, billing_cursors, admin_audit_logs, "
+                "admin_sessions, admins, alert_webhook_outbox, alerts, "
+                "usage_snapshots, assignments, accounts, servers, tenant_deks, "
+                "tenants RESTART IDENTITY CASCADE"
             )
         )
     yield
