@@ -86,6 +86,11 @@ _METRICS_SYNC_CURSOR_KIND = "langfuse_metrics_sync"
 # advisory lock already coordinates the write; this only throttles one process.
 _LAST_POLL_MONOTONIC: float | None = None
 
+# Process-local set of unknown usageType values already warned about. The unknown
+# warning below fires once per value per process — same convention as the cadence
+# gate — so a new permanent usageType doesn't spam the log every group×day×poll.
+_WARNED_UNKNOWN_USAGE_TYPES: set = set()
+
 # observations-view measures the sweep pulls: usageByType (summed) crossed with the
 # usageType dimension, plus count. Response keys are "<aggregation>_<measure>", so
 # the token sum is "sum_usageByType" and the observation count is "count_count".
@@ -182,12 +187,15 @@ def _assemble(
         usage_type = row.get("usageType")
         column = _USAGE_TYPE_COLUMNS.get(usage_type)
         if column is None:
-            _logger.warning(
-                "langfuse metrics sweep: unknown usageType %r (%s/%s); ignoring",
-                usage_type,
-                dimension,
-                key,
-            )
+            if usage_type not in _WARNED_UNKNOWN_USAGE_TYPES:
+                _WARNED_UNKNOWN_USAGE_TYPES.add(usage_type)
+                _logger.warning(
+                    "langfuse metrics sweep: unknown usageType %r (%s/%s); ignoring "
+                    "(이후 동일 값 경고는 억제됨)",
+                    usage_type,
+                    dimension,
+                    key,
+                )
             continue
         values[column] += _int(row, "sum_usageByType")
         if usage_type == "total":
