@@ -4141,21 +4141,42 @@ class TestListAccountsOrgDisplay:
         assert "personal" in out
         assert "(active)" in out
 
-    def test_active_account_detected_by_org_uuid(self, temp_home, mock_credentials_file,
-                                                   sample_sequence_data_with_org, capsys):
-        """Only the account matching current org_uuid should be marked (active)."""
+    def test_active_account_detected_among_same_email_siblings(
+        self, temp_home, mock_credentials_file, capsys
+    ):
+        """Only the account matching the live login should be marked (active)
+        when two slots share an email across orgs. Detection is uuid-first
+        (an accountUuid is globally unique, unlike the org uuid AMS staging may
+        leave diverged — G49), so the slot whose stored uuid equals the live
+        ``accountUuid`` wins; here the live login is the personal one."""
         from tsamx.switcher import ClaudeAccountSwitcher
         from unittest.mock import patch
 
+        # Realistic data: an org slot and a personal slot share an email but are
+        # distinct accounts with distinct accountUuids (the real invariant).
+        seq = {
+            "activeAccountNumber": 1,
+            "lastUpdated": "2024-01-01T00:00:00Z",
+            "sequence": [1, 2],
+            "accounts": {
+                "1": {"email": "user@example.com", "uuid": "uuid-org",
+                      "organizationUuid": "org-uuid-5678",
+                      "organizationName": "Acme Corp",
+                      "added": "2024-01-01T00:00:00Z"},
+                "2": {"email": "user@example.com", "uuid": "uuid-personal",
+                      "organizationUuid": "", "organizationName": "",
+                      "added": "2024-01-02T00:00:00Z"},
+            },
+        }
         backup_dir = get_backup_root()
         backup_dir.mkdir(parents=True, exist_ok=True)
-        (backup_dir / "sequence.json").write_text(json.dumps(sample_sequence_data_with_org))
+        (backup_dir / "sequence.json").write_text(json.dumps(seq))
 
         config_path = temp_home / ".claude.json"
         config_path.write_text(json.dumps({
             "oauthAccount": {
                 "emailAddress": "user@example.com",
-                "accountUuid": "user-uuid",
+                "accountUuid": "uuid-personal",
             }
         }))
 
@@ -8471,21 +8492,40 @@ class TestRemoveInvalidatesLiveLogin:
         cfg = json.loads((temp_home / ".claude.json").read_text())
         assert cfg.get("oauthAccount", {}).get("accountUuid") == "U2"
 
-    def test_slot_without_uuid_skips_and_warns(self, temp_home):
-        """Fail-safe: a slot with no stored uuid cannot prove ownership, so the
-        live login is left in place and a warning is logged rather than risking a
-        wrong-account logout."""
+    def test_uuidless_slot_matching_live_backfills_then_invalidates(self, temp_home):
+        """G49 fail-safe gap: a uuid-less slot (add-token placeholder / pre-uuid
+        lineage) that still holds the live login — proven by the (email, org)
+        identity the codebase uses for such records — adopts the live
+        accountUuid first, so the uuid-first ownership check then fires and the
+        recalled account's live login is invalidated instead of surviving."""
         switcher, cred = self._seed(
             temp_home,
             ("khee@x.com", "U1", ""),
             [(1, "khee@x.com", "", ""), (2, "modarra9@x.com", "U2", "")],
             1,
         )
+        switcher.remove_account("1", assume_yes=True, invalidate_live=True)
+        assert not cred.exists()
+        cfg = json.loads((temp_home / ".claude.json").read_text())
+        assert "oauthAccount" not in cfg
+
+    def test_uuidless_slot_not_matching_live_skips_and_warns(self, temp_home):
+        """Fail-safe preserved: a uuid-less slot whose (email, org) does NOT
+        match the live login (a sibling account under a different org holds it)
+        cannot prove ownership, so no backfill occurs, the live login is left in
+        place, and a warning is logged rather than risking a wrong-account
+        logout."""
+        switcher, cred = self._seed(
+            temp_home,
+            ("khee@x.com", "U2", "org-B"),           # live == sibling slot-2
+            [(1, "khee@x.com", "", "org-A"), (2, "khee@x.com", "U2", "org-B")],
+            2,
+        )
         with patch.object(switcher._logger, "warning") as warn:
             switcher.remove_account("1", assume_yes=True, invalidate_live=True)
         assert cred.exists()
         cfg = json.loads((temp_home / ".claude.json").read_text())
-        assert cfg.get("oauthAccount", {}).get("accountUuid") == "U1"
+        assert cfg.get("oauthAccount", {}).get("accountUuid") == "U2"
         assert warn.called
         assert "uuid" in " ".join(str(c) for c in warn.call_args[0]).lower()
 
@@ -8516,4 +8556,106 @@ class TestRemoveInvalidatesLiveLogin:
         assert cred.exists()
         cfg = json.loads((temp_home / ".claude.json").read_text())
         assert cfg.get("oauthAccount", {}).get("accountUuid") == "U1"
+
+
+class TestResolveActiveSlot:
+    """G49: active-slot detection is uuid-first, so the live login is found even
+    when AMS staging leaves the slot's org uuid diverged from the live one. This
+    is the signal AMA's ``list``-based switch-away-before-recall gate reads."""
+
+    def _seed(self, temp_home, live, accounts, active_num=None):
+        """Write the live login ``live`` (``(email, uuid, org)``) and a pool of
+        ``accounts`` (each ``(num, email, uuid, org)``)."""
+        live_email, live_uuid, live_org = live
+        config = {
+            "oauthAccount": {
+                "emailAddress": live_email,
+                "accountUuid": live_uuid,
+                "organizationUuid": live_org,
+                "organizationName": "",
+            }
+        }
+        (temp_home / ".claude.json").write_text(json.dumps(config))
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        data = switcher._get_sequence_data()
+        for num, email, uuid, org in accounts:
+            data["accounts"][str(num)] = {
+                "email": email,
+                "uuid": uuid,
+                "organizationUuid": org,
+                "organizationName": "",
+                "added": "2024-01-01T00:00:00Z",
+            }
+        data["sequence"] = [num for num, *_ in accounts]
+        data["activeAccountNumber"] = active_num
+        switcher._write_json(switcher.sequence_file, data)
+        return switcher
+
+    def test_uuid_match_survives_org_divergence(self, temp_home):
+        """The G49 repro: the slot was staged personal (org "") but Claude Code
+        filled the live org uuid, so the (email, org) composite key misses. The
+        accountUuid still matches, so the slot is resolved active."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", "org-live-9"),
+            [(1, "khee@x.com", "U1", ""), (2, "other@x.com", "U2", "")],
+        )
+        data = switcher._get_sequence_data()
+        # Composite key alone misses (org "" != "org-live-9")...
+        assert switcher._find_account_slot(data, "khee@x.com", "org-live-9") is None
+        # ...uuid-first resolves it, and current_account_number agrees.
+        assert switcher._resolve_active_slot(data, "khee@x.com", "org-live-9") == "1"
+        assert switcher.current_account_number() == "1"
+
+    def test_list_json_marks_active_under_org_divergence(self, temp_home):
+        """End-to-end for the gate: `list --json` (what AMA reads for
+        ActiveEmail) marks the diverged slot active."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", "org-live-9"),
+            [(1, "khee@x.com", "U1", ""), (2, "other@x.com", "U2", "")],
+        )
+        with patch.object(switcher, "_read_active_credentials",
+                          return_value=ActiveCredentials(value="", keychain_unavailable=False)), \
+             patch.object(switcher, "_read_account_credentials", return_value=""):
+            payload = switcher.list_accounts(json_output=True)
+        rows = {r["number"]: r for r in payload["accounts"]}
+        assert payload["activeAccountNumber"] == 1
+        assert rows[1]["active"] is True
+        assert rows[2]["active"] is False
+
+    def test_uuid_first_beats_composite_sibling(self, temp_home):
+        """Two slots share an email across orgs; the live accountUuid picks the
+        exact one, where a bare email would be ambiguous."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U2", "org-B"),
+            [(1, "khee@x.com", "U1", "org-A"), (2, "khee@x.com", "U2", "org-B")],
+        )
+        data = switcher._get_sequence_data()
+        assert switcher._resolve_active_slot(data, "khee@x.com", "org-B") == "2"
+
+    def test_falls_back_to_composite_when_no_live_uuid(self, temp_home):
+        """Pre-uuid live login (no accountUuid) or a live login absent from the
+        pool: the (email, org) composite fallback is unchanged."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "", ""),
+            [(1, "khee@x.com", "", ""), (2, "other@x.com", "U2", "")],
+        )
+        data = switcher._get_sequence_data()
+        assert switcher._resolve_active_slot(data, "khee@x.com", "") == "1"
+
+    def test_uuidless_slot_falls_back_to_composite(self, temp_home):
+        """A live accountUuid with no matching slot uuid (uuid-less slots) does
+        not spuriously match — it falls through to the composite key."""
+        switcher = self._seed(
+            temp_home,
+            ("khee@x.com", "U1", ""),
+            [(1, "khee@x.com", "", ""), (2, "other@x.com", "", "")],
+        )
+        data = switcher._get_sequence_data()
+        assert switcher._resolve_active_slot(data, "khee@x.com", "") == "1"
 

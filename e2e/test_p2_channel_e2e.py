@@ -211,6 +211,20 @@ def test_fleet_delivery_and_recall_round_trip(fleet: Fleet):
             f"host {label}: {email} manifest record survived recall (O2 is full detach)"
         )
 
+        # G49: the runner must never be left pointing at the removed credential.
+        # Exactly one surviving account is active afterwards — switch-away fires
+        # before an active account is purged, and an inactive recall leaves the
+        # live one untouched — never zero, and never the recalled email. (Both
+        # recalled hosts keep >=1 survivor: FLEET a=3, b=5.)
+        active_rows = [a for a in accounts if a.get("active")]
+        assert len(active_rows) == 1, _report(
+            fleet, f"host {label}: expected one active account after recall, "
+            f"got {[a['email'] for a in active_rows]}"
+        )
+        assert active_rows[0]["email"] != email, _report(
+            fleet, f"host {label}: runner left on the recalled account {email}"
+        )
+
     # Untouched assignments on the same hosts stay active — a recall is scoped
     # to its own assignment, not to the host.
     for label, email in recalled.items():
