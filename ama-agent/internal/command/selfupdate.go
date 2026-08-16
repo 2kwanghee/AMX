@@ -31,6 +31,11 @@ const (
 	gitStepTimeout   = 120 * time.Second
 	buildStepTimeout = 600 * time.Second
 	smokeStepTimeout = 15 * time.Second
+	// tsamxStepTimeout bounds the post-swap `uv tool install` of tsamx. It is a
+	// best-effort step whose failure never fails the update, but it still runs
+	// under the engine lock right before the exec, so a wedged uv must not park
+	// the restart forever.
+	tsamxStepTimeout = 120 * time.Second
 )
 
 // newBinarySuffix / backupSuffix name the two extra files a self update creates
@@ -406,6 +411,18 @@ func (h *Handler) swapAndRestart(runner SelfUpdateRunner, cfg *SelfUpdateConfig,
 		ack = nil // already delivered; main must not send it twice
 	}
 
+	// Reinstall tsamx from the (now fast-forwarded) working tree BEFORE the exec —
+	// after it the process image is gone. SelfUpdate only ever swapped the ama
+	// binary, so a tsamx change that rode along in the same commit (e.g. #85's
+	// `remove --yes`) never reached the runner and recall DIVERGED against a stale
+	// tsamx (BACKLOG G48). This is best-effort by contract: a failure is logged and
+	// nothing else — the update already CONVERGED and the next self_update retries.
+	// Gated to the git install method: binary/package installs have no checkout to
+	// install tsamx from.
+	if cfg.RepoDir != "" && !cfg.binaryMode() {
+		h.reinstallTsamx(runner, cfg)
+	}
+
 	// syscall.Exec does not return on success — the process image is gone here.
 	// A nil return therefore only happens under a test double standing in for the
 	// replacement, in which case the CONVERGED result above still stands.
@@ -420,6 +437,29 @@ func (h *Handler) swapAndRestart(runner SelfUpdateRunner, cfg *SelfUpdateConfig,
 			ack.GetCommandId(), execErr, binPath)
 	}
 	return h.finishSelfUpdate(ack)
+}
+
+// reinstallTsamx force-reinstalls tsamx from the checkout so the runner's tsamx
+// tracks the same commit the agent binary was just built from. It mirrors
+// deploy/agent-setup.sh's install step (`uv tool install --force --from
+// <repo>/tsamx tsamx`). It is deliberately fire-and-warn: any failure — uv not on
+// PATH, a build error, a timeout — is logged and swallowed so it can NEVER turn a
+// converged self_update into a failure. The next self_update retries it. Runs
+// under the engine lock (its caller holds it) so no tsamx mutation is in flight.
+func (h *Handler) reinstallTsamx(runner SelfUpdateRunner, cfg *SelfUpdateConfig) {
+	tsamxSrc := filepath.Join(cfg.RepoDir, "tsamx")
+	out, err := runner.Run(context.Background(), RunSpec{
+		Dir:     cfg.RepoDir,
+		Name:    "uv",
+		Args:    []string{"tool", "install", "--force", "--from", tsamxSrc, "tsamx"},
+		Timeout: tsamxStepTimeout,
+	})
+	if err != nil {
+		cfg.logf("self_update: tsamx reinstall failed (%v: %s) — the agent binary is "+
+			"updated but tsamx may be stale; the next self_update retries", err, tail(out))
+		return
+	}
+	cfg.logf("self_update: tsamx reinstalled from %s", tsamxSrc)
 }
 
 // manualRecoveryHint is the documented operator recovery for a half-swapped

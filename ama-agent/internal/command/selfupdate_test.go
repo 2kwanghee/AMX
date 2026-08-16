@@ -507,6 +507,82 @@ func TestSelfUpdateSwapsRecordsAndRestarts(t *testing.T) {
 	}
 }
 
+// A git self_update must reinstall tsamx from the freshly pulled tree, so a
+// tsamx change riding in the same commit reaches the runner (BACKLOG G48). The
+// reinstall runs before the exec (after it the process is gone) and names the
+// checkout's tsamx dir with --force.
+func TestSelfUpdateReinstallsTsamxFromTheCheckout(t *testing.T) {
+	hn := newHarness(t)
+	f := newFakeRunner()
+	repoDir, _ := selfUpdateEnv(t, hn, f)
+	hn.h.selfUpdate.AckSender = func(*amxv1.CommandAck) error { return nil }
+
+	if got := hn.apply(t, selfUpdateCmd(t, hn, "su-tsamx", "")); got != nil {
+		t.Fatalf("Handle should return nil after handing the ack over, got %v", got)
+	}
+	if !f.ran("uv tool install") {
+		t.Fatalf("tsamx was not reinstalled (ran %v)", f.calls)
+	}
+	spec := f.specFor(t, "uv tool install")
+	want := []string{"tool", "install", "--force", "--from", filepath.Join(repoDir, "tsamx"), "tsamx"}
+	if fmt.Sprint(spec.Args) != fmt.Sprint(want) {
+		t.Fatalf("uv args = %v, want %v", spec.Args, want)
+	}
+	if spec.Timeout != tsamxStepTimeout {
+		t.Fatalf("uv timeout = %v, want %v", spec.Timeout, tsamxStepTimeout)
+	}
+	// The reinstall must precede the exec: after exec the process image is gone.
+	uvAt, execAt := -1, -1
+	for i, c := range f.calls {
+		if c == "uv tool install" {
+			uvAt = i
+		}
+	}
+	if f.execArgv == "" {
+		t.Fatal("agent did not restart")
+	}
+	execAt = len(f.calls) // exec is recorded outside f.calls; uv must have run
+	if uvAt < 0 || uvAt >= execAt {
+		t.Fatalf("tsamx reinstall did not run before exec (uvAt=%d)", uvAt)
+	}
+}
+
+// A failed tsamx reinstall must NOT fail the update: the ama binary already
+// swapped and the applied log already says CONVERGED. It is logged and the
+// restart proceeds; the next self_update retries the reinstall.
+func TestSelfUpdateTsamxReinstallFailureDoesNotFailTheUpdate(t *testing.T) {
+	hn := newHarness(t)
+	f := newFakeRunner()
+	_, binPath := selfUpdateEnv(t, hn, f)
+	f.fail["uv tool install"] = errors.New("uv: command not found")
+	var logged []string
+	hn.h.selfUpdate.Logf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	var acks []*amxv1.CommandAck
+	hn.h.selfUpdate.AckSender = func(a *amxv1.CommandAck) error {
+		acks = append(acks, proto.Clone(a).(*amxv1.CommandAck))
+		return nil
+	}
+
+	if got := hn.apply(t, selfUpdateCmd(t, hn, "su-tsamx-fail", "")); got != nil {
+		t.Fatalf("Handle should return nil after handing the ack over, got %v", got)
+	}
+	if len(acks) != 1 || acks[0].GetConvergence() != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("update must stay CONVERGED despite the tsamx failure, got %v", acks)
+	}
+	entry, _ := hn.appl.Lookup("su-tsamx-fail")
+	if entry.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED.String() {
+		t.Fatalf("applied log = %q, want CONVERGED", entry.Convergence)
+	}
+	if f.execArgv != binPath {
+		t.Fatal("a failed tsamx reinstall must not stop the restart")
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "tsamx reinstall failed") {
+		t.Fatalf("the failed reinstall should be logged: %v", logged)
+	}
+}
+
 // A lost ack must not be repaired by re-acking: the applied log already says
 // CONVERGED, and AMS learns it from the re-queue. Asserted here because the
 // tempting fix — retract and re-send — would defeat the idempotency gate.
