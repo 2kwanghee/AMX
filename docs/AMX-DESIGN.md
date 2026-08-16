@@ -520,7 +520,7 @@ Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패�
   이벤트 · reconcile 드리프트(`usage_snapshots.drift`) · 서버 오프라인. `dedupe_key`(server×kind[×account])로
   open 1건 유지, 다음 UsageReport에서 조건 해소 시 auto-resolve. `GET /alerts` · `POST /alerts/{id}:ack`.
   경보는 이벤트 유실에 강건하도록 **reconcile-on-report 재조회로도 재구성 가능**(§P3 결정8 best-effort 보완).
-  - **경보 kind 전량(8종)**: 서버-scoped `all_exhausted`·`server_offline`·`self_update_failed`(`{server}:{kind}`),
+  - **P3 기준 경보 kind(8종. 전체 로스터는 13종 — P4·P5가 langfuse 3종·`alert_webhook_dropped`·`dangerous_command`를 §5.6.1~5.6.3에서 더한다)**: 서버-scoped `all_exhausted`·`server_offline`·`self_update_failed`(`{server}:{kind}`),
     계정-scoped `drift`·`quarantine`·`recall_failed`·`command_send_failed`(`{server}:{kind}:{account}`),
     테넌트-scoped `billing_watermark_future`. 뒤 넷의 배선은 §5.2·회복 설계(§D1/D2)에, `billing_watermark_future`는
     watermark-future 스위퍼(§5.6.1 목록의 여섯 번째, 락 …06)가 `reported_at < watermark` 시계 앞점프를 감지해 여는
@@ -542,6 +542,21 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
   snapshot-retention·watermark-future)에 이어 `services.langfuse_metrics.sweep_langfuse_metrics`를
   같은 30초 틱에 sibling으로 붙인다. 전용 transaction-scope advisory lock **`0x414D580F07`(…07)**
   로 다중 인스턴스 중복 적재를 배제하고, 자체 try/except로 다른 스위퍼와 격리한다.
+- **배경 스위퍼·advisory lock 배정표(현행 전량)**: 위 "여섯 번째·일곱 번째" 서술은 추가 순서를 가리키는 역사적 표현이고, 지금 공유 틱 루프가 도는 스위퍼는 10종이다(락 키 접두 `0x414D580F`, 뒤 한 바이트로 구분). 웹훅 드레인 …08만 공유 루프가 아니라 독립 asyncio 태스크다(§5.6.2).
+
+  | 락 | 스위퍼 | 하는 일 |
+  |---|---|---|
+  | …01 | `alerts.sweep_offline` | `last_seen_at` 만료 → 서버 offline 전이·경보 |
+  | …02 | `commands.sweep_sent_timeouts` | sent-ack 타임아웃 명령 재큐 |
+  | …03 | `billing.sweep_billing` | 마감일 usage → billing_events 롤 |
+  | …04 | `usage_cost.sweep_usage_rollup` | 스냅샷 → usage 롤업 재집계 |
+  | …05 | `usage_cost.sweep_snapshot_retention` | 보존기간 지난 usage 스냅샷 삭제 |
+  | …06 | `usage_cost.sweep_watermark_future` | 워터마크 앞점프 감지 → `billing_watermark_future` |
+  | …07 | `langfuse_metrics.sweep_langfuse_metrics` | Langfuse Metrics 폴링 → 롤업 적재 |
+  | …08 | `alert_webhook.sweep_alert_webhook` | **독립 드레인 태스크** — 아웃박스 웹훅 발송(§5.6.2) |
+  | …09 | `langfuse_alerts.sweep_langfuse_alerts` | Langfuse 임계값 경보 3종(§5.6.2) |
+  | …0A | `inventory.sweep_assignment_retention` | 보존기간 지난 `detached` 배정 행 배치 삭제(`AMX_ASSIGNMENT_RETENTION_DAYS` 기본 90) |
+  | …0B | `audit.sweep_audit_retention` | 감사 로그 배치 삭제(`AMX_AUDIT_RETENTION_DAYS`>0일 때만, §5.6.4) |
 - **폴링 주기 분리**: 30초 틱마다 재폴링하면 외부 API를 과하게 때리므로, 프로세스-로컬 monotonic
   게이트로 `AMX_LANGFUSE_POLL_SECONDS`(기본 300, 최소 60) 미만 간격의 틱은 즉시 return한다.
   인스턴스 간 조율은 …07 락이 담당하므로 게이트는 프로세스 로컬로 충분하다.
