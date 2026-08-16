@@ -41,15 +41,17 @@ const NODE_W = 264; // 자유 배치 시 노드 폭(= 11*GRID)
 const SERVER_X = GRID; // 서버 밴드 좌측 x
 const ACCOUNT_X = SERVER_X + NODE_W + 4 * GRID; // 계정 밴드 좌측 x (사이 96px)
 const BAND_TOP = 2 * GRID; // 밴드 라벨 아래 첫 노드 y
-const SERV_STEP = 8 * GRID; // 서버 노드 세로 간격(192px)
-const ACC_STEP = 4 * GRID; // 계정 노드 세로 간격(96px)
+// NMS 리뉴얼로 서버 노드는 더 작고(≈156px), 계정 노드는 캡슐(≈52px)로 얇아졌다.
+// 자동 안착 간격을 실측 높이 + 여백에 맞춰 좁혀 밀도를 높인다.
+const SERV_STEP = 7 * GRID; // 서버 노드 세로 간격(168px)
+const ACC_STEP = 3 * GRID; // 계정 노드 세로 간격(72px)
 const CANVAS_PAD = 2 * GRID; // 캔버스 하단 여백
 const FREE_MIN = 900; // 이 폭 미만이면 자동 배치(현행 grid) 폴백
 const LAYOUT_VERSION = 1;
 // 미측정 노드 기본 크기(높이 추정) — 첫 렌더/드롭 겹침 검사 폴백.
 const DEF_SIZE: Record<'srv' | 'acc', { w: number; h: number }> = {
-  srv: { w: NODE_W, h: 176 },
-  acc: { w: NODE_W, h: 64 },
+  srv: { w: NODE_W, h: 156 },
+  acc: { w: NODE_W, h: 52 },
 };
 
 const snap = (v: number) => Math.round(v / GRID) * GRID;
