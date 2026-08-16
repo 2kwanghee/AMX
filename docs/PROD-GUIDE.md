@@ -160,6 +160,22 @@ bash deploy/fullstack-run.sh bootstrap-admin admin@example.com '강한비밀번�
 재시작할 때도 dev.env에 TLS 경로가 있으므로 플래그는 `--lan`만 주면 된다.
 **`--insecure-grpc`는 운영에서 다시 쓰지 않는다.**
 
+### 3-4. 배정 이력 보존 기간 (선택)
+
+회수가 끝난 배정은 `detached` 이력 행으로 남는다. 관리자가 콘솔에서 직접 지울 수 있고
+(`DELETE …/assignments/{id}` — `detached`만 삭제, 그 외 상태는 409), 그와 별개로 서버가
+오래된 `detached` 행을 배치로 청소한다. 청소 기준은 dev.env의 다음 변수로 조정한다.
+
+```
+AMX_ASSIGNMENT_RETENTION_DAYS=90   # detached 행을 이 일수 경과 후 삭제 (기본 90)
+AMX_AUDIT_RETENTION_DAYS=0         # 감사 로그 보존 상한 (기본 0 = 무기한 보존)
+```
+
+`AMX_ASSIGNMENT_RETENTION_DAYS`를 `0` 이하로 두면 배정 이력 청소를 끄고 모두 남긴다.
+삭제 자체는 감사 로그(`admin_audit_logs`)에 남으므로 "누가 언제 지웠는가"는 그대로
+추적된다. 감사 로그는 성격상 기본 무기한 보존이라 `AMX_AUDIT_RETENTION_DAYS` 기본값이
+`0`이며, 규정상 보존 상한이 필요할 때만 양수로 둔다.
+
 ---
 
 ## 4. 방화벽·네트워크 개방 (중앙 서버에서만)

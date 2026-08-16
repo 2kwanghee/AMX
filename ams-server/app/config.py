@@ -51,6 +51,19 @@ class Settings:
     # many days — but only once they are past the settlement watermark, never an
     # unsettled row. 0 or negative disables the purge (keep every snapshot).
     usage_snapshot_retention_days: int = 90
+    # Assignment-history retention (console-test gap G54): the sibling sweep
+    # (…0A) batch-deletes `detached` assignment rows whose `updated_at` is older
+    # than this many days. detached rows are pure audit history — a recalled
+    # account no longer installed anywhere — so ageing them out keeps the table
+    # from growing without bound. 0 or negative disables the sweep (keep every
+    # detached row); the DELETE endpoint remains the manual path either way.
+    assignment_retention_days: int = 90
+    # Audit-log retention (console-test gap G53). The sibling sweep (…0B)
+    # batch-deletes admin_audit_logs rows older than this many days. Unlike the
+    # snapshot/assignment sweeps this defaults to 0 = **keep forever**: the audit
+    # trail is a compliance record whose value is precisely its longevity, so a
+    # bounded window is opt-in. Set > 0 only to satisfy an explicit retention cap.
+    audit_retention_days: int = 0
     # Console install-command support. `advertise_host` is the host (or IP) the
     # agent should dial; combined with `grpc_port` it forms the endpoint shown in
     # the enroll-token modal. Absent host → no endpoint (the console renders a
@@ -267,6 +280,10 @@ def load_settings() -> Settings:
         usage_snapshot_retention_days=int(
             os.environ.get("AMX_USAGE_SNAPSHOT_RETENTION_DAYS", "90")
         ),
+        assignment_retention_days=int(
+            os.environ.get("AMX_ASSIGNMENT_RETENTION_DAYS", "90")
+        ),
+        audit_retention_days=int(os.environ.get("AMX_AUDIT_RETENTION_DAYS", "0")),
         advertise_host=os.environ.get("AMX_ADVERTISE_HOST", "").strip() or None,
         grpc_port=int(os.environ.get("AMX_GRPC_PORT", "50051")),
         ams_pubkey=_derive_ams_pubkey(),

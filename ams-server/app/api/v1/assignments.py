@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response, status
 
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
@@ -82,6 +82,17 @@ def update_assignment(
     return schemas.Assignment.model_validate(
         inventory.update_assignment(db, tenant_id, assignment_id, pinned=body.pinned)
     )
+
+
+@router.delete("/assignments/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_assignment(
+    tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal
+) -> Response:
+    # Only a detached history row is deletable; a live assignment is 409
+    # (assignment.not_deletable). The deletion itself is preserved by the audit
+    # trail, so the row is removed outright rather than tombstoned.
+    inventory.delete_assignment(db, tenant_id, assignment_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # The transition actions below enqueue a signed command on the outbox and move

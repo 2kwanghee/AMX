@@ -11,11 +11,13 @@ import logging
 from fastapi import FastAPI
 
 from app.api import download
+from app.api.audit import install_audit_middleware
 from app.api.v1 import (
     accounts,
     admins,
     alerts,
     assignments,
+    audit,
     auth,
     billing,
     ingest,
@@ -41,6 +43,8 @@ def create_app() -> FastAPI:
     )
     app.state.oauth_flows = PkceFlowStore()
     install_error_handlers(app)
+    # Records every mutating admin call after the response (app/api/audit.py).
+    install_audit_middleware(app)
 
     app.include_router(auth.router, prefix=API_PREFIX)
     app.include_router(admins.router, prefix=API_PREFIX)
@@ -48,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(accounts.router, prefix=API_PREFIX)
     app.include_router(servers.router, prefix=API_PREFIX)
     app.include_router(assignments.router, prefix=API_PREFIX)
+    app.include_router(audit.router, prefix=API_PREFIX)
     app.include_router(alerts.router, prefix=API_PREFIX)
     app.include_router(billing.router, prefix=API_PREFIX)
     app.include_router(usage.router, prefix=API_PREFIX)
