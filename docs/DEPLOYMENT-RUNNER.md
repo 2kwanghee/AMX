@@ -546,7 +546,7 @@ Code가 작업 디렉터리 기준으로 읽으므로, `claude`로 열든 `amx`�
   ```sh
   tsclaude list          # 배분 계정 목록 + (active) 표시
   tsclaude status        # 현재 활성 계정·한도
-  tsclaude switch 2      # 2번 계정으로 전환 (bare `tsclaude 2`도 동일)
+  tsclaude switch 2      # 2번 계정으로 전환
   ```
 
 - **`tsamx-amx`(수동 alias)**: git 클론 없이 tsamx만 설치한 장비 등 `tsclaude`가 없을 때는
