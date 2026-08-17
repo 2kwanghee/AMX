@@ -367,6 +367,11 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
 | detached | 종말 상태 (행은 감사용 유지) | 로컬 흔적 완전 제거됨; 이력은 detached 배정 행·이벤트로만 남는다(재배정은 재전달) |
 
 - **스위칭 모드**는 서버 단위 속성(`servers.switch_mode`), 계정 단위 제외는 `pinned`로.
+- **배정 제외**: 사람이 자기 프로필에서 직접 쓰는 계정은 `accounts.assignment_excluded`로
+  표시한다. 표시된 계정은 신규 배정이 거부되는데, 같은 OAuth refresh token 회전을 두 곳이
+  경합하면 양쪽 다 깨지기 때문이다(2026-08-17 관측). opt-in이라 기본값은 배정 가능이고,
+  표시를 세워도 기존 배정은 그대로 남으며 그 배정의 재전달(reconcile `CORRECTION_REDELIVER`)도
+  계속된다 — 사고를 실제로 멈추려면 회수까지 해야 한다.
 - **비상태 명령**: `switch_now`/`set_mode`/`req_report`는 배정 상태를 전이시키지 않는다
   (switch-now는 `last_switched_at`만 갱신, set_mode는 `servers.switch_mode`만 변경).
 - **recover 전이**: REST `POST …/assignments/{id}:recover`(§5.3)가 트리거 →

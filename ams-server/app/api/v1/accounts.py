@@ -64,6 +64,7 @@ def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSess
         owner=body.owner,
         monthly_price=body.monthly_price,
         currency=body.currency,
+        assignment_excluded=body.assignment_excluded,
     )
     return schemas.Account.model_validate(account)
 
@@ -94,6 +95,7 @@ def update_account(
             else inventory.UNSET
         ),
         currency=body.currency,
+        assignment_excluded=body.assignment_excluded,
     )
     return schemas.Account.model_validate(account)
 

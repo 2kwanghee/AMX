@@ -342,6 +342,139 @@ def test_deliver_immediately_is_refused_rather_than_ignored(client):
     assert response.json()["code"] == "assignment.deliver_immediately_unsupported"
 
 
+# -- assignment_excluded ------------------------------------------------------
+def test_account_created_without_the_field_defaults_to_not_excluded(client):
+    tenant_id = make_tenant(client)
+    account = make_account(client, tenant_id)
+    assert account["assignmentExcluded"] is False
+
+
+def test_assignment_excluded_account_cannot_be_assigned(client):
+    tenant_id = make_tenant(client)
+    account = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts",
+        json={
+            "email": "excluded@example.com",
+            "credentialType": "oauth",
+            "secret": CREDENTIAL_SET,
+            "assignmentExcluded": True,
+        },
+    ).json()
+    server = make_server(client, tenant_id)
+
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/assignments",
+        json={"accountId": account["id"], "serverId": server["id"]},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "assignment.account_excluded"
+
+
+def test_non_excluded_account_is_assigned_normally(client):
+    tenant_id = make_tenant(client)
+    account = make_account(client, tenant_id)
+    server = make_server(client, tenant_id)
+
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/assignments",
+        json={"accountId": account["id"], "serverId": server["id"]},
+    )
+    assert response.status_code == 201
+
+
+def test_excluding_an_already_assigned_account_does_not_touch_the_assignment(client):
+    """Decision 2: assignment_excluded blocks future assignments only. Setting
+    the flag on an account that already holds a non-detached assignment must
+    not revoke or otherwise change that assignment."""
+    tenant_id = make_tenant(client)
+    account = make_account(client, tenant_id)
+    server = make_server(client, tenant_id)
+
+    created = client.post(
+        f"/api/v1/tenants/{tenant_id}/assignments",
+        json={"accountId": account["id"], "serverId": server["id"]},
+    )
+    assert created.status_code == 201
+    assignment_id = created.json()["id"]
+    assert created.json()["state"] == "pending"
+
+    patched = client.patch(
+        f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}",
+        json={"assignmentExcluded": True},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["assignmentExcluded"] is True
+
+    unchanged = client.get(f"/api/v1/tenants/{tenant_id}/assignments/{assignment_id}")
+    assert unchanged.json()["state"] == "pending"
+
+    account_after = client.get(f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}")
+    assert account_after.json()["status"] == "assigned"
+
+
+def test_clearing_assignment_excluded_allows_a_new_assignment(client):
+    tenant_id = make_tenant(client)
+    account = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts",
+        json={
+            "email": "reinstated@example.com",
+            "credentialType": "oauth",
+            "secret": CREDENTIAL_SET,
+            "assignmentExcluded": True,
+        },
+    ).json()
+    server = make_server(client, tenant_id)
+
+    blocked = client.post(
+        f"/api/v1/tenants/{tenant_id}/assignments",
+        json={"accountId": account["id"], "serverId": server["id"]},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "assignment.account_excluded"
+
+    cleared = client.patch(
+        f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}",
+        json={"assignmentExcluded": False},
+    )
+    assert cleared.json()["assignmentExcluded"] is False
+
+    allowed = client.post(
+        f"/api/v1/tenants/{tenant_id}/assignments",
+        json={"accountId": account["id"], "serverId": server["id"]},
+    )
+    assert allowed.status_code == 201
+
+
+def test_an_unrelated_field_patch_does_not_reset_assignment_excluded(client):
+    """REVIEWER-A gap: today's `if assignment_excluded is not None` guard is
+    safe, but a future refactor to the `model_fields_set` convention (as used
+    for monthly_price) could silently start treating an omitted field as
+    False. Pin the current contract: a PATCH that only touches `owner` must
+    leave a True flag exactly as it was."""
+    tenant_id = make_tenant(client)
+    account = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts",
+        json={
+            "email": "owner-only-patch@example.com",
+            "credentialType": "oauth",
+            "secret": CREDENTIAL_SET,
+            "assignmentExcluded": True,
+        },
+    ).json()
+    assert account["assignmentExcluded"] is True
+
+    patched = client.patch(
+        f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}",
+        json={"owner": "ops-team"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["owner"] == "ops-team"
+    assert patched.json()["assignmentExcluded"] is True
+
+    refetched = client.get(f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}")
+    assert refetched.json()["assignmentExcluded"] is True
+
+
 # -- Cross-tenant -------------------------------------------------------------
 def test_reading_another_tenants_resources_returns_404(client):
     tenant_a = make_tenant(client, "a-corp")

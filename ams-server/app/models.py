@@ -247,6 +247,15 @@ class Account(Base):
     # person or team with no login here, and an FK would make deleting that
     # admin either fail or rewrite history.
     owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # opt-in: default False keeps every existing account assignable. Setting
+    # this True only blocks FUTURE assignments (create_assignment); it does
+    # not touch or revoke one already in place. Exists because a person who
+    # runs an account directly from their own profile (outside AMS) races the
+    # OAuth refresh-token rotation with a server that also holds it, and both
+    # sides end up with a stale token.
+    assignment_excluded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     # Subscription price of this account per month, in `currency`. NULL means
     # "no price recorded" — such an account carries no cost to spread and is
     # skipped by the allocation, which is why it stays nullable rather than

@@ -33,13 +33,20 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
       {act.error && <p className="err">{act.error}</p>}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>이메일</th><th>프로바이더</th><th>소유자</th><th>구독료</th><th>유형</th><th>상태</th><th>시크릿</th><th>만료</th><th></th></tr></thead>
+          <thead><tr><th>이메일</th><th>프로바이더</th><th>소유자</th><th>배정 제외</th><th>구독료</th><th>유형</th><th>상태</th><th>시크릿</th><th>만료</th><th></th></tr></thead>
           <tbody>
             {accounts.map((a) => (
               <tr key={a.id}>
                 <td><EmailChip email={a.email} sub={a.organizationName} /></td>
                 <td><ProviderTag value={a.provider} /></td>
                 <td>{a.owner ? a.owner : <span className="muted">—</span>}</td>
+                <td>
+                  {a.assignmentExcluded ? (
+                    <span className="badge disabled"><span className="dot" />제외</span>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
                 <td>
                   {a.monthlyPrice ? `${a.monthlyPrice} ${a.currency ?? 'USD'}` : <span className="muted">—</span>}
                 </td>
@@ -62,7 +69,7 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
               </tr>
             ))}
             {accounts.length === 0 && (
-              <tr><td colSpan={9} className="muted">등록된 계정이 없습니다. '계정 등록'으로 Claude·Codex 계정을 연결하세요.</td></tr>
+              <tr><td colSpan={10} className="muted">등록된 계정이 없습니다. '계정 등록'으로 Claude·Codex 계정을 연결하세요.</td></tr>
             )}
           </tbody>
         </table>
@@ -195,6 +202,7 @@ function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () 
   const [owner, setOwner] = useState('');
   const [price, setPrice] = useState('');
   const [currency, setCurrency] = useState('');
+  const [assignmentExcluded, setAssignmentExcluded] = useState(false);
   const act = useAction();
   const priceValid = price.trim() === '' || /^\d+(\.\d+)?$/.test(price.trim());
   const currencyValid = currency.trim() === '' || /^[A-Za-z]{3}$/.test(currency.trim());
@@ -246,6 +254,14 @@ function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () 
         placeholder="USD"
       />
       {!currencyValid && <p className="err">통화는 세 글자 코드입니다(예: USD, KRW).</p>}
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={assignmentExcluded}
+          onChange={(e) => setAssignmentExcluded(e.target.checked)}
+        />
+        개인이 자기 프로필에서 직접 쓰는 계정이라 새 배정 대상에서 뺀다
+      </label>
       {act.error && <p className="err">{act.error}</p>}
       <button
         className="primary"
@@ -262,6 +278,7 @@ function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () 
                 owner: owner.trim() || undefined,
                 monthlyPrice: price.trim() === '' ? undefined : price.trim(),
                 currency: currency.trim() === '' ? undefined : currency.trim().toUpperCase(),
+                assignmentExcluded: assignmentExcluded || undefined,
               }),
             () => {
               setSecret('');
@@ -295,17 +312,24 @@ function EditAccount({
   const [secret, setSecret] = useState('');
   const [price, setPrice] = useState(account.monthlyPrice ?? '');
   const [currency, setCurrency] = useState(account.currency ?? 'USD');
+  const [assignmentExcluded, setAssignmentExcluded] = useState(account.assignmentExcluded ?? false);
   const act = useAction();
   const isCodex = account.provider === 'codex';
   const emailChanged = email.trim() !== account.email;
   const ownerChanged = owner.trim() !== (account.owner ?? '');
   const priceChanged = price.trim() !== (account.monthlyPrice ?? '');
   const currencyChanged = currency.trim().toUpperCase() !== (account.currency ?? 'USD');
+  const assignmentExcludedChanged = assignmentExcluded !== (account.assignmentExcluded ?? false);
   // 금액은 문자열 그대로 전송하므로 Number로 파싱하지 않고 형태만 본다: 음수·비숫자 차단.
   const priceValid = price.trim() === '' || /^\d+(\.\d+)?$/.test(price.trim());
   const currencyValid = /^[A-Za-z]{3}$/.test(currency.trim());
   const dirty =
-    emailChanged || ownerChanged || priceChanged || currencyChanged || secret.trim() !== '';
+    emailChanged ||
+    ownerChanged ||
+    priceChanged ||
+    currencyChanged ||
+    assignmentExcludedChanged ||
+    secret.trim() !== '';
 
   return (
     <Modal title="계정 수정" onClose={onClose}>
@@ -339,6 +363,17 @@ function EditAccount({
         placeholder="USD"
       />
       {!currencyValid && <p className="err">통화는 세 글자 코드입니다(예: USD, KRW).</p>}
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={assignmentExcluded}
+          onChange={(e) => setAssignmentExcluded(e.target.checked)}
+        />
+        개인이 자기 프로필에서 직접 쓰는 계정이라 새 배정 대상에서 뺀다
+      </label>
+      <p className="muted">
+        이미 연결된 배정이 있어도 켜는 순간 회수되지는 않습니다. 막히는 건 이 뒤에 새로 생기는 연결뿐입니다.
+      </p>
       {isCodex && (
         <>
           <label>auth.json 전문 {emailChanged ? '(이메일 변경 시 필수)' : '(선택 — 교체할 때만)'}</label>
@@ -365,6 +400,7 @@ function EditAccount({
                 secret: secret.trim() ? secret : undefined,
                 monthlyPrice: priceChanged ? (price.trim() === '' ? null : price.trim()) : undefined,
                 currency: currencyChanged ? currency.trim().toUpperCase() : undefined,
+                assignmentExcluded: assignmentExcludedChanged ? assignmentExcluded : undefined,
               }),
             () => {
               setSecret('');
