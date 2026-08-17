@@ -565,9 +565,72 @@ body.paused .paused-flag { opacity: 1; }
       서버 생존 신호는 <span class="num accent">30초</span>, 사용량 보고는 <span class="num accent">5분</span> 주기.<br>
       계정 소진·서버 끊김·회수 실패는 조용히 묻히지 않고 <b>경보</b>로 올라옵니다.
     </p>
+    <p class="mock-note" data-step data-at="80" style="margin-top:1.4vh">
+      콘솔은 <b>여덟 개 탭</b>(대시보드·상황판·서버·계정·할당·알림·사용량·감사)으로 나뉩니다.<br>
+      <b class="accent">상황판</b>에서는 서버·계정을 관제도처럼 <b>자유롭게 배치</b>해(격자 스냅) 어느 계정이 어느 서버에서 도는지 한눈에 봅니다.
+    </p>
   </section>
 
-  <!-- S8 기대 효과 · 110s -->
+  <!-- S8 관측·알림·감사 · 110s -->
+  <section class="scene" data-dur="110" data-name="관측·알림·감사"
+    data-notes="8월 중순에 더해진 관측·통보 계층. 카드 4장으로. ①Langfuse로 러너 세션을 흘려보내 계정·모델별 토큰을 실측(usageByType)한다 — 사용량 탭에 추정이 아닌 실제 소비량이 뜬다, 셀프호스팅. ②경보는 13종이고 HMAC 서명 웹훅으로 콘솔 밖(사내 채널)으로도 나간다, 비용 급증·수집 중단·지연은 임계값 경보로 미리 잡는다. ③러너에서 위험한 Bash가 실행되려 하면 PreToolUse 훅이 민감부를 마스킹해 통보하고 critical 경보를 연다. ④관리자의 변경성 액션은 전부 감사 로그로 남고 감사 탭에서 본다. 관측 계층은 선택 기능 — 안 켠 서버는 동작이 같다.">
+    <div class="eyebrow" data-step data-at="0.3">Observability</div>
+    <h2 data-step data-at="0.6">이제 실측하고, 알리고, 남깁니다</h2>
+    <div class="cards">
+      <div class="card" data-step data-at="4">
+        <div class="k">LANGFUSE METRICS</div>
+        <div class="t">토큰을 추정 아닌 실측으로</div>
+        <div class="d">사내에 띄운 Langfuse로 러너 세션을 흘려보내, 계정·모델별 토큰 소비를 실제 수치로 사용량 탭에 보여줍니다.</div>
+      </div>
+      <div class="card" data-step data-at="26">
+        <div class="k">ALERTS · WEBHOOK</div>
+        <div class="t">경보 13종, 콘솔 밖으로도</div>
+        <div class="d">HMAC 서명 웹훅으로 사내 채널까지 내보냅니다. 비용 급증·수집 중단·지연은 임계값 경보로 미리 잡습니다.</div>
+      </div>
+      <div class="card" data-step data-at="48">
+        <div class="k">DANGER GUARD</div>
+        <div class="t">위험한 명령은 실행 전에</div>
+        <div class="d">러너의 PreToolUse 훅이 위험한 Bash를 가로채, 민감부를 마스킹해 통보하고 critical 경보를 엽니다.</div>
+      </div>
+      <div class="card" data-step data-at="70">
+        <div class="k">AUDIT TRAIL</div>
+        <div class="t">누가 무엇을 바꿨는지</div>
+        <div class="d">관리자의 변경성 액션은 전부 감사 로그로 남습니다. 대상 그룹을 지워도 이력은 사라지지 않습니다.</div>
+      </div>
+    </div>
+    <p class="sub" data-step data-at="92" style="margin-top:3vh">관측·통보 계층은 켜지 않은 서버에선 동작이 완전히 같습니다.</p>
+  </section>
+
+  <!-- S9 운영 견고화 · 90s -->
+  <section class="scene" data-dur="90" data-name="운영 견고화"
+    data-notes="눈에 안 띄지만 사고를 막는 장치들. ①회수가 한 번에 끝나지 않아도 정해진 상한까지 스스로 재시도해 장부와 서버 실제를 다시 맞춘다. ②사용량 집계는 서버 시계가 앞으로 튀는 걸 감지하면 커서를 되감아 재정산해 오집계·요금 오배분을 막는다. ③다 쓴 계정 스냅샷·끊긴 배정은 보존 정책으로 정리하되 감사 로그는 기본 무기한. ④한 PC를 개인 작업과 러너가 나눠 쓰면 러너는 별도 프로필로 amx 명령으로 띄운다(부트스트랩이 지침·스킬을 링크로 공유).">
+    <div class="eyebrow" data-step data-at="0.3">Hardening</div>
+    <h2 data-step data-at="0.6">조용히 사고를 막는 장치들</h2>
+    <div class="cards">
+      <div class="card" data-step data-at="4">
+        <div class="k">SELF-HEALING RECALL</div>
+        <div class="t">회수 실패도 스스로 회복</div>
+        <div class="d">회수가 한 번에 끝나지 않아도 정해진 상한까지 스스로 재시도해, 장부와 서버의 실제 상태를 다시 맞춥니다.</div>
+      </div>
+      <div class="card" data-step data-at="24">
+        <div class="k">BILLING WATERMARK</div>
+        <div class="t">집계가 앞서 나가지 않게</div>
+        <div class="d">서버 시계가 앞으로 튀는 걸 감지하면 집계 커서를 되감아 다시 계산합니다. 잘못 배분된 요금이 남지 않습니다.</div>
+      </div>
+      <div class="card" data-step data-at="44">
+        <div class="k">RETENTION</div>
+        <div class="t">남길 것과 지울 것</div>
+        <div class="d">다 쓴 계정 스냅샷·끊긴 배정은 보존 기간에 맞춰 정리하고, 감사 로그는 기본으로 무기한 남깁니다.</div>
+      </div>
+      <div class="card" data-step data-at="64">
+        <div class="k">SHARED PC PROFILE</div>
+        <div class="t">한 PC, 두 역할</div>
+        <div class="d">개인 작업과 러너가 한 대를 나눠 쓸 때, 러너는 별도 프로필로 <span class="num">amx</span> 명령으로 띄웁니다.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- S10 기대 효과 · 110s -->
   <section class="scene" data-dur="110" data-name="기대 효과"
     data-notes="정량 수치는 시스템 파라미터(전환 임계 95%, 신호 주기)만 사실로 말하고, 나머지는 정성 효과로. 핵심: 관리 지점이 1곳으로 줄고, 전환이 사람 개입 없이 일어나 작업 중단이 사라지고, 로그인 정보 수동 복사가 0회가 되며, 모든 이력이 감사 가능하게 남는다.">
     <div class="eyebrow" data-step data-at="0.3">Impact</div>
@@ -596,7 +659,7 @@ body.paused .paused-flag { opacity: 1; }
     </div>
   </section>
 
-  <!-- S9 현황과 다음 · 60s -->
+  <!-- S11 현황과 다음 · 60s -->
   <section class="scene" data-dur="60" data-name="현황과 다음"
     data-notes="P0~P5 여섯 단계 전부 구현 완료, 이후 배포 안전장치·복구·경보 가시화 등 안정화까지 진행됨. 당장은 사내 내재화에 집중하고, 여러 고객사가 쓰는 서비스로의 확장은 설계만 준비된 상태(보류)라고 솔직하게.">
     <div class="eyebrow" data-step data-at="0.3">Status</div>
@@ -608,16 +671,16 @@ body.paused .paused-flag { opacity: 1; }
       <div class="tl-bar"></div>
       <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P4–P5</div><div class="tl-desc">관제 콘솔<br>다중 그룹</div></div>
       <div class="tl-bar"></div>
-      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">안정화</div><div class="tl-desc">복구 · 경보<br>배포 안전장치</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">안정화</div><div class="tl-desc">관측·감사<br>경보·자가치유</div></div>
       <div class="tl-bar togo"></div>
       <div class="tl-item next"><div class="tl-dot"></div><div class="tl-name">다음</div><div class="tl-desc">사내 내재화<br>(SaaS 확장은 대기)</div></div>
     </div>
     <p class="sub" data-step data-at="18">
-      계획한 여섯 단계는 전부 구현이 끝났고,<br>실사용 환경에서 등록부터 자동 전환까지 전 구간 검증을 마쳤습니다.
+      계획한 여섯 단계를 전부 끝낸 뒤 관측·알림·감사와 운영 견고화를 얹었고,<br>실사용 환경에서 등록부터 자동 전환까지 전 구간 검증을 마쳤습니다.
     </p>
   </section>
 
-  <!-- S10 마무리 · 30s -->
+  <!-- S12 마무리 · 30s -->
   <section class="scene" data-dur="30" data-name="마무리"
     data-notes="닫는 멘트: 계정 운영은 시스템에 맡기고 사람은 개발에 집중하자. Q&A로 전환. N키로 메모 끄는 것 잊지 말 것.">
     <div class="mark" data-step data-at="0.5">
