@@ -81,4 +81,7 @@ PROD-GUIDE의 TLS 절로 부족할 때, 인증서를 직접 다루는 사람이 
 
 - **[presentation/amx-intro.html](presentation/amx-intro.html)** — 프로젝트 소개용 발표 자료(정적
   HTML). 외부에 개요를 보여줄 때 쓴다.
+- **[presentation/amx-process.html](presentation/amx-process.html)** — 프로세스별 소개 발표 자료(정적
+  HTML, 오프라인 단일 파일). 구성요소·주요 서비스 5선·장점·도입 메리트·Codex 제약을 14장 컨설팅
+  덱으로 담는다. 발표자가 직접 발표하는 10분 브리핑용이다.
 - **cswapGitRepo.txt** — tsamx 원본(claude-swap) 저장소 주소를 적어 둔 한 줄 메모.
