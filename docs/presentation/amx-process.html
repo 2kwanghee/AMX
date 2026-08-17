@@ -1,0 +1,741 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMX 프로세스 브리핑</title>
+<style>
+  :root{
+    --navy:#0B1F3A;
+    --navy-2:#12294A;
+    --navy-3:#1B3557;
+    --paper:#FFFFFF;
+    --paper-2:#F4F6FA;
+    --ink:#0B1F3A;
+    --ink-2:#33465F;
+    --muted:#64748B;
+    --line:#D9E0EA;
+    --accent:#2F6FED;
+    --accent-2:#5B8DF0;
+    --accent-soft:rgba(47,111,237,.10);
+    --g1:#0B1F3A;
+    --g2:#4A5D75;
+    --g3:#8595A9;
+    --g4:#C3CDDA;
+    --g5:#E4EAF1;
+    --ok:#1E8E6A;
+    --warn:#C9822B;
+    --danger:#C2453C;
+    --shadow:0 18px 50px rgba(11,31,58,.16);
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:#060F1E;
+    font-family:var(--sans);
+    color:var(--ink);
+    word-break:keep-all;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* ---------- deck frame ---------- */
+  #deck{position:fixed;inset:0}
+  .slide{
+    position:absolute;inset:0;
+    display:none;
+    padding:5.2vh 6vw 7.5vh;
+    background:var(--paper);
+    opacity:0;
+    flex-direction:column;
+  }
+  .slide.active{display:flex;opacity:1}
+  .slide.dark{background:var(--navy);color:#EAF0F8}
+
+  /* ---------- eyebrow + title ---------- */
+  .eyebrow{
+    display:flex;align-items:center;gap:.7rem;
+    font-size:.74rem;font-weight:700;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--accent);
+    margin:0 0 1.1rem;
+  }
+  .eyebrow::before{content:"";width:34px;height:3px;background:var(--accent);border-radius:2px;display:inline-block}
+  .dark .eyebrow{color:var(--accent-2)}
+  .dark .eyebrow::before{background:var(--accent-2)}
+
+  .atitle{
+    font-size:clamp(1.5rem,3.05vw,2.6rem);
+    line-height:1.18;font-weight:750;letter-spacing:-.01em;
+    margin:0 0 .3rem;max-width:20em;color:var(--ink);
+  }
+  .dark .atitle{color:#FFFFFF}
+  .atitle .hl{color:var(--accent)}
+  .dark .atitle .hl{color:var(--accent-2)}
+  .subline{font-size:clamp(.9rem,1.2vw,1.05rem);color:var(--muted);margin:.1rem 0 0;max-width:44em;line-height:1.55}
+  .dark .subline{color:#A9B9CE}
+
+  .body{flex:1;display:flex;flex-direction:column;justify-content:center;min-height:0}
+
+  /* ---------- source / page footer ---------- */
+  .foot{
+    position:absolute;left:6vw;right:6vw;bottom:3vh;
+    display:flex;justify-content:space-between;align-items:center;
+    font-size:.7rem;color:var(--g3);
+    border-top:1px solid var(--line);padding-top:.7rem;letter-spacing:.02em;
+  }
+  .dark .foot{color:#6C8098;border-top-color:rgba(255,255,255,.12)}
+  .foot .src{font-style:italic}
+  .foot .pg b{color:var(--ink);font-weight:700}
+  .dark .foot .pg b{color:#EAF0F8}
+
+  /* ---------- progress ---------- */
+  #bar{position:fixed;left:0;bottom:0;height:4px;background:var(--accent);width:0;z-index:40;transition:width .5s cubic-bezier(.2,.7,.2,1)}
+
+  /* ---------- nav ---------- */
+  .nav{position:fixed;bottom:2.4vh;right:2.4vw;display:flex;gap:.5rem;z-index:41}
+  .nav button{
+    width:42px;height:42px;border-radius:50%;border:1px solid var(--line);
+    background:rgba(255,255,255,.9);color:var(--ink);font-size:1.1rem;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;transition:.18s;box-shadow:0 4px 14px rgba(11,31,58,.12)
+  }
+  .nav button:hover{background:var(--accent);color:#fff;border-color:var(--accent);transform:translateY(-2px)}
+  #dots{position:fixed;bottom:2.9vh;left:50%;transform:translateX(-50%);display:flex;gap:7px;z-index:41}
+  #dots span{width:8px;height:8px;border-radius:50%;background:var(--g4);cursor:pointer;transition:.2s}
+  #dots span.on{background:var(--accent);transform:scale(1.35)}
+
+  /* ---------- overview grid (number jump) ---------- */
+  #grid{position:fixed;inset:0;background:rgba(6,15,30,.94);z-index:60;display:none;padding:6vh 8vw;overflow:auto}
+  #grid.show{display:block}
+  #grid h3{color:#fff;font-size:1.1rem;letter-spacing:.08em;text-transform:uppercase;margin:0 0 2rem}
+  .gwrap{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem}
+  .gcard{background:#132A49;border:1px solid #22406A;border-radius:12px;padding:1.1rem 1.2rem;cursor:pointer;transition:.18s;color:#DCE6F3}
+  .gcard:hover{background:var(--accent);border-color:var(--accent);transform:translateY(-3px)}
+  .gcard .n{font-size:.72rem;color:var(--accent-2);font-weight:700;letter-spacing:.1em}
+  .gcard:hover .n{color:#dbe7ff}
+  .gcard .t{font-size:.92rem;margin-top:.4rem;line-height:1.35;font-weight:600}
+  #grid .close{position:absolute;top:4vh;right:6vw;color:#9fb2ca;font-size:1rem;cursor:pointer;letter-spacing:.05em}
+
+  /* ---------- reusable consulting shapes ---------- */
+  .reveal{opacity:0;transform:translateY(16px)}
+  .slide.active .reveal.in{opacity:1;transform:none;transition:opacity .55s ease,transform .55s cubic-bezier(.2,.7,.2,1)}
+
+  .cols{display:grid;gap:1.4rem}
+  .cols.c2{grid-template-columns:1fr 1fr}
+  .cols.c3{grid-template-columns:repeat(3,1fr)}
+  .cols.c5{grid-template-columns:repeat(5,1fr)}
+
+  .card{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:1.3rem 1.35rem;box-shadow:var(--shadow)}
+  .card h4{margin:.1rem 0 .55rem;font-size:1.02rem;letter-spacing:-.01em}
+  .card p{margin:0;color:var(--ink-2);font-size:.86rem;line-height:1.6}
+  .card .tag{display:inline-block;font-size:.66rem;font-weight:700;letter-spacing:.08em;color:var(--accent);
+    background:var(--accent-soft);padding:.2rem .5rem;border-radius:6px;text-transform:uppercase;margin-bottom:.6rem}
+
+  /* stat / KPI */
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:1rem}
+  .kpi{background:var(--navy);color:#fff;border-radius:14px;padding:1.3rem 1.1rem;position:relative;overflow:hidden}
+  .kpi::after{content:"";position:absolute;right:-20px;bottom:-20px;width:70px;height:70px;border-radius:50%;background:rgba(47,111,237,.28)}
+  .kpi .num{font-size:2rem;font-weight:780;letter-spacing:-.02em;line-height:1}
+  .kpi .unit{font-size:.95rem;font-weight:600;opacity:.8;margin-left:.15rem}
+  .kpi .lab{font-size:.76rem;color:#AFC1DA;margin-top:.55rem;line-height:1.4;position:relative;z-index:1}
+
+  /* process chain */
+  .chain{display:flex;align-items:stretch;gap:0;margin-top:.5rem}
+  .step{flex:1;background:var(--paper-2);border:1px solid var(--line);border-radius:12px;padding:1rem .9rem;position:relative;transition:.4s}
+  .step.lit{background:var(--navy);color:#fff;border-color:var(--navy);box-shadow:var(--shadow)}
+  .step .sn{font-size:.7rem;font-weight:700;letter-spacing:.1em;color:var(--accent)}
+  .step.lit .sn{color:var(--accent-2)}
+  .step h5{margin:.35rem 0 .3rem;font-size:.98rem}
+  .step p{margin:0;font-size:.76rem;line-height:1.45;color:var(--ink-2)}
+  .step.lit p{color:#C8D6EA}
+  .arrow{display:flex;align-items:center;justify-content:center;width:34px;color:var(--g3);font-size:1.3rem;flex:0 0 34px}
+
+  /* horizontal bars */
+  .bars{display:flex;flex-direction:column;gap:.9rem;margin-top:.4rem}
+  .brow{display:grid;grid-template-columns:9.5rem 1fr;align-items:center;gap:1rem}
+  .brow .bl{font-size:.85rem;font-weight:600;text-align:right;color:var(--ink-2)}
+  .btrack{background:var(--g5);border-radius:8px;height:34px;position:relative;overflow:hidden}
+  .bfill{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:8px;background:linear-gradient(90deg,var(--accent),var(--accent-2));
+    transition:width 1.1s cubic-bezier(.2,.7,.2,1);display:flex;align-items:center;justify-content:flex-end;padding-right:.7rem;color:#fff;font-size:.78rem;font-weight:700}
+  .bfill.gray{background:linear-gradient(90deg,var(--g2),var(--g3))}
+
+  /* 2x2 matrix */
+  .matrix{position:relative;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;height:100%;min-height:0}
+  .quad{border:1px solid var(--line);border-radius:14px;padding:1.15rem 1.2rem;background:var(--paper-2);transition:.45s;position:relative}
+  .quad.hot{background:var(--navy);color:#fff;border-color:var(--navy);box-shadow:var(--shadow);transform:translateY(-3px)}
+  .quad .qn{font-size:.7rem;letter-spacing:.1em;font-weight:700;color:var(--accent)}
+  .quad.hot .qn{color:var(--accent-2)}
+  .quad h5{margin:.35rem 0 .4rem;font-size:1rem}
+  .quad p{margin:0;font-size:.8rem;line-height:1.5;color:var(--ink-2)}
+  .quad.hot p{color:#C8D6EA}
+  .axis{position:absolute;font-size:.68rem;font-weight:700;letter-spacing:.08em;color:var(--g3);text-transform:uppercase}
+
+  /* before/after */
+  .ba{display:grid;grid-template-columns:1fr 3rem 1fr;gap:0;align-items:stretch}
+  .ba .side{border-radius:14px;padding:1.4rem 1.5rem}
+  .ba .before{background:var(--paper-2);border:1px solid var(--line)}
+  .ba .after{background:var(--navy);color:#fff}
+  .ba .mid{display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:1.6rem}
+  .ba h5{margin:0 0 .9rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}
+  .ba .before h5{color:var(--danger)}
+  .ba .after h5{color:var(--accent-2)}
+  .ba li{list-style:none;padding:.42rem 0 .42rem 1.4rem;position:relative;font-size:.86rem;line-height:1.5;border-bottom:1px dashed rgba(120,140,170,.25)}
+  .ba li:last-child{border-bottom:0}
+  .ba .before li::before{content:"—";position:absolute;left:0;color:var(--danger);font-weight:700}
+  .ba .after li::before{content:"✓";position:absolute;left:0;color:var(--accent-2);font-weight:700}
+  .ba .after li{color:#DCE6F3}
+
+  /* alert chips */
+  .chips{display:flex;flex-wrap:wrap;gap:.55rem;margin-top:.3rem}
+  .chip{font-size:.78rem;font-weight:600;padding:.4rem .75rem;border-radius:999px;border:1px solid var(--line);background:var(--paper-2);color:var(--ink-2);opacity:0;transform:scale(.85)}
+  .slide.active .chip.pop{opacity:1;transform:none;transition:.4s cubic-bezier(.2,1.3,.4,1)}
+  .chip.s{border-color:#F0C9C6;background:#FBEDEC;color:#A63A32}
+  .chip.a{border-color:#F1DDBE;background:#FBF2E2;color:#946018}
+  .chip.l{border-color:#C9DCF6;background:#EAF1FC;color:#2456B4}
+
+  /* lists */
+  .plist{list-style:none;margin:.3rem 0 0;padding:0;display:flex;flex-direction:column;gap:.7rem}
+  .plist li{padding-left:1.5rem;position:relative;font-size:.9rem;line-height:1.55;color:var(--ink-2)}
+  .plist li::before{content:"";position:absolute;left:0;top:.55em;width:8px;height:8px;border-radius:2px;background:var(--accent);transform:rotate(45deg)}
+  .plist li b{color:var(--ink)}
+  .dark .plist li{color:#C4D2E4}
+  .dark .plist li b{color:#fff}
+
+  .lead{font-size:1.05rem;line-height:1.7;color:var(--ink-2);max-width:40em}
+  .dark .lead{color:#C4D2E4}
+
+  /* cover */
+  .cover-mark{font-size:.8rem;letter-spacing:.4em;color:var(--accent-2);font-weight:700;text-transform:uppercase}
+  .cover-title{font-size:clamp(2.4rem,6vw,4.6rem);font-weight:800;letter-spacing:-.02em;line-height:1.02;margin:1.1rem 0 .4rem;color:#fff}
+  .cover-sub{font-size:clamp(1rem,1.7vw,1.35rem);color:#AFC1DA;max-width:34em;line-height:1.5}
+  .exec{display:grid;grid-template-columns:repeat(3,1fr);gap:1.1rem;margin-top:2.6rem;max-width:64rem}
+  .exec .e{border-left:3px solid var(--accent-2);padding:.3rem 0 .3rem 1.1rem}
+  .exec .e .k{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-2);font-weight:700}
+  .exec .e .v{font-size:.98rem;color:#DCE6F3;margin-top:.5rem;line-height:1.55}
+
+  .hintbadge{position:fixed;top:2.2vh;right:2.4vw;font-size:.68rem;color:var(--g3);z-index:41;letter-spacing:.03em}
+  .slide.dark ~ .hintbadge{color:#6C8098}
+
+  @media (max-width:820px){
+    .cols.c3,.cols.c5,.kpis,.exec{grid-template-columns:1fr 1fr}
+    .chain{flex-direction:column}.arrow{width:auto;height:24px;transform:rotate(90deg)}
+    .ba{grid-template-columns:1fr}.ba .mid{transform:rotate(90deg);padding:.5rem}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .reveal,.chip{opacity:1!important;transform:none!important}
+    .bfill,.step,.quad{transition:none!important}
+    #bar{transition:none}
+  }
+</style>
+
+<div id="deck">
+
+  <!-- 1 · COVER + EXEC SUMMARY -->
+  <section class="slide dark active" data-title="표지 · 익스큐티브 서머리">
+    <div class="body">
+      <div class="cover-mark reveal">AMX · Account Management &amp; eXchange</div>
+      <h1 class="cover-title reveal">계정 운영을<br>사람 손에서 <span style="color:var(--accent-2)">중앙 관제</span>로</h1>
+      <p class="cover-sub reveal">여러 서버에 흩어진 Claude 구독 계정의 배정·전환·회수·관측을 하나의 시스템으로 자동화한다.</p>
+      <div class="exec">
+        <div class="e reveal"><div class="k">문제</div><div class="v">서버마다 계정을 손으로 갈아끼우면 실수·한도 소진 중단·과금 사고가 반복된다.</div></div>
+        <div class="e reveal"><div class="k">해법</div><div class="v">중앙 서버 1대와 서버별 에이전트가 배정→하달→자동전환→회수를 대신 수행한다.</div></div>
+        <div class="e reveal"><div class="k">효과</div><div class="v">95% 임계 자동 전환으로 무중단 운영, 경보 13종·토큰 실측으로 사고 조기 차단.</div></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX 설계 문서(AMX-DESIGN.md·OVERVIEW.md), 2026.08 기준</span><span class="pg"><b>01</b> / 14</span></div>
+  </section>
+
+  <!-- 2 · WHAT / WHY -->
+  <section class="slide" data-title="AMX는 무엇이고 왜 만들었나">
+    <div class="eyebrow">Context · 왜 만들었나</div>
+    <h2 class="atitle">계정 관리를 <span class="hl">수작업</span>으로 하면, 규모가 커질수록 반드시 새는 곳이 생긴다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <p class="lead">Claude 유료 계정이 여러 개, 작업 서버가 여러 대. 계정마다 사용 한도가 있어 한쪽만 쓰면 금세 막힌다. 그래서 누군가 서버에 접속해 계정을 나눠주고, 한도가 차면 갈아끼우고, 다 쓰면 회수해야 한다.</p>
+          <p class="lead" style="margin-top:1rem">이 반복을 사람이 하면 <b style="color:var(--ink)">실수·지연·중단</b>이 쌓인다. AMX는 이 전 과정을 <b style="color:var(--accent)">중앙 서버 하나와 서버별 상주 프로그램</b>으로 자동화한다.</p>
+        </div>
+        <div class="reveal">
+          <div class="cols" style="grid-template-columns:1fr 1fr;gap:1rem">
+            <div class="card"><span class="tag">수작업의 실패 모드</span><p style="color:var(--danger);font-weight:600">서버마다 SSH 접속·수동 배정</p></div>
+            <div class="card"><p style="color:var(--danger);font-weight:600">한도 소진 순간 작업 중단</p></div>
+            <div class="card"><p style="color:var(--danger);font-weight:600">회수 누락으로 죽은 계정 재사용</p></div>
+            <div class="card"><p style="color:var(--danger);font-weight:600">누가 얼마 썼는지 근거 부재</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md §1, AMX-DESIGN.md §개요</span><span class="pg"><b>02</b> / 14</span></div>
+  </section>
+
+  <!-- 3 · COMPONENTS + PROCESS CHAIN -->
+  <section class="slide" data-title="전체 구성요소와 프로세스 흐름">
+    <div class="eyebrow">Architecture · 구성요소</div>
+    <h2 class="atitle">다섯 구성요소가 <span class="hl">배정→하달→전환→회수</span> 한 체인을 나눠 맡는다</h2>
+    <div class="body">
+      <div class="cols c5 reveal" style="margin-bottom:1.5rem">
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">콘솔</span><h4>ams-web</h4><p>관리자 웹 화면. 등록·배정·상태·경보·정책을 다룬다.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">중앙 두뇌</span><h4>ams-server</h4><p>장부·명령·보고 대조를 담당하는 관제실.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">서버 상주</span><h4>ama-agent</h4><p>명령 실행·30초 하트비트·5분 사용량 보고.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">전환기</span><h4>tsamx</h4><p>한 서버 안에서 계정을 갈아끼우는 스위치.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">계약</span><h4>contracts</h4><p>세 언어 구성요소가 지키는 통신 규격(proto·OpenAPI).</p></div>
+      </div>
+      <div class="chain" id="chain3">
+        <div class="step"><div class="sn">STEP 1 · 배정</div><h5>콘솔에서 계정→서버 지정</h5><p>ams-web·ams-server가 장부에 배정을 기록</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">STEP 2 · 하달</div><h5>자격증명 암호화 전달</h5><p>ama-agent가 받아 tsamx에 등록</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">STEP 3 · 전환</div><h5>95% 도달 시 자동 교체</h5><p>tsamx가 다음 계정으로 전환·보고</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">STEP 4 · 회수</div><h5>완전 분리·재배정 대기</h5><p>ama-agent가 purge, 중앙이 대조·정착</p></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md §2, AMX-DESIGN.md §5.1·§5.2</span><span class="pg"><b>03</b> / 14</span></div>
+  </section>
+
+  <!-- 4 · SERVICE OVERVIEW -->
+  <section class="slide" data-title="주요 서비스 5선 개요">
+    <div class="eyebrow">Services · 프로세스별 서비스</div>
+    <h2 class="atitle">운영에 필요한 다섯 프로세스가 각각 <span class="hl">독립 서비스</span>로 구현돼 있다</h2>
+    <div class="body">
+      <div class="cols c5">
+        <div class="card reveal"><span class="tag">서비스 ①</span><h4>계정 배정·회수</h4><p>배정·하달·회수 생애주기와 실패 자가치유.</p></div>
+        <div class="card reveal"><span class="tag">서비스 ②</span><h4>자동 전환</h4><p>95% 임계·히스테리시스·쿨다운·격리.</p></div>
+        <div class="card reveal"><span class="tag">서비스 ③</span><h4>실시간 관제</h4><p>상황판·경보 13종·아웃박스 웹훅.</p></div>
+        <div class="card reveal"><span class="tag">서비스 ④</span><h4>사용량·비용</h4><p>Langfuse 토큰 실측·내부 청구 집계.</p></div>
+        <div class="card reveal"><span class="tag">서비스 ⑤</span><h4>보안·감사</h4><p>암호 채널·서명 명령·위험 명령 감지.</p></div>
+      </div>
+      <p class="subline reveal" style="margin-top:1.6rem">다음 다섯 장에서 각 서비스가 어떤 프로세스를 어떻게 자동화하는지 하나씩 본다.</p>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md §5.2~§5.7</span><span class="pg"><b>04</b> / 14</span></div>
+  </section>
+
+  <!-- 5 · SERVICE 1 : ASSIGN / RECALL -->
+  <section class="slide" data-title="서비스① 계정 배정·회수">
+    <div class="eyebrow">Service ① · 배정·회수</div>
+    <h2 class="atitle">배정은 <span class="hl">재전달</span>, 회수는 <span class="hl">완전 분리</span> — 실패해도 스스로 낫는다</h2>
+    <div class="body">
+      <div class="cols c2">
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>배정·하달</b> — 콘솔에서 계정을 서버에 지정하면 자격증명을 암호화해 에이전트로 보내 tsamx에 등록한다.</li>
+            <li><b>회수 = 항상 purge</b> — provider 무관 <b>purge_local_copy=true</b>로 해당 서버에서 완전히 떼어내고, 이력은 detached 배정 행·이벤트로만 남긴다.</li>
+            <li><b>credential 역동기화</b> — 서버에서 회전된 자격증명을 중앙이 자동 최신화해, 다른 서버로 옮길 때 죽은 정보를 주지 않는다.</li>
+          </ul>
+        </div>
+        <div class="card reveal" style="background:var(--paper-2)">
+          <span class="tag">회수 실패 자가치유 (D1)</span>
+          <div class="bars" style="margin-top:.8rem">
+            <div class="brow"><span class="bl">자동 재recall</span><div class="btrack"><div class="bfill" data-w="50" data-txt="상한 3회"></div></div></div>
+            <div class="brow"><span class="bl">수동 재요청</span><div class="btrack"><div class="bfill gray" data-w="50" data-txt="상한 3회"></div></div></div>
+            <div class="brow"><span class="bl">총 예산</span><div class="btrack"><div class="bfill" data-w="100" data-txt="6회 · 성공 시 경보 자동 해소"></div></div></div>
+          </div>
+          <p style="margin-top:.9rem;font-size:.8rem;color:var(--muted)">두 상한이 모두 소진되면 자동 회복을 멈추고 <b style="color:var(--danger)">recall_failed</b> 경보만 유지 — 최종 탈출구는 global-admin의 force recall.</p>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md §5.2·§5.7, O2 결정(2026-08-14)</span><span class="pg"><b>05</b> / 14</span></div>
+  </section>
+
+  <!-- 6 · SERVICE 2 : AUTO SWITCH -->
+  <section class="slide" data-title="서비스② 자동 전환">
+    <div class="eyebrow">Service ② · 자동 전환</div>
+    <h2 class="atitle">사용률 <span class="hl">95%</span>에서 다음 계정으로 넘어가 작업을 멈추지 않는다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <div class="kpi" style="max-width:none;margin-bottom:1.1rem">
+            <div><span class="num" data-count="95" data-suffix="%"></span></div>
+            <div class="lab">자동 스위칭 임계 — tsamx autoswitch.threshold. 도달 시 후보 랭킹 후 교체.</div>
+          </div>
+          <ul class="plist">
+            <li><b>중앙 정책 하달</b> — SetPolicy로 <b>threshold·strategy·cooldown·hysteresis</b> 4축을 세션마다 재천명한다.</li>
+            <li><b>안정화 장치</b> — 히스테리시스로 임계선 진동을, 쿨다운으로 잦은 전환을 막고, 실패 계정은 격리(quarantine)한다.</li>
+            <li><b>전 계정 소진</b> 감지 시 크리티컬 이벤트로 즉시 통지한다.</li>
+          </ul>
+        </div>
+        <div class="reveal">
+          <div class="card"><span class="tag">전환 판정 흐름</span>
+            <div class="chain" style="flex-direction:column;gap:0;margin-top:.6rem" id="chain6">
+              <div class="step"><div class="sn">1</div><h5>사용률 ≥ 95%</h5><p>binding-window(5시간·7일) 최댓값 기준</p></div>
+              <div class="arrow" style="transform:rotate(90deg)">→</div>
+              <div class="step"><div class="sn">2</div><h5>후보 랭킹</h5><p>strategy: best / next-available</p></div>
+              <div class="arrow" style="transform:rotate(90deg)">→</div>
+              <div class="step"><div class="sn">3</div><h5>전환 + 즉시 보고</h5><p>switch_event로 중앙 통지</p></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md §2.2·§5.3, D10 임계치</span><span class="pg"><b>06</b> / 14</span></div>
+  </section>
+
+  <!-- 7 · SERVICE 3 : MONITORING -->
+  <section class="slide" data-title="서비스③ 실시간 관제">
+    <div class="eyebrow">Service ③ · 실시간 관제</div>
+    <h2 class="atitle">상황판·경보 <span class="hl">13종</span>·웹훅으로 이상을 조기에 밖으로 밀어낸다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:start">
+        <div class="reveal">
+          <ul class="plist" style="margin-bottom:1.1rem">
+            <li><b>상황판</b> — 콘솔이 5~10초 폴링으로 서버·계정·배정 상태를 비춘다. <b>30초 하트비트</b>가 끊기면(last_seen_at 만료) 서버를 offline으로 전이한다.</li>
+            <li><b>자가복원 경보</b> — 이벤트가 유실돼도 reconcile-on-report 재조회로 경보를 재구성한다.</li>
+            <li><b>아웃박스 웹훅</b> — 경보 전이를 같은 트랜잭션에 스테이징하고, HMAC-SHA256 서명으로 무결성을 보장해 외부로 발송한다(at-least-once).</li>
+          </ul>
+          <p class="subline">경보 kind 13종 — 서버·계정·테넌트·시스템 범위로 나뉜다.</p>
+        </div>
+        <div class="reveal">
+          <div class="card"><span class="tag">경보 로스터 13종</span>
+            <div class="chips" style="margin-top:.7rem">
+              <span class="chip s">all_exhausted</span><span class="chip s">server_offline</span>
+              <span class="chip s">self_update_failed</span><span class="chip a">drift</span>
+              <span class="chip a">quarantine</span><span class="chip a">recall_failed</span>
+              <span class="chip a">command_send_failed</span><span class="chip a">billing_watermark_future</span>
+              <span class="chip l">langfuse_usage_spike</span><span class="chip l">langfuse_stale</span>
+              <span class="chip l">langfuse_latency</span><span class="chip">alert_webhook_dropped</span>
+              <span class="chip s">dangerous_command</span>
+            </div>
+            <p style="margin-top:.9rem;font-size:.76rem;color:var(--muted)">P3 8종 + Langfuse 3종 + 웹훅 드롭 + 위험명령 = 13종. dedupe 키로 open 1건만 유지, 조건 해소 시 auto-resolve.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md §5.6~§5.6.3</span><span class="pg"><b>07</b> / 14</span></div>
+  </section>
+
+  <!-- 8 · SERVICE 4 : USAGE / BILLING -->
+  <section class="slide" data-title="서비스④ 사용량 실측·비용">
+    <div class="eyebrow">Service ④ · 사용량·비용</div>
+    <h2 class="atitle">토큰을 <span class="hl">종류별로 실측</span>해, 과금 근거를 추정이 아닌 원장으로 남긴다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>Langfuse usageByType</b> — 러너 세션 훅이 보낸 기록을 중앙이 폴링해, 토큰을 종류별로 각 컬럼에 실측 적재한다.</li>
+            <li><b>내부 청구 집계</b> — usage 원장을 닫힌 UTC 일 단위 billing_events로 롤업한다(멱등 앵커로 중복 방지). 외부 결제는 미연동.</li>
+            <li><b>영구 보존</b> — usage_daily_rollup은 삭제 정책 대상이 아니라 비용 배분 입력으로 영구 보존한다(원문 스냅샷은 90일).</li>
+          </ul>
+        </div>
+        <div class="card reveal" style="background:var(--paper-2)">
+          <span class="tag">토큰 5종 실측 (usageByType)</span>
+          <div class="bars" style="margin-top:.8rem">
+            <div class="brow"><span class="bl">input</span><div class="btrack"><div class="bfill" data-w="72" data-txt="순수 input"></div></div></div>
+            <div class="brow"><span class="bl">output</span><div class="btrack"><div class="bfill" data-w="40" data-txt="output"></div></div></div>
+            <div class="brow"><span class="bl">cache_read</span><div class="btrack"><div class="bfill gray" data-w="88" data-txt="캐시 실측"></div></div></div>
+            <div class="brow"><span class="bl">cache_creation</span><div class="btrack"><div class="bfill gray" data-w="34" data-txt="캐시 실측"></div></div></div>
+            <div class="brow"><span class="bl">total</span><div class="btrack"><div class="bfill" data-w="100" data-txt="관측 카운트 기준"></div></div></div>
+          </div>
+          <p style="margin-top:.9rem;font-size:.76rem;color:var(--muted)">막대는 종류 구분 예시. 과거 합산값으로 부풀던 input과 0이던 캐시가, 이제 순수 input·실측 캐시로 분리된다.</p>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md §5.6.1, BACKLOG(usageByType 실측)</span><span class="pg"><b>08</b> / 14</span></div>
+  </section>
+
+  <!-- 9 · SERVICE 5 : SECURITY / AUDIT -->
+  <section class="slide" data-title="서비스⑤ 보안·감사">
+    <div class="eyebrow">Service ⑤ · 보안·감사</div>
+    <h2 class="atitle">암호 채널·<span class="hl">서명 명령</span>·감사 로그로, 자동화에 통제선을 함께 깐다</h2>
+    <div class="body">
+      <div class="matrix reveal">
+        <div class="quad"><div class="qn">채널</div><h5>암호화 제어면</h5><p>중앙↔에이전트 gRPC는 TLS/mTLS, 저장 자격증명은 테넌트 DEK/KEK 봉투암호화(AES-256-GCM).</p></div>
+        <div class="quad"><div class="qn">명령</div><h5>서명·멱등 명령</h5><p>모든 명령은 command_id로 멱등, CommandAck 수렴 회신으로 확정. 드리프트 감지 시 교정 재하달.</p></div>
+        <div class="quad"><div class="qn">감시</div><h5>위험 명령 감지</h5><p>PreToolUse 훅이 rm -rf·sudo·dd·curl|sh·force push를 탐지해 통보(차단 아님). 원문은 마스킹·해시만 전송.</p></div>
+        <div class="quad"><div class="qn">기록</div><h5>관리 감사 로그</h5><p>변경성 REST를 누가·언제·무엇을 바꿨는지 남긴다. 자격증명이 실리는 바디는 저장하지 않는다.</p></div>
+        <span class="axis" style="left:50%;top:-1.6rem;transform:translateX(-50%)">예방  ←→  탐지</span>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md §5.5·§5.6.3·§5.6.4·§7, f2-envelope</span><span class="pg"><b>09</b> / 14</span></div>
+  </section>
+
+  <!-- 10 · BENEFIT : BEFORE/AFTER + KPI -->
+  <section class="slide" data-title="AMX 장점 · Before/After">
+    <div class="eyebrow">Value · 장점</div>
+    <h2 class="atitle">손으로 하던 운영이 <span class="hl">자동·관측 가능·복원 가능</span>으로 바뀐다</h2>
+    <div class="body">
+      <div class="ba reveal" style="margin-bottom:1.4rem">
+        <div class="side before"><h5>Before · 수작업</h5>
+          <ul style="margin:0;padding:0"><li>서버마다 접속해 수동 전환</li><li>한도 소진 시 작업 중단</li><li>회수 누락·죽은 계정 재사용</li><li>사용량·비용 근거 부재</li></ul>
+        </div>
+        <div class="mid">→</div>
+        <div class="side after"><h5>After · AMX</h5>
+          <ul style="margin:0;padding:0"><li>95% 임계 자동 전환·무중단</li><li>경보 13종 조기 탐지·웹훅</li><li>회수 실패 자가치유(예산 6)</li><li>토큰 5종 실측·원장 청구</li></ul>
+        </div>
+      </div>
+      <div class="kpis reveal">
+        <div class="kpi"><div><span class="num" data-count="30" data-suffix="s"></span></div><div class="lab">하트비트 주기</div></div>
+        <div class="kpi"><div><span class="num" data-count="5" data-suffix="분"></span></div><div class="lab">사용량 보고</div></div>
+        <div class="kpi"><div><span class="num" data-count="95" data-suffix="%"></span></div><div class="lab">자동 전환 임계</div></div>
+        <div class="kpi"><div><span class="num" data-count="13" data-suffix="종"></span></div><div class="lab">경보 로스터</div></div>
+        <div class="kpi"><div><span class="num" data-count="5" data-suffix="종"></span></div><div class="lab">토큰 실측 축</div></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md §5(수치는 설계 문서 근거)</span><span class="pg"><b>10</b> / 14</span></div>
+  </section>
+
+  <!-- 11 · INTERNAL ADOPTION -->
+  <section class="slide" data-title="사내 도입 메리트">
+    <div class="eyebrow">Adoption · 사내 도입</div>
+    <h2 class="atitle">지금 우리 상황 — 여러 유료 계정·여러 서버·AI 코딩 에이전트 — 에 <span class="hl">그대로</span> 맞는다</h2>
+    <div class="body">
+      <div class="cols c2">
+        <div class="card reveal"><span class="tag">얻는 것 1</span><h4>요금 사고 방지</h4><p>계정 교체 순간의 오청구를 amx-claude 래퍼가 막고, 위험 명령은 훅이 조기 경보로 올린다.</p></div>
+        <div class="card reveal"><span class="tag">얻는 것 2</span><h4>한도 소진 무중단</h4><p>95% 임계 자동 전환과 전 계정 소진 크리티컬 이벤트로, 작업이 한도에 걸려 멈추지 않는다.</p></div>
+        <div class="card reveal"><span class="tag">얻는 것 3</span><h4>계정 현황 단일 화면</h4><p>어느 서버가 어느 계정을 쓰는지, 오프라인·드리프트·격리 상태까지 콘솔 한 곳에서 본다.</p></div>
+        <div class="card reveal"><span class="tag">얻는 것 4</span><h4>과금 근거 확보</h4><p>Langfuse 토큰 실측과 usage 원장으로, 어느 계정이 얼마 썼는지 추정이 아닌 데이터로 남는다.</p></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md §6, DEPLOYMENT-RUNNER.md(래퍼·훅)</span><span class="pg"><b>11</b> / 14</span></div>
+  </section>
+
+  <!-- 12 · SAAS POTENTIAL -->
+  <section class="slide" data-title="범용 서비스화 메리트">
+    <div class="eyebrow">Scale · 서비스화 잠재력</div>
+    <h2 class="atitle">SaaS로 갈 <span class="hl">토대</span>가 이미 코드에 들어가 있다 — 같은 문제를 가진 조직이 는다</h2>
+    <div class="body">
+      <div class="cols c3" style="margin-bottom:1.3rem">
+        <div class="card reveal"><span class="tag">이미 있음</span><h4>멀티테넌트 구조</h4><p>Principal·테넌트 스코핑으로 고객 그룹 간 데이터가 격리된다(P5 F1·E3).</p></div>
+        <div class="card reveal"><span class="tag">이미 있음</span><h4>RBAC</h4><p>global-admin·tenant-admin 2역할 권한 구분이 설계·구현돼 있다.</p></div>
+        <div class="card reveal"><span class="tag">이미 있음</span><h4>봉투 암호화</h4><p>테넌트별 DEK를 KEK로 래핑(local·aws-kms·vault 어댑터 자리)해 저장한다.</p></div>
+      </div>
+      <p class="subline reveal">다만 상용화는 지금 <b style="color:var(--ink)">보류</b> 상태 — 사내 내재화를 먼저 끝내기로 결정했고, 외부 결제·KMS 벤더 연동은 도입 시점에 재검토한다(P5 로드맵).</p>
+    </div>
+    <div class="foot"><span class="src">자료: p5-saas-architecture.md, AMX-DESIGN.md §5.1, archive/todo/on-hold-saas</span><span class="pg"><b>12</b> / 14</span></div>
+  </section>
+
+  <!-- 13 · CODEX -->
+  <section class="slide" data-title="Codex — 제약과 그 안의 성과">
+    <div class="eyebrow">Codex · 제약과 성과</div>
+    <h2 class="atitle">Codex는 구조적 제약이 있다 — <span class="hl">제약을 인정하되</span> 엔지니어링으로 최대치를 끌어냈다</h2>
+    <div class="body">
+      <div class="ba reveal">
+        <div class="side before"><h5>구조적 제약 (솔직히)</h5>
+          <ul style="margin:0;padding:0">
+            <li>서버 한 대 = Codex 계정 하나 (auth.json 한 장, server_codex_capacity로 2번째 배정 거부)</li>
+            <li>자동 전환 회전 미지원 — Claude 수준 풀 회전 불가</li>
+            <li>사이드카(codex_single_account)로 회수는 항상 완전 삭제 필수</li>
+            <li>Langfuse 훅은 Claude 전용 — codex 관측 공백(G44, 대기)</li>
+          </ul>
+        </div>
+        <div class="mid">→</div>
+        <div class="side after"><h5>제약 안에서 구현한 것</h5>
+          <ul style="margin:0;padding:0">
+            <li>배정·하달 — 용량 제어(server_codex_capacity)로 안전하게</li>
+            <li>회수 — provider 무관 purge_local_copy=true로 깔끔히 분리</li>
+            <li>사용량 창 보고 — provider 일반화 windows로 수집</li>
+            <li>과금 창 방어 — amx-codex 래퍼로 Claude와 동일 보호</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: DEPLOYMENT-RUNNER.md §codex, AMX-DESIGN.md O2, BACKLOG G44</span><span class="pg"><b>13</b> / 14</span></div>
+  </section>
+
+  <!-- 14 · CLOSE -->
+  <section class="slide dark" data-title="마무리 · 현재 상태와 다음 단계">
+    <div class="eyebrow">Close · 마무리</div>
+    <h2 class="atitle" style="color:#fff">코어는 완료됐다 — 다음은 <span style="color:var(--accent-2)">파일럿</span>으로 실환경을 통과시키는 일이다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>현재</b> — P0~P5 전 단계와 안정화(배포 안전장치·역동기화·청구 보호·경보) 완료. 문서-실물 대조까지 마쳤다.</li>
+            <li><b>다음 ①</b> — 다른 섹션 완료 후 파일럿, 그 시점에 일괄 병합.</li>
+            <li><b>다음 ②</b> — 멀티 프로바이더(Codex 관측·시트 확장)는 결정 대기 항목을 매듭짓고 착수.</li>
+            <li><b>다음 ③</b> — 상용 SaaS는 내재화 완료 후 재개.</li>
+          </ul>
+        </div>
+        <div class="reveal">
+          <div class="card" style="background:var(--navy-2);border-color:var(--navy-3)">
+            <span class="tag" style="background:rgba(91,141,240,.18);color:var(--accent-2)">한 줄 요약</span>
+            <p style="color:#DCE6F3;font-size:1rem;line-height:1.7">수작업 계정 운영을 <b style="color:#fff">중앙 관제·자동 전환·실측 관측·복원 가능한 자동화</b>로 바꾸는 시스템. 사내 도입은 지금, 서비스화는 토대만 갖춘 채 다음.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md §6~§7, BACKLOG.md, 프로젝트 메모리(파일럿 방침)</span><span class="pg"><b>14</b> / 14</span></div>
+  </section>
+
+</div>
+
+<div id="bar"></div>
+<div class="hintbadge">← → 이동 · G 목차</div>
+<div id="dots"></div>
+<div class="nav">
+  <button id="prev" aria-label="이전">‹</button>
+  <button id="next" aria-label="다음">›</button>
+</div>
+
+<div id="grid">
+  <span class="close">✕ 닫기 (G)</span>
+  <h3>슬라이드 목차</h3>
+  <div class="gwrap" id="gwrap"></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var slides = Array.prototype.slice.call(document.querySelectorAll(".slide"));
+  var total = slides.length;
+  var cur = 0;
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // build dots + overview grid
+  var dots = document.getElementById("dots");
+  var gwrap = document.getElementById("gwrap");
+  slides.forEach(function(s, i){
+    var d = document.createElement("span");
+    d.addEventListener("click", function(){ go(i); });
+    dots.appendChild(d);
+    var g = document.createElement("div");
+    g.className = "gcard";
+    g.innerHTML = '<div class="n">' + String(i + 1).padStart(2, "0") + '</div><div class="t">' +
+                  (s.getAttribute("data-title") || "슬라이드") + '</div>';
+    g.addEventListener("click", function(){ toggleGrid(false); go(i); });
+    gwrap.appendChild(g);
+  });
+  var dotEls = dots.children;
+
+  function stagger(slide){
+    var items = slide.querySelectorAll(".reveal");
+    items.forEach(function(el, i){
+      el.classList.remove("in");
+      if (reduce){ el.classList.add("in"); return; }
+      setTimeout(function(){ el.classList.add("in"); }, 90 + i * 120);
+    });
+  }
+
+  function animateBars(slide){
+    var fills = slide.querySelectorAll(".bfill");
+    fills.forEach(function(f, i){
+      var w = f.getAttribute("data-w") || "0";
+      var txt = f.getAttribute("data-txt") || "";
+      f.style.width = "0";
+      f.textContent = "";
+      var delay = reduce ? 0 : 300 + i * 130;
+      setTimeout(function(){
+        f.style.width = w + "%";
+        f.textContent = txt;
+      }, delay);
+    });
+  }
+
+  function countUp(slide){
+    var nums = slide.querySelectorAll("[data-count]");
+    nums.forEach(function(el, i){
+      var target = parseFloat(el.getAttribute("data-count"));
+      var suffix = el.getAttribute("data-suffix") || "";
+      if (reduce){ el.textContent = target + suffix; return; }
+      var start = null, dur = 900, delay = 200 + i * 120;
+      setTimeout(function(){
+        function frame(ts){
+          if (start === null) start = ts;
+          var p = Math.min((ts - start) / dur, 1);
+          var eased = 1 - Math.pow(1 - p, 3);
+          el.textContent = Math.round(target * eased) + suffix;
+          if (p < 1) requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      }, delay);
+    });
+  }
+
+  function litChain(slide){
+    var steps = slide.querySelectorAll(".step");
+    steps.forEach(function(st){ st.classList.remove("lit"); });
+    if (reduce){ steps.forEach(function(st){ st.classList.add("lit"); }); return; }
+    steps.forEach(function(st, i){
+      setTimeout(function(){ st.classList.add("lit"); }, 500 + i * 420);
+    });
+  }
+
+  function litMatrix(slide){
+    var quads = slide.querySelectorAll(".quad");
+    if (!quads.length) return;
+    var idx = 0;
+    quads.forEach(function(q){ q.classList.remove("hot"); });
+    if (reduce) return;
+    function cycle(){
+      quads.forEach(function(q){ q.classList.remove("hot"); });
+      quads[idx].classList.add("hot");
+      idx = (idx + 1) % quads.length;
+    }
+    cycle();
+    slide._mtimer = setInterval(cycle, 1400);
+  }
+
+  function popChips(slide){
+    var chips = slide.querySelectorAll(".chip");
+    chips.forEach(function(c, i){
+      c.classList.remove("pop");
+      if (reduce){ c.classList.add("pop"); return; }
+      setTimeout(function(){ c.classList.add("pop"); }, 250 + i * 70);
+    });
+  }
+
+  function play(slide){
+    stagger(slide);
+    animateBars(slide);
+    countUp(slide);
+    litChain(slide);
+    litMatrix(slide);
+    popChips(slide);
+  }
+
+  function clearTimers(slide){
+    if (slide._mtimer){ clearInterval(slide._mtimer); slide._mtimer = null; }
+  }
+
+  function go(n){
+    if (n < 0 || n >= total || n === cur) { if (n === cur) return; }
+    if (n < 0) n = 0;
+    if (n >= total) n = total - 1;
+    var prevSlide = slides[cur];
+    clearTimers(prevSlide);
+    prevSlide.classList.remove("active");
+    cur = n;
+    var s = slides[cur];
+    s.classList.add("active");
+    for (var i = 0; i < dotEls.length; i++){
+      dotEls[i].className = (i === cur) ? "on" : "";
+    }
+    document.getElementById("bar").style.width = ((cur + 1) / total * 100) + "%";
+    play(s);
+  }
+
+  function next(){ if (cur < total - 1) go(cur + 1); }
+  function prev(){ if (cur > 0) go(cur - 1); }
+
+  document.getElementById("next").addEventListener("click", next);
+  document.getElementById("prev").addEventListener("click", prev);
+
+  var grid = document.getElementById("grid");
+  function toggleGrid(force){
+    var show = (typeof force === "boolean") ? force : !grid.classList.contains("show");
+    grid.classList.toggle("show", show);
+  }
+  document.querySelector("#grid .close").addEventListener("click", function(){ toggleGrid(false); });
+
+  document.addEventListener("keydown", function(e){
+    if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " "){ e.preventDefault(); next(); }
+    else if (e.key === "ArrowLeft" || e.key === "PageUp"){ e.preventDefault(); prev(); }
+    else if (e.key === "Home"){ go(0); }
+    else if (e.key === "End"){ go(total - 1); }
+    else if (e.key === "g" || e.key === "G"){ toggleGrid(); }
+    else if (e.key === "Escape"){ toggleGrid(false); }
+    else if (/^[0-9]$/.test(e.key)){
+      var n = parseInt(e.key, 10);
+      if (n >= 1 && n <= total) go(n - 1);
+    }
+  });
+
+  // click-to-advance on slide body (ignore controls / links)
+  document.getElementById("deck").addEventListener("click", function(e){
+    if (e.target.closest("button, a, #dots, .gcard")) return;
+    next();
+  });
+
+  // init
+  document.getElementById("bar").style.width = (1 / total * 100) + "%";
+  dotEls[0].className = "on";
+  play(slides[0]);
+})();
+</script>
