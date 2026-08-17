@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"unicode"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
@@ -114,6 +115,100 @@ func (*Driver) Fingerprint(cred []byte) string {
 	}
 	sum := sha256.Sum256(cred)
 	return "sha256-full:" + hex.EncodeToString(sum[:])
+}
+
+// HasCredentialMaterial reports whether an auth.json body still carries token
+// material. It answers one question only: is this a logged-out shell — a tokens
+// block carrying the token keys but nothing in them, and no API key either?
+//
+// The re-sync caller drops a push when this is false, so the bias is toward true:
+// an unparseable body, a non-object top level, a missing or non-object tokens
+// block, a tokens block holding NEITHER token key (an unknown schema inside the
+// block is as unjudgeable as one outside it), or a token of an unexpected JSON
+// type are all shapes this cannot judge and all return true. false requires that
+// at least one of refresh_token/access_token is present, that every present one
+// is blank, AND that no non-blank top-level OPENAI_API_KEY stands in for them —
+// plus the one non-JSON case that is certain: a blank body.
+//
+// Never logs the credential (§7).
+func (*Driver) HasCredentialMaterial(cred []byte) bool {
+	if isBlankCredential(string(cred)) {
+		return false // whitespace/control bytes only: not even an opaque api key
+	}
+	root, ok := jsonObject(cred)
+	if !ok {
+		return true // unparseable or not an object: cannot judge -> usable
+	}
+	raw, present := root["tokens"]
+	if !present {
+		return true // unknown schema
+	}
+	tokens, ok := jsonObject(raw)
+	if !ok {
+		return true // tokens is not an object (e.g. null on an api-key auth.json)
+	}
+	anyKey, material := tokenMaterial(tokens, "refresh_token", "access_token")
+	if !anyKey {
+		return true // neither token key present: unknown schema inside the block
+	}
+	if material {
+		return true
+	}
+	// An emptied tokens block is still usable when the api-key form is present.
+	_, apiKey := tokenMaterial(root, "OPENAI_API_KEY")
+	return apiKey
+}
+
+// isBlankCredential reports whether s carries no credential information at all:
+// every rune is whitespace or a control character (Unicode Cc).
+//
+// Deliberately NOT strings.TrimSpace: Python's str.strip() counts U+001C–U+001F
+// as whitespace and Go's unicode.IsSpace does not, so a token of only those bytes
+// would pass here and be refused by the AMS-side mirror — AMA would advance its
+// baseline and stop retrying while AMS kept the stale copy. The definition
+// (space OR Cc) is a parity contract with ams-server's _is_blank; change neither
+// side alone.
+func isBlankCredential(s string) bool {
+	for _, r := range s {
+		if !unicode.IsSpace(r) && !unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// jsonObject decodes b as a JSON object, reporting false when it is not valid
+// JSON or not an object (including null).
+func jsonObject(b []byte) (map[string]json.RawMessage, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(b, &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	return obj, true
+}
+
+// tokenMaterial inspects keys in obj and reports whether any of them is present
+// at all, and whether any present one carries material. A JSON null reads as
+// blank (present, no material); a value that is not a string at all is a shape
+// this cannot judge, so it counts as material (conservative: keep the
+// credential).
+func tokenMaterial(obj map[string]json.RawMessage, keys ...string) (present, material bool) {
+	for _, k := range keys {
+		raw, ok := obj[k]
+		if !ok {
+			continue
+		}
+		present = true
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			material = true // not a string: unjudgeable -> treat as material
+			continue
+		}
+		if !isBlankCredential(s) {
+			material = true
+		}
+	}
+	return present, material
 }
 
 // writeFileAtomic writes data to a temp file in the same directory as path and

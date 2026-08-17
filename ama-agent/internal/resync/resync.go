@@ -55,6 +55,12 @@ type Config struct {
 	// Fingerprint is the provider driver's credential-identity hash, used to detect
 	// a local rotation against the manifest baseline. Never nil.
 	Fingerprint func([]byte) string
+	// HasMaterial is the provider driver's HasCredentialMaterial: false only for a
+	// credential set that definitely carries no token material (a logged-out
+	// shell). detect() drops such a set instead of pushing it upstream. nil
+	// disables the check entirely (the pre-guard behaviour), so Tick does not gate
+	// on it.
+	HasMaterial func([]byte) bool
 	// ServerCredential returns the long-lived session credential presented on the
 	// wire (CredentialUpdate.server_credential). Never nil.
 	ServerCredential func() string
@@ -77,6 +83,7 @@ type Resyncer struct {
 	engine      *sync.Mutex
 	credPath    string
 	fingerprint func([]byte) string
+	hasMaterial func([]byte) bool
 	serverCred  func() string
 	send        func(*amxv1.CredentialUpdate) bool
 	now         func() time.Time
@@ -106,6 +113,7 @@ func New(cfg Config) *Resyncer {
 		engine:      engine,
 		credPath:    cfg.CredentialsPath,
 		fingerprint: cfg.Fingerprint,
+		hasMaterial: cfg.HasMaterial,
 		serverCred:  cfg.ServerCredential,
 		send:        cfg.Send,
 		now:         now,
@@ -176,6 +184,20 @@ func (r *Resyncer) detect(ctx context.Context) (*amxv1.CredentialUpdate, []byte,
 	if err != nil || len(plaintext) == 0 {
 		// Missing/empty credential file: nothing to compare (do not treat as a
 		// change — that would push an empty credential).
+		return nil, nil, store.Record{}, false
+	}
+	// The length check above only catches a truncated file. A logged-out shell —
+	// {"claudeAiOauth":{"accessToken":"","refreshToken":"",…}} — is non-empty bytes
+	// whose fingerprint necessarily differs from the baseline, so the comparison
+	// below would read it as a rotation and push the token-less set upstream, where
+	// AMS would overwrite the live copy it holds. Drop it here, ahead of the
+	// comparison, and leave the baseline where it is: when the real credential
+	// returns, the next tick still sees it as a rotation against the OLD baseline
+	// and pushes it then. nil HasMaterial disables the check.
+	if r.hasMaterial != nil && !r.hasMaterial(plaintext) {
+		wipe(plaintext)
+		// Identifier only — never the credential material (§7).
+		r.logf("resync: skipping push for %s: on-disk credential carries no token material", rec.Email)
 		return nil, nil, store.Record{}, false
 	}
 	if r.fingerprint(plaintext) == rec.Fingerprint {

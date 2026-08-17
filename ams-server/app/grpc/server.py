@@ -19,8 +19,10 @@ logged (§7). ``ReportUsage`` is the unary report-only fallback.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -105,6 +107,108 @@ def _now() -> datetime:
 # (credential lock-in). Small enough to bound the attack, large enough to absorb
 # ordinary agent/AMS clock skew.
 _OBSERVED_AT_MAX_SKEW = timedelta(minutes=5)
+
+
+def _is_blank(text: str) -> bool:
+    """Whether ``text`` carries no credential information: every character is
+    whitespace or a control character (Unicode category Cc).
+
+    Deliberately NOT ``str.strip()``: it counts U+001C–U+001F as whitespace while
+    Go's ``unicode.IsSpace`` does not, so a token of only those bytes would pass
+    the agent-side check, advance the AMA baseline, and then be refused here —
+    leaving AMS on the stale copy with no retry. The definition (space OR Cc) is a
+    parity contract with ama-agent's ``isBlankCredential``; change neither side
+    alone.
+    """
+    return all(ch.isspace() or unicodedata.category(ch) == "Cc" for ch in text)
+
+
+def _token_material(obj: dict, *keys: str) -> tuple[bool, bool]:
+    """``(any key present, any present key carrying material)`` for ``keys``.
+
+    ``null`` reads as blank (present, no material). A value that is neither a
+    string nor ``null`` is a shape this cannot judge, so it counts as material
+    (the caller's bias is toward keeping the credential). Mirrors ama-agent's
+    ``tokenMaterial``.
+    """
+    present = False
+    material = False
+    for key in keys:
+        if key not in obj:
+            continue
+        present = True
+        value = obj[key]
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            material = True  # unexpected type: unjudgeable -> treat as material
+        elif not _is_blank(value):
+            material = True
+    return present, material
+
+
+def _credential_has_material(secret: str, provider: str) -> bool:
+    """Whether a re-synced credential set still carries token material.
+
+    Answers one question only: is this a logged-out shell — a set whose token
+    block carries the token keys but nothing in them? A re-sync is applied silently
+    and overwrites the at-rest copy, so the failure this guards is an agent pushing
+    an emptied credential file over the live one AMS holds (the agent-side length
+    check only sees a truncated file;
+    ``{"claudeAiOauth":{"accessToken":"","refreshToken":""}}`` is non-empty bytes).
+
+    Deliberately conservative — False ONLY for a definitely token-less set. A body
+    that does not parse (an ``api_key`` credential is an opaque string), a
+    non-object top level, a missing or non-object token block, a token block
+    holding NEITHER token key (an unknown schema inside the block is as
+    unjudgeable as one outside it), an unknown provider: all return True. The one
+    non-JSON body that IS refused is a blank one, which no opaque ``api_key``
+    could be.
+
+    Note this does NOT mirror enroll, which requires a refresh_token: enroll can
+    answer a 400 to the operator, whereas a rejected re-sync is silent, and a
+    ``claude setup token`` account legitimately carries only a long-lived
+    accessToken.
+
+    ``json.loads`` is the risk here: a deeply nested body raises RecursionError and
+    a huge one can raise MemoryError, and this runs on the session read loop, so
+    every parse failure degrades to "cannot judge" rather than escaping.
+
+    Judgement parity with ama-agent's ``HasCredentialMaterial`` is a contract; the
+    shared case table lives in tests/test_credential_resync.py.
+    """
+    if _is_blank(secret):
+        return False  # whitespace/control characters only: not even an api_key
+    try:
+        root = json.loads(secret)
+    except (ValueError, TypeError, RecursionError, MemoryError):
+        return True
+    if not isinstance(root, dict):
+        return True
+    if provider == "codex":
+        if "tokens" not in root:
+            return True
+        tokens = root["tokens"]
+        if not isinstance(tokens, dict):
+            return True
+        present, material = _token_material(tokens, "refresh_token", "access_token")
+        if not present:
+            return True  # neither token key present: unknown schema inside tokens
+        if material:
+            return True
+        # An emptied tokens block is still usable in the api-key form.
+        return _token_material(root, "OPENAI_API_KEY")[1]
+    if provider == "claude":
+        if "claudeAiOauth" not in root:
+            return True
+        oauth = root["claudeAiOauth"]
+        if not isinstance(oauth, dict):
+            return True
+        present, material = _token_material(oauth, "accessToken", "refreshToken")
+        if not present:
+            return True  # neither token key present: unknown schema in the block
+        return material
+    return True  # unknown provider: no schema to judge against
 
 
 def _event_detail(payload: dict) -> dict:
@@ -847,7 +951,9 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
         may only re-seal a credential it legitimately holds — otherwise any
         session could overwrite a sibling server's account under its own KEK), and
         the observed_at is strictly newer than the stored one (monotonicity) yet
-        not implausibly in the future (skew clamp, no lock-in). Every failure path
+        not implausibly in the future (skew clamp, no lock-in), and the set still
+        carries token material (a logged-out shell must never overwrite the live
+        copy — see ``_credential_has_material``). Every failure path
         is opaque: only account identifiers
         are logged, never ciphertext, KEK, or plaintext (§7). Plaintext lives in
         memory only from open to re-seal and is dropped immediately after.
@@ -969,6 +1075,29 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 return
             finally:
                 del plaintext
+            # A well-formed, authenticated push can still be a logged-out shell —
+            # a credential file emptied of its tokens. Storing it would replace the
+            # only live copy AMS holds with one nothing can authenticate against,
+            # and the observed_at ratchet would make the loss permanent. Refuse it
+            # opaquely and leave the row alone: credential_observed_at must NOT
+            # advance either, or the recovered credential could not be pushed
+            # afterwards.
+            #
+            # Credential-shape checks are uneven across the write paths, so this is
+            # the only guard on THIS path: inventory.create_account/update_account
+            # validate a supplied secret only when provider == "codex"
+            # (_validate_codex_secret), oauth_enroll.build_credential_set requires
+            # access+refresh tokens on the claude OAuth path, and a manually
+            # supplied claude secret is not shape-checked at all
+            # (_apply_credential_metadata only best-effort scrapes metadata and
+            # ignores parse failures).
+            if not _credential_has_material(secret, account.provider):
+                del secret
+                _logger.warning(
+                    "cred_update rejected: credential carries no token material (account %s)",
+                    account.id,
+                )
+                return
             # Re-encrypt under the at-rest key and drop the plaintext before any
             # DB round-trip. A missing tenant DEK or a KEK-provider failure raises
             # KekError here; left uncaught it would unwind the session read loop and

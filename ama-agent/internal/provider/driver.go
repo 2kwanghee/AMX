@@ -32,6 +32,14 @@ type Driver interface {
 	// Fingerprint returns the stable identity hash of a credential set (a one-way
 	// hash, never the credential itself; empty only for empty input).
 	Fingerprint(credentialJSON []byte) string
+	// HasCredentialMaterial reports whether a credential set carries any usable
+	// token material. It is deliberately conservative: false ONLY when the set is
+	// definitely token-less (a logged-out shell), true whenever the shape cannot be
+	// judged (an opaque api_key, an unknown schema). The caller uses it to DROP an
+	// upstream re-sync, so a false negative would strand AMS on a stale copy while
+	// a false positive costs only a redundant push. MUST NOT log credential
+	// material.
+	HasCredentialMaterial(credentialJSON []byte) bool
 	// DefaultConfigHome is the vendor's conventional config home when no explicit
 	// directory is configured (e.g. ~/.claude). Used ONLY to resolve the deliver
 	// lock path so the daemon and the vendor's runner wrapper flock the same file;

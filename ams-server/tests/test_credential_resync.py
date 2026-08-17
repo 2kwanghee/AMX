@@ -494,6 +494,125 @@ def test_cred_update_non_utf8_rejected_session_survives(app_env):
     assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
 
 
+def test_cred_update_empty_token_set_rejected(app_env, monkeypatch):
+    """A logged-out credential shell must not overwrite the stored copy.
+
+    The set authenticates, decodes, and is well-formed JSON — but every token in
+    it is blank, so it is what an agent reads off disk after a local logout. The
+    at-rest secret must stand and ``credential_observed_at`` must NOT advance
+    (an advanced ratchet would block the recovered credential), the session must
+    survive, and a valid set pushed afterwards must still be applied.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("empty@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    sentinel_id = _add_account(tenant_id, "empty-sentinel@ex.com", "rt-sentinel-orig")
+    _assign(tenant_id, sentinel_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    rejects: list[str] = []
+    real_warning = grpc_server._logger.warning
+
+    def spy_warning(msg, *args, **kwargs):
+        rejects.append(msg % args if args else msg)
+        return real_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(grpc_server._logger, "warning", spy_warning)
+
+    empty_set = json.dumps(
+        {
+            "claudeAiOauth": {
+                "accessToken": "",
+                "refreshToken": "",
+                "expiresAt": 0,
+                "scopes": [],
+            }
+        }
+    )
+    t = datetime.now(UTC)
+    ts = t + timedelta(seconds=5)
+    later = ts + timedelta(seconds=5)
+    recovered_rt = "rt-recovered-" + uuid.uuid4().hex
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek_bytes, key_id = await _open_session(channel, token)
+            # 1) Token-less set -> rejected, nothing stored, ratchet unmoved.
+            enc_empty = _seal(kek_bytes, key_id, account_id, AGENT_ID, empty_set)
+            await call.write(_cred_update(account_id, enc_empty, "", t))
+            # Sentinel fences the rejected push and proves the session survived.
+            enc_s = _seal(
+                kek_bytes, key_id, sentinel_id, AGENT_ID,
+                _oauth_secret("empty-sentinel@ex.com", "rt-sentinel-new"),
+            )
+            await call.write(_cred_update(sentinel_id, enc_s, "", ts))
+            await asyncio.to_thread(_wait_observed, tenant_id, sentinel_id, ts)
+            # The sentinel fences the empty push: by now it has been processed, so
+            # the account row must still hold the ORIGINAL secret with no ratchet.
+            assert await asyncio.to_thread(_decrypt_rt, tenant_id, account_id) == original_rt
+            assert (
+                await asyncio.to_thread(_stored, tenant_id, account_id)
+            ).credential_observed_at is None
+            # 2) The recovered credential still lands (the reject left no ratchet).
+            enc_ok = _seal(
+                kek_bytes, key_id, account_id, AGENT_ID,
+                _oauth_secret("empty@ex.com", recovered_rt),
+            )
+            await call.write(_cred_update(account_id, enc_ok, "", later))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, later)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+
+    # (a) session survived; (b) the recovered set was applied afterwards.
+    assert _decrypt_rt(tenant_id, sentinel_id) == "rt-sentinel-new"
+    assert original_rt != recovered_rt
+    assert _decrypt_rt(tenant_id, account_id) == recovered_rt
+    observed = _stored(tenant_id, account_id).credential_observed_at
+    # observed_at is the recovered push's stamp, never the rejected one's.
+    assert abs((observed - later).total_seconds()) < 1e-3
+    # (c) a rejected line was logged for the empty push.
+    assert any(
+        "no token material" in m and str(account_id) in m for m in rejects
+    )
+
+
+def test_cred_update_setup_token_shape_accepted(app_env):
+    """An accessToken-only set (a ``claude setup token`` account) still applies.
+
+    The guard rejects only a token-less set, not a refresh-token-less one: enroll
+    demands a refresh_token because it can answer the operator with a 400, while a
+    silently dropped re-sync would strand this account's rotations forever.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("setuptok@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    observed = datetime.now(UTC)
+    access_only = json.dumps(
+        {"claudeAiOauth": {"accessToken": "sk-ant-oat-" + uuid.uuid4().hex, "expiresAt": 0}}
+    )
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek_bytes, key_id = await _open_session(channel, token)
+            enc = _seal(kek_bytes, key_id, account_id, AGENT_ID, access_only)
+            await call.write(_cred_update(account_id, enc, "", observed))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, observed)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    with get_sessionmaker()() as db:
+        account = inventory.get_account(db, tenant_id, account_id)
+        stored = json.loads(
+            crypto.decrypt_secret(account.encrypted_secret, tenant_id=tenant_id, db=db)
+        )
+    assert stored == json.loads(access_only)
+    assert _stored(tenant_id, account_id).credential_observed_at is not None
+
+
 def test_cred_update_pending_assignment_rejected(app_env):
     """Fix 1 (narrowed): a still-``pending`` assignment does not confer ownership.
 
@@ -680,3 +799,124 @@ def test_cred_update_invalid_observed_at_session_survives(app_env, monkeypatch):
     assert any(
         "invalid observed_at" in m and str(account_id) in m for m in rejects
     )
+
+
+# -- Judgement-table unit tests ------------------------------------------------
+# These mirror, case-for-case and in the same order, the Go tables in
+# ama-agent/internal/provider/claude/claude_test.go::TestHasCredentialMaterial and
+# .../codex/codex_test.go::TestHasCredentialMaterial. The two implementations gate
+# the SAME push from opposite ends, so a row where they disagree is a live bug: a
+# Go True + an AMS False lets AMA advance its baseline on a push AMS refuses,
+# stranding AMS on the stale copy with no retry. Keep the two tables in lockstep.
+CLAUDE_MATERIAL_CASES = [
+    ("both tokens", r'{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1"}}', True),
+    ("access token only", r'{"claudeAiOauth":{"accessToken":"a1","refreshToken":""}}', True),
+    ("refresh token only", r'{"claudeAiOauth":{"accessToken":"","refreshToken":"r1"}}', True),
+    ("setup-token shape (no refreshToken key)", r'{"claudeAiOauth":{"accessToken":"sk-ant-oat-x"}}', True),
+    ("empty token set", r'{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}', False),
+    ("whitespace-only tokens", r'{"claudeAiOauth":{"accessToken":"  ","refreshToken":"\t\n"}}', False),
+    # U+001C is blank to str.strip() but not to Go's unicode.IsSpace; both sides
+    # use (space OR Cc), so this row reads False on both.
+    ("control-char-only tokens", r'{"claudeAiOauth":{"accessToken":"\u001c","refreshToken":"\u0000"}}', False),
+    ("null tokens", r'{"claudeAiOauth":{"accessToken":null,"refreshToken":null}}', False),
+    ("one token key present and blank", r'{"claudeAiOauth":{"accessToken":""}}', False),
+    # The three rows below were False before the 2026-08-17 review: an unknown
+    # schema INSIDE claudeAiOauth is as unjudgeable as one outside it.
+    ("unknown keys inside the block", r'{"claudeAiOauth":{"token":"abc","expiresAt":1}}', True),
+    ("no token keys at all", r'{"claudeAiOauth":{"expiresAt":0}}', True),
+    ("empty claudeAiOauth object", r'{"claudeAiOauth":{}}', True),
+    ("no claudeAiOauth key", r'{"apiKey":"sk-xyz"}', True),
+    ("empty object", r"{}", True),
+    ("claudeAiOauth not an object", r'{"claudeAiOauth":"opaque"}', True),
+    ("claudeAiOauth null", r'{"claudeAiOauth":null}', True),
+    ("non-string token", r'{"claudeAiOauth":{"accessToken":123,"refreshToken":""}}', True),
+    ("not JSON (opaque api key)", "sk-ant-api03-opaque", True),
+    ("JSON array", "[1,2,3]", True),
+    ("JSON string", '"just-a-string"', True),
+    # A blank body cannot be any credential, opaque api_key included, so unlike the
+    # non-JSON rows above it is refused rather than waved through.
+    ("empty input", "", False),
+    ("whitespace-only body", "   \n\t", False),
+    ("control-char-only body", "\x00\x1f", False),
+]
+
+CODEX_MATERIAL_CASES = [
+    ("full token set", r'{"auth_mode":"chatgpt","tokens":{"id_token":"i1","access_token":"a1","refresh_token":"r1","account_id":"acc1"}}', True),
+    ("access token only", r'{"tokens":{"refresh_token":"","access_token":"a1"}}', True),
+    ("refresh token only", r'{"tokens":{"refresh_token":"r1","access_token":""}}', True),
+    ("empty token set", r'{"auth_mode":"chatgpt","tokens":{"refresh_token":"","access_token":"","id_token":""}}', False),
+    ("whitespace-only tokens", r'{"tokens":{"refresh_token":" ","access_token":"\t"}}', False),
+    ("control-char-only tokens", r'{"tokens":{"refresh_token":"\u001f","access_token":"\u0000"}}', False),
+    ("null tokens values", r'{"tokens":{"refresh_token":null,"access_token":null}}', False),
+    ("one token key present and blank", r'{"tokens":{"refresh_token":""}}', False),
+    ("unknown keys inside tokens", r'{"tokens":{"token":"abc","account_id":"acc1"}}', True),
+    ("no token keys at all", r'{"tokens":{"account_id":"acc1"}}', True),
+    ("empty tokens object", r'{"tokens":{}}', True),
+    ("empty tokens but api key", r'{"OPENAI_API_KEY":"sk-x","tokens":{"refresh_token":"","access_token":""}}', True),
+    ("empty tokens and blank api key", r'{"OPENAI_API_KEY":"  ","tokens":{"refresh_token":"","access_token":""}}', False),
+    ("api-key form (tokens null)", r'{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x","tokens":null}', True),
+    ("no tokens key", r'{"OPENAI_API_KEY":"sk-x"}', True),
+    ("empty object", r"{}", True),
+    ("non-string token", r'{"tokens":{"refresh_token":123,"access_token":""}}', True),
+    ("not JSON", "not-json-at-all", True),
+    ("JSON array", "[1,2,3]", True),
+    ("empty input", "", False),
+    ("whitespace-only body", "   \n\t", False),
+    ("control-char-only body", "\x00\x1f", False),
+]
+
+
+@pytest.mark.parametrize(("name", "secret", "want"), CLAUDE_MATERIAL_CASES)
+def test_credential_has_material_claude_table(name, secret, want):
+    assert grpc_server._credential_has_material(secret, "claude") is want, name
+
+
+@pytest.mark.parametrize(("name", "secret", "want"), CODEX_MATERIAL_CASES)
+def test_credential_has_material_codex_table(name, secret, want):
+    assert grpc_server._credential_has_material(secret, "codex") is want, name
+
+
+def test_credential_has_material_unknown_provider_passes():
+    """No schema to judge against -> conservative pass. Python-only: the Go side
+    has one driver per provider and so has no such fallback."""
+    empty_claude_set = r'{"claudeAiOauth":{"accessToken":"","refreshToken":""}}'
+    assert grpc_server._credential_has_material(empty_claude_set, "claude") is False
+    assert grpc_server._credential_has_material(empty_claude_set, "gemini") is True
+    # ...but a blank body is refused for every provider: that check precedes the
+    # provider switch.
+    assert grpc_server._credential_has_material("  ", "gemini") is False
+
+
+def test_credential_has_material_survives_pathological_json():
+    """A parse blow-up degrades to "cannot judge" instead of escaping into the
+    session read loop (deep nesting raises RecursionError inside json.loads)."""
+    assert grpc_server._credential_has_material("[" * 60000 + "]" * 60000, "claude") is True
+    assert grpc_server._credential_has_material('{"a":' * 5000 + "1" + "}" * 5000, "codex") is True
+
+
+def test_is_blank_control_and_space_definition():
+    """The blank definition is (whitespace OR Cc) — the parity contract with
+    ama-agent's isBlankCredential. U+001C-U+001F are exactly the characters
+    str.strip() and Go's unicode.IsSpace disagree about, so they are pinned here.
+    """
+    assert grpc_server._is_blank("") is True
+    assert grpc_server._is_blank(" \t\r\n\v\f") is True
+    assert grpc_server._is_blank("\x1c\x1d\x1e\x1f") is True
+    assert grpc_server._is_blank("\x00\x08\x7f\x85") is True
+    assert grpc_server._is_blank(" 　") is True  # Unicode spaces
+    assert grpc_server._is_blank("a") is False
+    assert grpc_server._is_blank(" \x1c x") is False
+    assert grpc_server._is_blank("\u200b") is False  # ZWSP is Cf, neither space nor Cc
+
+
+def test_token_material_present_and_material_split():
+    """``present`` separates "unknown schema" (no token key at all -> pass) from
+    "logged out" (a token key present but blank -> reject)."""
+    assert grpc_server._token_material({}, "a", "b") == (False, False)
+    assert grpc_server._token_material({"c": "x"}, "a", "b") == (False, False)
+    assert grpc_server._token_material({"a": ""}, "a", "b") == (True, False)
+    assert grpc_server._token_material({"a": None}, "a", "b") == (True, False)
+    assert grpc_server._token_material({"a": "", "b": "x"}, "a", "b") == (True, True)
+    # A non-string value is unjudgeable, so it counts as material.
+    assert grpc_server._token_material({"a": 123}, "a", "b") == (True, True)
+    assert grpc_server._token_material({"a": ["x"]}, "a", "b") == (True, True)
