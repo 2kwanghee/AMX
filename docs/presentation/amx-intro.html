@@ -37,6 +37,14 @@ body {
   height: 100vh;
   -webkit-font-smoothing: antialiased;
   user-select: none;
+  /* 한글은 어절 단위로 줄바꿈 (word-break·overflow-wrap은 자식으로 상속됨) */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+/* 상속이 끊길 수 있는 flex/그리드 텍스트 컨테이너에 명시적 재적용 */
+h1, h2, .sub, .pain, .caption, .card .d, .node .d, .effect .d, .effect .t,
+.mock-note, .tl-desc, .crow, .card .gone, .effect .gone {
+  word-break: keep-all; overflow-wrap: break-word;
 }
 
 /* ── 배경 앰비언트: 도트 그리드 + 느린 글로우 ─────────────────── */
@@ -549,9 +557,9 @@ body.paused .paused-flag { opacity: 1; }
       </div>
     </div>
     <div class="caption">
-      <span data-step data-at="90" style="display:flex;gap:14px;align-items:baseline">
-        구성요소는 언어가 제각각이지만(<span class="num">Python·Go·TypeScript</span>),
-        메시지 형식을 <b class="accent">contracts</b>로 먼저 약속해 두어 서로 어긋날 수 없습니다.
+      <span data-step data-at="90">
+        구성요소는 언어가 <span class="num">Python·Go·TypeScript</span>로 제각각입니다.
+        메시지 형식을 <b class="accent">contracts</b>로 먼저 약속해 두어 서로 어긋나지 않습니다.
       </span>
     </div>
   </section>
