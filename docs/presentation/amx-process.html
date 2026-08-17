@@ -311,14 +311,14 @@
   <!-- 5 · SERVICE 1 : ASSIGN / RECALL -->
   <section class="slide" data-title="서비스① 계정 배정·회수">
     <div class="eyebrow">Service ① · 배정·회수</div>
-    <h2 class="atitle">배정은 <span class="hl">재전달</span>, 회수는 <span class="hl">완전 분리</span> — 실패해도 스스로 낫는다</h2>
+    <h2 class="atitle">배정은 <span class="hl">재전달</span>, 회수는 <span class="hl">완전 분리</span>. 실패해도 스스로 낫는다</h2>
     <div class="body">
       <div class="cols c2">
         <div class="reveal">
           <ul class="plist">
-            <li><b>배정·하달</b> — 콘솔에서 계정을 서버에 지정하면 자격증명을 암호화해 에이전트로 보내 tsamx에 등록한다.</li>
-            <li><b>회수 = 항상 purge</b> — provider 무관 <b>purge_local_copy=true</b>로 해당 서버에서 완전히 떼어내고, 이력은 detached 배정 행·이벤트로만 남긴다.</li>
-            <li><b>credential 역동기화</b> — 서버에서 회전된 자격증명을 중앙이 자동 최신화해, 다른 서버로 옮길 때 죽은 정보를 주지 않는다.</li>
+            <li><b>배정·하달</b>은 콘솔에서 계정을 서버에 지정하는 데서 출발한다. 자격증명을 암호화해 에이전트로 보내면 tsamx에 등록된다.</li>
+            <li><b>회수는 늘 purge다.</b> provider와 무관하게 <b>purge_local_copy=true</b>로 해당 서버에서 완전히 떼어내고 이력은 detached 배정 행과 이벤트로만 남긴다.</li>
+            <li><b>credential 역동기화.</b> 서버에서 회전된 자격증명을 중앙이 자동으로 최신화한다. 그래야 다른 서버로 옮길 때 죽은 정보를 넘기지 않는다.</li>
           </ul>
         </div>
         <div class="card reveal" style="background:var(--paper-2)">
@@ -328,7 +328,7 @@
             <div class="brow"><span class="bl">수동 재요청</span><div class="btrack"><div class="bfill gray" data-w="50" data-txt="상한 3회"></div></div></div>
             <div class="brow"><span class="bl">총 예산</span><div class="btrack"><div class="bfill" data-w="100" data-txt="6회 · 성공 시 경보 자동 해소"></div></div></div>
           </div>
-          <p style="margin-top:.9rem;font-size:.8rem;color:var(--muted)">두 상한이 모두 소진되면 자동 회복을 멈추고 <b style="color:var(--danger)">recall_failed</b> 경보만 유지 — 최종 탈출구는 global-admin의 force recall.</p>
+          <p style="margin-top:.9rem;font-size:.8rem;color:var(--muted)">두 상한이 모두 소진되면 자동 회복을 멈추고 <b style="color:var(--danger)">recall_failed</b> 경보만 남긴다. 마지막 탈출구는 global-admin의 force recall이다.</p>
         </div>
       </div>
     </div>
@@ -344,11 +344,11 @@
         <div class="reveal">
           <div class="kpi" style="max-width:none;margin-bottom:1.1rem">
             <div><span class="num" data-count="95" data-suffix="%"></span></div>
-            <div class="lab">자동 스위칭 임계 — tsamx autoswitch.threshold. 도달 시 후보 랭킹 후 교체.</div>
+            <div class="lab">자동 스위칭 임계값. tsamx autoswitch.threshold에 닿으면 후보를 랭킹해 교체한다.</div>
           </div>
           <ul class="plist">
-            <li><b>중앙 정책 하달</b> — SetPolicy로 <b>threshold·strategy·cooldown·hysteresis</b> 4축을 세션마다 재천명한다.</li>
-            <li><b>안정화 장치</b> — 히스테리시스로 임계선 진동을, 쿨다운으로 잦은 전환을 막고, 실패 계정은 격리(quarantine)한다.</li>
+            <li><b>중앙 정책 하달.</b> SetPolicy로 <b>threshold·strategy·cooldown·hysteresis</b> 네 축을 세션마다 다시 못 박는다.</li>
+            <li><b>안정화 장치.</b> 히스테리시스가 임계선 진동을, 쿨다운이 잦은 전환을 누르고 실패한 계정은 격리(quarantine)한다.</li>
             <li><b>전 계정 소진</b> 감지 시 크리티컬 이벤트로 즉시 통지한다.</li>
           </ul>
         </div>
@@ -376,11 +376,11 @@
       <div class="cols c2" style="align-items:start">
         <div class="reveal">
           <ul class="plist" style="margin-bottom:1.1rem">
-            <li><b>상황판</b> — 콘솔이 5~10초 폴링으로 서버·계정·배정 상태를 비춘다. <b>30초 하트비트</b>가 끊기면(last_seen_at 만료) 서버를 offline으로 전이한다.</li>
-            <li><b>자가복원 경보</b> — 이벤트가 유실돼도 reconcile-on-report 재조회로 경보를 재구성한다.</li>
-            <li><b>아웃박스 웹훅</b> — 경보 전이를 같은 트랜잭션에 스테이징하고, HMAC-SHA256 서명으로 무결성을 보장해 외부로 발송한다(at-least-once).</li>
+            <li><b>상황판.</b> 콘솔이 5~10초마다 폴링해 서버·계정·배정 상태를 비춘다. <b>30초 하트비트</b>가 끊기면(last_seen_at 만료) 서버는 offline으로 넘어간다.</li>
+            <li><b>자가복원 경보.</b> 이벤트가 유실돼도 reconcile-on-report 재조회로 경보를 다시 세운다.</li>
+            <li><b>아웃박스 웹훅.</b> 경보 전이를 같은 트랜잭션에 스테이징하고 HMAC-SHA256 서명으로 무결성을 지켜 밖으로 내보낸다(at-least-once).</li>
           </ul>
-          <p class="subline">경보 kind 13종 — 서버·계정·테넌트·시스템 범위로 나뉜다.</p>
+          <p class="subline">경보 kind는 13종. 서버·계정·테넌트·시스템 범위로 나뉜다.</p>
         </div>
         <div class="reveal">
           <div class="card"><span class="tag">경보 로스터 13종</span>
@@ -404,14 +404,14 @@
   <!-- 8 · SERVICE 4 : USAGE / BILLING -->
   <section class="slide" data-title="서비스④ 사용량 실측·비용">
     <div class="eyebrow">Service ④ · 사용량·비용</div>
-    <h2 class="atitle">토큰을 <span class="hl">종류별로 실측</span>해, 과금 근거를 추정이 아닌 원장으로 남긴다</h2>
+    <h2 class="atitle">토큰을 <span class="hl">종류별로 실측</span>해 과금 근거를 추정이 아닌 원장으로 남긴다</h2>
     <div class="body">
       <div class="cols c2" style="align-items:center">
         <div class="reveal">
           <ul class="plist">
-            <li><b>Langfuse usageByType</b> — 러너 세션 훅이 보낸 기록을 중앙이 폴링해, 토큰을 종류별로 각 컬럼에 실측 적재한다.</li>
-            <li><b>내부 청구 집계</b> — usage 원장을 닫힌 UTC 일 단위 billing_events로 롤업한다(멱등 앵커로 중복 방지). 외부 결제는 미연동.</li>
-            <li><b>영구 보존</b> — usage_daily_rollup은 삭제 정책 대상이 아니라 비용 배분 입력으로 영구 보존한다(원문 스냅샷은 90일).</li>
+            <li><b>Langfuse usageByType.</b> 러너 세션 훅이 보낸 기록을 중앙이 폴링해서 토큰을 종류별로 각 컬럼에 실측값으로 쌓는다.</li>
+            <li><b>내부 청구 집계.</b> usage 원장을 닫힌 UTC 일 단위 billing_events로 롤업한다(멱등 앵커로 중복 방지). 외부 결제는 아직 붙이지 않았다.</li>
+            <li><b>영구 보존.</b> usage_daily_rollup은 삭제 정책을 타지 않는다. 비용 배분의 입력이라 영구히 남긴다(원문 스냅샷은 90일).</li>
           </ul>
         </div>
         <div class="card reveal" style="background:var(--paper-2)">
@@ -474,10 +474,10 @@
   <!-- 11 · INTERNAL ADOPTION -->
   <section class="slide" data-title="사내 도입 메리트">
     <div class="eyebrow">Adoption · 사내 도입</div>
-    <h2 class="atitle">지금 우리 상황 — 여러 유료 계정·여러 서버·AI 코딩 에이전트 — 에 <span class="hl">그대로</span> 맞는다</h2>
+    <h2 class="atitle">여러 유료 계정, 여러 서버, AI 코딩 에이전트. 지금 우리 상황에 <span class="hl">그대로</span> 맞는다</h2>
     <div class="body">
       <div class="cols c2">
-        <div class="card reveal"><span class="tag">얻는 것 1</span><h4>요금 사고 방지</h4><p>계정 교체 순간의 오청구를 amx-claude 래퍼가 막고, 위험 명령은 훅이 조기 경보로 올린다.</p></div>
+        <div class="card reveal"><span class="tag">얻는 것 1</span><h4>요금 사고 방지</h4><p>계정 교체 순간의 오청구는 amx-claude 래퍼가 막고 위험 명령은 훅이 조기 경보로 올린다.</p></div>
         <div class="card reveal"><span class="tag">얻는 것 2</span><h4>한도 소진 무중단</h4><p>95% 임계 자동 전환과 전 계정 소진 크리티컬 이벤트로, 작업이 한도에 걸려 멈추지 않는다.</p></div>
         <div class="card reveal"><span class="tag">얻는 것 3</span><h4>계정 현황 단일 화면</h4><p>어느 서버가 어느 계정을 쓰는지, 오프라인·드리프트·격리 상태까지 콘솔 한 곳에서 본다.</p></div>
         <div class="card reveal"><span class="tag">얻는 것 4</span><h4>과금 근거 확보</h4><p>Langfuse 토큰 실측과 usage 원장으로, 어느 계정이 얼마 썼는지 추정이 아닌 데이터로 남는다.</p></div>
@@ -489,39 +489,39 @@
   <!-- 12 · SAAS POTENTIAL -->
   <section class="slide" data-title="범용 서비스화 메리트">
     <div class="eyebrow">Scale · 서비스화 잠재력</div>
-    <h2 class="atitle">SaaS로 갈 <span class="hl">토대</span>가 이미 코드에 들어가 있다 — 같은 문제를 가진 조직이 는다</h2>
+    <h2 class="atitle">SaaS로 갈 <span class="hl">토대</span>는 이미 코드에 들어가 있다. 같은 문제를 겪는 조직은 늘어난다</h2>
     <div class="body">
       <div class="cols c3" style="margin-bottom:1.3rem">
         <div class="card reveal"><span class="tag">이미 있음</span><h4>멀티테넌트 구조</h4><p>Principal·테넌트 스코핑으로 고객 그룹 간 데이터가 격리된다(P5 F1·E3).</p></div>
         <div class="card reveal"><span class="tag">이미 있음</span><h4>RBAC</h4><p>global-admin·tenant-admin 2역할 권한 구분이 설계·구현돼 있다.</p></div>
         <div class="card reveal"><span class="tag">이미 있음</span><h4>봉투 암호화</h4><p>테넌트별 DEK를 KEK로 래핑(local·aws-kms·vault 어댑터 자리)해 저장한다.</p></div>
       </div>
-      <p class="subline reveal">다만 상용화는 지금 <b style="color:var(--ink)">보류</b> 상태 — 사내 내재화를 먼저 끝내기로 결정했고, 외부 결제·KMS 벤더 연동은 도입 시점에 재검토한다(P5 로드맵).</p>
+      <p class="subline reveal">다만 상용화는 지금 <b style="color:var(--ink)">보류</b>다. 사내 내재화를 먼저 끝내기로 했고 외부 결제·KMS 벤더 연동은 도입 시점에 다시 본다(P5 로드맵).</p>
     </div>
     <div class="foot"><span class="src">자료: p5-saas-architecture.md, AMX-DESIGN.md §5.1, archive/todo/on-hold-saas</span><span class="pg"><b>12</b> / 14</span></div>
   </section>
 
   <!-- 13 · CODEX -->
-  <section class="slide" data-title="Codex — 제약과 그 안의 성과">
+  <section class="slide" data-title="Codex, 제약과 그 안의 성과">
     <div class="eyebrow">Codex · 제약과 성과</div>
-    <h2 class="atitle">Codex는 구조적 제약이 있다 — <span class="hl">제약을 인정하되</span> 엔지니어링으로 최대치를 끌어냈다</h2>
+    <h2 class="atitle">Codex는 구조적 제약이 있다. <span class="hl">제약은 인정하되</span> 엔지니어링으로 최대치를 끌어냈다</h2>
     <div class="body">
       <div class="ba reveal">
         <div class="side before"><h5>구조적 제약 (솔직히)</h5>
           <ul style="margin:0;padding:0">
             <li>서버 한 대 = Codex 계정 하나 (auth.json 한 장, server_codex_capacity로 2번째 배정 거부)</li>
-            <li>서버당 1계정 구조상 풀 회전이 성립하지 않음 — Claude 수준 자동 전환 불가</li>
+            <li>서버당 1계정 구조라 풀 회전이 성립하지 않음. Claude 수준의 자동 전환은 불가</li>
             <li>사이드카(codex_single_account)로 회수는 항상 완전 삭제 필수</li>
-            <li>Langfuse 훅은 Claude 전용 — codex 관측 공백(G44, 대기)</li>
+            <li>Langfuse 훅은 Claude 전용이라 codex 관측은 공백(G44, 대기)</li>
           </ul>
         </div>
         <div class="mid">→</div>
         <div class="side after"><h5>제약 안에서 구현한 것</h5>
           <ul style="margin:0;padding:0">
-            <li>배정·하달 — 용량 제어(server_codex_capacity)로 안전하게</li>
-            <li>회수 — provider 무관 purge_local_copy=true로 깔끔히 분리</li>
-            <li>사용량 창 보고 — provider 일반화 windows로 수집</li>
-            <li>과금 창 방어 — amx-codex 래퍼로 Claude와 동일 보호</li>
+            <li>배정·하달은 용량 제어(server_codex_capacity)로 안전하게</li>
+            <li>회수는 provider와 무관하게 purge_local_copy=true로 깔끔히 분리</li>
+            <li>사용량 창 보고는 provider 일반화 windows로 수집</li>
+            <li>과금 창 방어는 amx-codex 래퍼로 Claude와 똑같이</li>
           </ul>
         </div>
       </div>
@@ -532,15 +532,15 @@
   <!-- 14 · CLOSE -->
   <section class="slide dark" data-title="마무리 · 현재 상태와 다음 단계">
     <div class="eyebrow">Close · 마무리</div>
-    <h2 class="atitle" style="color:#fff">코어는 완료됐다 — 다음은 <span style="color:var(--accent-2)">파일럿</span>으로 실환경을 통과시키는 일이다</h2>
+    <h2 class="atitle" style="color:#fff">코어는 완료됐다. 다음은 <span style="color:var(--accent-2)">파일럿</span>으로 실환경을 통과하는 일이다</h2>
     <div class="body">
       <div class="cols c2" style="align-items:center">
         <div class="reveal">
           <ul class="plist">
-            <li><b>현재</b> — P0~P5 전 단계와 안정화(배포 안전장치·역동기화·청구 보호·경보) 완료. 문서-실물 대조까지 마쳤다.</li>
-            <li><b>다음 ①</b> — 다른 섹션 완료 후 파일럿, 그 시점에 일괄 병합.</li>
-            <li><b>다음 ②</b> — 멀티 프로바이더(Codex 관측·시트 확장)는 결정 대기 항목을 매듭짓고 착수.</li>
-            <li><b>다음 ③</b> — 상용 SaaS는 내재화 완료 후 재개.</li>
+            <li><b>현재.</b> P0~P5 전 단계와 안정화(배포 안전장치·역동기화·청구 보호·경보)를 끝냈다. 문서와 실물 대조까지 마쳤다.</li>
+            <li><b>다음 ①.</b> 다른 섹션을 끝낸 뒤 파일럿, 그 시점에 한꺼번에 병합한다.</li>
+            <li><b>다음 ②.</b> 멀티 프로바이더(Codex 관측·시트 확장)는 결정 대기 항목을 매듭지은 뒤 착수한다.</li>
+            <li><b>다음 ③.</b> 상용 SaaS는 내재화를 끝낸 뒤 재개한다.</li>
           </ul>
         </div>
         <div class="reveal">

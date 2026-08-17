@@ -597,25 +597,25 @@ body.paused .paused-flag { opacity: 1; }
         <div class="k">ENVELOPE ENCRYPTION</div>
         <div class="t">저장은 이중 암호화</div>
         <div class="d">계정 로그인 정보는 중앙 DB에도, 각 서버 디스크에도 암호화된 상태로만 존재합니다.</div>
-        <div class="gone"><b>없으면</b> — 디스크나 DB가 새는 순간 로그인 정보가 그대로 유출됩니다.</div>
+        <div class="gone"><b>없으면 </b>디스크나 DB가 새는 순간 로그인 정보가 그대로 유출됩니다.</div>
       </div>
       <div class="card" data-step data-at="26">
         <div class="k">ED25519 SIGNING</div>
         <div class="t">모든 명령에 서명</div>
         <div class="d">에이전트는 중앙 서버의 서명이 검증된 명령만 실행합니다. 위조 명령이 끼어들 자리가 없습니다.</div>
-        <div class="gone"><b>없으면</b> — 위조된 명령이 에이전트를 조종할 수 있습니다.</div>
+        <div class="gone"><b>없으면 </b>위조된 명령이 에이전트를 조종할 수 있습니다.</div>
       </div>
       <div class="card" data-step data-at="48">
         <div class="k">BFF LAYER</div>
         <div class="t">브라우저에는 아무것도</div>
         <div class="d">관리 화면은 중계층을 거쳐 통신합니다. 서버 주소도 토큰도 브라우저에 노출되지 않습니다.</div>
-        <div class="gone"><b>없으면</b> — 서버 주소와 토큰이 브라우저에 그대로 드러납니다.</div>
+        <div class="gone"><b>없으면 </b>서버 주소와 토큰이 브라우저에 그대로 드러납니다.</div>
       </div>
       <div class="card" data-step data-at="70">
         <div class="k">RUNNER GUARD</div>
         <div class="t">요금이 엉키지 않게</div>
         <div class="d">계정을 교체하는 순간의 실행을 막아, 사용량이 엉뚱한 계정에 찍히는 사고를 차단합니다.</div>
-        <div class="gone"><b>없으면</b> — 교체 찰나의 실행이 엉뚱한 계정에 과금됩니다.</div>
+        <div class="gone"><b>없으면 </b>교체 찰나의 실행이 엉뚱한 계정에 과금됩니다.</div>
       </div>
     </div>
     <p class="sub" data-step data-at="92" style="margin-top:3vh">관리자 권한도 전체 관리자와 그룹별 관리자로 나뉩니다.</p>
@@ -630,7 +630,7 @@ body.paused .paused-flag { opacity: 1; }
     <div class="mock" data-step data-at="3">
       <div class="mock-head">
         <span class="live"><i></i>LIVE</span>
-        <span style="color:var(--dim)">AMX 관제 콘솔 — TScorp</span>
+        <span style="color:var(--dim)">AMX 관제 콘솔 · TScorp</span>
         <span class="num" style="margin-left:auto;color:var(--faint)" id="mock-clock">14:02:11</span>
       </div>
       <div class="mock-body">
@@ -660,7 +660,7 @@ body.paused .paused-flag { opacity: 1; }
   <!-- S9 관측·알림·감사 · 110s -->
   <section class="scene" data-dur="110" data-name="관측·알림·감사"
     data-narration="팔월 중순에는 관측과 통보 계층을 더했습니다. 사내에 띄운 랭퓨즈로 러너 세션을 흘려보내 계정별 토큰을 추정이 아니라 실측으로 봅니다. 경보는 열세 종이고, 서명한 웹훅으로 콘솔 밖 사내 채널까지 나가요. 위험한 명령은 실행 전에 가로채 통보하고, 관리자의 변경은 전부 감사 로그로 남습니다. 이 계층은 켜지 않은 서버에서는 동작이 똑같습니다."
-    data-notes="8월 중순에 더해진 관측·통보 계층. 카드 4장으로. ①Langfuse로 러너 세션을 흘려보내 계정·모델별 토큰을 실측(usageByType)한다 — 사용량 탭에 추정이 아닌 실제 소비량이 뜬다, 셀프호스팅. ②경보는 13종이고 HMAC 서명 웹훅으로 콘솔 밖(사내 채널)으로도 나간다, 비용 급증·수집 중단·지연은 임계값 경보로 미리 잡는다. ③러너에서 위험한 Bash가 실행되려 하면 PreToolUse 훅이 민감부를 마스킹해 통보하고 critical 경보를 연다. ④관리자의 변경성 액션은 전부 감사 로그로 남고 감사 탭에서 본다. 관측 계층은 선택 기능 — 안 켠 서버는 동작이 같다.">
+    data-notes="8월 중순에 더해진 관측·통보 계층. 카드 4장으로. ①Langfuse로 러너 세션을 흘려보내 계정·모델별 토큰을 실측(usageByType)한다. 사용량 탭에 추정이 아닌 실제 소비량이 뜬다, 셀프호스팅. ②경보는 13종이고 HMAC 서명 웹훅으로 콘솔 밖(사내 채널)으로도 나간다, 비용 급증·수집 중단·지연은 임계값 경보로 미리 잡는다. ③러너에서 위험한 Bash가 실행되려 하면 PreToolUse 훅이 민감부를 마스킹해 통보하고 critical 경보를 연다. ④관리자의 변경성 액션은 전부 감사 로그로 남고 감사 탭에서 본다. 관측 계층은 선택 기능이라 안 켠 서버는 동작이 같다.">
     <div class="eyebrow" data-step data-at="0.3">Observability</div>
     <h2 data-step data-at="0.6">이제 실측하고, 알리고, 남깁니다</h2>
     <div class="cards">
@@ -668,25 +668,25 @@ body.paused .paused-flag { opacity: 1; }
         <div class="k">LANGFUSE METRICS</div>
         <div class="t">토큰을 추정 아닌 실측으로</div>
         <div class="d">사내에 띄운 Langfuse로 러너 세션을 흘려보내, 계정·모델별 토큰 소비를 실제 수치로 사용량 탭에 보여줍니다.</div>
-        <div class="gone"><b>없으면</b> — 계정별 실제 비용을 모른 채 추정으로만 청구합니다.</div>
+        <div class="gone"><b>없으면 </b>계정별 실제 비용을 모른 채 추정으로만 청구합니다.</div>
       </div>
       <div class="card" data-step data-at="26">
         <div class="k">ALERTS · WEBHOOK</div>
         <div class="t">경보 13종, 콘솔 밖으로도</div>
         <div class="d">HMAC 서명 웹훅으로 사내 채널까지 내보냅니다. 비용 급증·수집 중단·지연은 임계값 경보로 미리 잡습니다.</div>
-        <div class="gone"><b>없으면</b> — 이상이 콘솔 안에만 갇혀 담당자가 늦게 알아챕니다.</div>
+        <div class="gone"><b>없으면 </b>이상이 콘솔 안에만 갇혀 담당자가 늦게 알아챕니다.</div>
       </div>
       <div class="card" data-step data-at="48">
         <div class="k">DANGER GUARD</div>
         <div class="t">위험한 명령은 실행 전에</div>
         <div class="d">러너의 PreToolUse 훅이 위험한 Bash를 가로채, 민감부를 마스킹해 통보하고 critical 경보를 엽니다.</div>
-        <div class="gone"><b>없으면</b> — 위험한 명령이 아무 기록 없이 그대로 실행됩니다.</div>
+        <div class="gone"><b>없으면 </b>위험한 명령이 아무 기록 없이 그대로 실행됩니다.</div>
       </div>
       <div class="card" data-step data-at="70">
         <div class="k">AUDIT TRAIL</div>
         <div class="t">누가 무엇을 바꿨는지</div>
         <div class="d">관리자의 변경성 액션은 전부 감사 로그로 남습니다. 대상 그룹을 지워도 이력은 사라지지 않습니다.</div>
-        <div class="gone"><b>없으면</b> — 누가 무엇을 바꿨는지 되짚을 근거가 없습니다.</div>
+        <div class="gone"><b>없으면 </b>누가 무엇을 바꿨는지 되짚을 근거가 없습니다.</div>
       </div>
     </div>
     <p class="sub" data-step data-at="92" style="margin-top:3vh">관측·통보 계층은 켜지 않은 서버에선 동작이 완전히 같습니다.</p>
@@ -703,25 +703,25 @@ body.paused .paused-flag { opacity: 1; }
         <div class="k">SELF-HEALING RECALL</div>
         <div class="t">회수 실패도 스스로 회복</div>
         <div class="d">회수가 한 번에 끝나지 않아도 정해진 상한까지 스스로 재시도해, 장부와 서버의 실제 상태를 다시 맞춥니다.</div>
-        <div class="gone"><b>없으면</b> — 회수 실패가 방치되어 장부와 실제가 어긋난 채 남습니다.</div>
+        <div class="gone"><b>없으면 </b>회수 실패가 방치되어 장부와 실제가 어긋난 채 남습니다.</div>
       </div>
       <div class="card" data-step data-at="24">
         <div class="k">BILLING WATERMARK</div>
         <div class="t">집계가 앞서 나가지 않게</div>
         <div class="d">서버 시계가 앞으로 튀는 걸 감지하면 집계 커서를 되감아 다시 계산합니다. 잘못 배분된 요금이 남지 않습니다.</div>
-        <div class="gone"><b>없으면</b> — 시계 튐 한 번에 요금이 잘못 배분된 채 굳습니다.</div>
+        <div class="gone"><b>없으면 </b>시계 튐 한 번에 요금이 잘못 배분된 채 굳습니다.</div>
       </div>
       <div class="card" data-step data-at="44">
         <div class="k">RETENTION</div>
         <div class="t">남길 것과 지울 것</div>
         <div class="d">다 쓴 계정 스냅샷·끊긴 배정은 보존 기간에 맞춰 정리하고, 감사 로그는 기본으로 무기한 남깁니다.</div>
-        <div class="gone"><b>없으면</b> — 스냅샷이 무한 적재되어 DB가 부풀어 오릅니다.</div>
+        <div class="gone"><b>없으면 </b>스냅샷이 무한 적재되어 DB가 부풀어 오릅니다.</div>
       </div>
       <div class="card" data-step data-at="64">
         <div class="k">SHARED PC PROFILE</div>
         <div class="t">한 PC, 두 역할</div>
         <div class="d">개인 작업과 러너가 한 대를 나눠 쓸 때, 러너는 별도 프로필로 <span class="num">amx</span> 명령으로 띄웁니다.</div>
-        <div class="gone"><b>없으면</b> — 개인 세션과 러너가 프로필을 공유해 서로 오염됩니다.</div>
+        <div class="gone"><b>없으면 </b>개인 세션과 러너가 프로필을 공유해 서로 오염됩니다.</div>
       </div>
     </div>
   </section>
@@ -763,11 +763,11 @@ body.paused .paused-flag { opacity: 1; }
     <div class="eyebrow" data-step data-at="0.3">Status</div>
     <h2 data-step data-at="0.6">어디까지 왔나</h2>
     <div class="timeline" data-step data-at="3">
-      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P0–P1</div><div class="tl-desc">통신 규약<br>중앙 장부</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P0~P1</div><div class="tl-desc">통신 규약<br>중앙 장부</div></div>
       <div class="tl-bar"></div>
-      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P2–P3</div><div class="tl-desc">보안 채널<br>자동 전환</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P2~P3</div><div class="tl-desc">보안 채널<br>자동 전환</div></div>
       <div class="tl-bar"></div>
-      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P4–P5</div><div class="tl-desc">관제 콘솔<br>다중 그룹</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">P4~P5</div><div class="tl-desc">관제 콘솔<br>다중 그룹</div></div>
       <div class="tl-bar"></div>
       <div class="tl-item"><div class="tl-dot"></div><div class="tl-name">안정화</div><div class="tl-desc">관측·감사<br>경보·자가치유</div></div>
       <div class="tl-bar togo"></div>
@@ -819,8 +819,8 @@ body.paused .paused-flag { opacity: 1; }
   <div class="mark"><span class="mark-dot"></span><span class="wordmark" style="font-size:clamp(56px,9vw,140px)">AMX</span></div>
   <div class="go">클릭하거나 Space를 눌러 시작</div>
   <div class="hint">
-    <kbd>Space</kbd> 재생/일시정지 · <kbd>←</kbd><kbd>→</kbd> 장면 이동 · <kbd>1</kbd>–<kbd>9</kbd> 장면 점프<br>
-    <kbd>V</kbd> 음성 내레이션 · <kbd>A</kbd> 자동 진행 · <kbd>F</kbd> 전체화면 · <kbd>N</kbd> 발표 메모 · 총 <span class="num" id="gate-total">—</span>
+    <kbd>Space</kbd> 재생/일시정지 · <kbd>←</kbd><kbd>→</kbd> 장면 이동 · <kbd>1</kbd>~<kbd>9</kbd> 장면 점프<br>
+    <kbd>V</kbd> 음성 내레이션 · <kbd>A</kbd> 자동 진행 · <kbd>F</kbd> 전체화면 · <kbd>N</kbd> 발표 메모 · 총 <span class="num" id="gate-total">00:00</span>
   </div>
 </div>
 
