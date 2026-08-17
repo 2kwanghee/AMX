@@ -24,6 +24,9 @@ const (
 	credV1     = `{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1"}}`
 	credV2     = `{"claudeAiOauth":{"accessToken":"a2","refreshToken":"r2"}}`
 	credV1Acc2 = `{"claudeAiOauth":{"accessToken":"a3","refreshToken":"r1"}}` // access rotated, refresh same
+	// A logged-out shell: the file the local tooling leaves behind after a logout
+	// — well-formed JSON, non-empty bytes, no token material at all.
+	credEmptyTokens = `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"scopes":[]}}`
 )
 
 func kekBytes() []byte { return bytes.Repeat([]byte{0x22}, crypto.KEKSize) }
@@ -55,6 +58,13 @@ type harness struct {
 
 func newHarness(t *testing.T, kh *store.KEKHolder) *harness {
 	t.Helper()
+	return newHarnessWithMaterial(t, kh, claude.New().HasCredentialMaterial)
+}
+
+// newHarnessWithMaterial builds the same harness with an explicit HasMaterial
+// hook, so a test can exercise the nil (check-disabled) contract.
+func newHarnessWithMaterial(t *testing.T, kh *store.KEKHolder, hasMaterial func([]byte) bool) *harness {
+	t.Helper()
 	dir := t.TempDir()
 	drv := claude.New()
 	st, err := store.Open(dir, testAgent, kh, drv.Fingerprint)
@@ -78,6 +88,7 @@ func newHarness(t *testing.T, kh *store.KEKHolder) *harness {
 		Engine:           h.engine,
 		CredentialsPath:  credPath,
 		Fingerprint:      drv.Fingerprint,
+		HasMaterial:      hasMaterial,
 		ServerCredential: func() string { return "srv-cred" },
 		Send: func(u *amxv1.CredentialUpdate) bool {
 			h.mu.Lock()
@@ -266,6 +277,52 @@ func TestMissingCredentialFileSkips(t *testing.T) {
 	h.r.Tick(context.Background())
 	if got := h.sentCount(); got != 0 {
 		t.Fatalf("pushed with no credential file: %d", got)
+	}
+}
+
+// TestEmptyTokenSetNotPushed: a logged-out credential shell (non-empty bytes, no
+// token material) must not be pushed, and the baseline must NOT advance — so the
+// real credential that comes back afterwards is still seen as a rotation and
+// reaches AMS. Without the guard the shell's fingerprint alone would read as a
+// rotation and overwrite the AMS copy.
+func TestEmptyTokenSetNotPushed(t *testing.T) {
+	h := newHarness(t, keks(t))
+	h.seedDelivered(t, credV1)
+
+	h.writeCred(t, credEmptyTokens)
+	h.r.Tick(context.Background())
+	if got := h.sentCount(); got != 0 {
+		t.Fatalf("token-less credential pushed: %d", got)
+	}
+
+	// Recovery: real credentials return -> the rotation is detected against the
+	// UNADVANCED baseline and pushed.
+	h.writeCred(t, credV2)
+	h.r.Tick(context.Background())
+	if got := h.sentCount(); got != 1 {
+		t.Fatalf("recovered credential not pushed: %d", got)
+	}
+	ec := h.sent[0].GetEncryptedCredential()
+	pt, err := crypto.Open(kekBytes(), ec.GetNonce(), ec.GetCiphertext(), crypto.WireAAD(testAMSID, testAgent))
+	if err != nil {
+		t.Fatalf("wire envelope did not open: %v", err)
+	}
+	if string(pt) != credV2 {
+		t.Fatalf("pushed plaintext is not the recovered credential: %q", pt)
+	}
+}
+
+// TestNilHasMaterialSkipsCheck: HasMaterial nil is "check disabled" — the
+// pre-guard behaviour, where any fingerprint change (including a token-less set)
+// is pushed.
+func TestNilHasMaterialSkipsCheck(t *testing.T) {
+	h := newHarnessWithMaterial(t, keks(t), nil)
+	h.seedDelivered(t, credV1)
+
+	h.writeCred(t, credEmptyTokens)
+	h.r.Tick(context.Background())
+	if got := h.sentCount(); got != 1 {
+		t.Fatalf("nil HasMaterial must not gate the push: %d", got)
 	}
 }
 

@@ -298,6 +298,7 @@ func run() error {
 		Engine:           engine,
 		CredentialsPath:  credPath,
 		Fingerprint:      drv.Fingerprint,
+		HasMaterial:      drv.HasCredentialMaterial,
 		ServerCredential: handler.ServerCredential,
 		Send: func(u *amxv1.CredentialUpdate) bool {
 			return client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_CredUpdate{CredUpdate: u}})
@@ -324,6 +325,7 @@ func run() error {
 			Engine:           engine,
 			CredentialsPath:  codexCred,
 			Fingerprint:      codexDrv.Fingerprint,
+			HasMaterial:      codexDrv.HasCredentialMaterial,
 			ServerCredential: handler.ServerCredential,
 			Send: func(u *amxv1.CredentialUpdate) bool {
 				return client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_CredUpdate{CredUpdate: u}})

@@ -728,13 +728,17 @@ refresh하며 refresh token을 회전 → AMS 보관본(`accounts.encrypted_secr
   세션 서명·TLS. credential은 채널에만 실리고 로그·DB 평문 저장 금지(§7).
 - **AMS 갱신**: 수신(`_apply_cred_update`) → observed_at 필수·미래 skew clamp → 테넌트 조회 → 소유권
   검증(이 서버에 active/inactive/quarantined 배정만; pending/recalling 배제) → key_id 일치 → sealed box
-  개봉(AAD 로컬 재유도) → `crypto.encrypt_secret` **초크포인트** 경유 재암호화(F2 봉투암호화 자동 준수).
+  개봉(AAD 로컬 재유도) → UTF-8 디코드 → **토큰 재료 검사**(로그아웃 껍데기 거부: 프로바이더별 토큰
+  키가 있는데 값이 전부 공백이면 저장·observed_at 전진 없이 드롭 — 복구본이 나중에 올라올 수 있게)
+  → `crypto.encrypt_secret` **초크포인트** 경유 재암호화(F2 봉투암호화 자동 준수).
 - **경합·단조성**: 설계 초안의 `credential_version`(정수) 대신 **`accounts.credential_observed_at`
   (에이전트 관측 시각, 벽시계 단조 래칫)** 채택 — 리부트 후에도 카운터 없이 생존, 원자적 조건부
   UPDATE(WHERE observed_at 가드)로 F3 다중 인스턴스·중복·롤백 재생을 거부. NULL = 최초 무조건 수락.
   (2026-08-09 소급 확인·승인 — as-built 우선, 정수 version 컬럼 없음.)
 - **관찰 경계**: AMA resyncer는 활성 계정의 `.credentials.json`만 관찰한다. 활성이었다가 회전 직후
-  tick 전에 전환·recall된 계정의 회전은 놓칠 수 있음 — 아래 폴백으로 정합성은 유지되므로 수용.
+  tick 전에 전환·recall된 계정의 회전은 놓칠 수 있음 — 아래 폴백으로 정합성은 유지되므로 수용. 또한
+  fingerprint가 바뀌었더라도 토큰 재료가 없는 세트(로그아웃 껍데기)는 push하지 않고 베이스라인도
+  그대로 둔다 — AMS 편 검사와 같은 판정이며, 양편 공백 정의(공백 또는 제어문자)를 일치시켜야 한다.
 - **폴백**: 역동기화 실패·유실 시 재배정은 §5.5 재인증으로 폴백(현 동작 유지) — 자동화 최적화이지
   정합성 필수 경로는 아님.
 
