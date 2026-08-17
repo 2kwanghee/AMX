@@ -183,6 +183,10 @@ const KR_API_ERROR: Record<string, string> = {
     'detached(회수 완료) 상태의 할당만 삭제할 수 있습니다. 먼저 회수한 뒤 다시 시도하세요.',
   'assignment.server_codex_capacity':
     '이 서버에는 이미 Codex 계정이 연결돼 있습니다. Codex는 호스트당 자격증명을 하나만 두므로, 기존 Codex 연결을 회수한 뒤 다시 연결하세요.',
+  'assignment.account_excluded':
+    '이 계정은 할당 대상에서 제외돼 있습니다. 할당하려면 계정 편집에서 제외를 먼저 해제하세요.',
+  'assignment.account_already_assigned':
+    '한 계정은 서버 하나에만 할당됩니다. 이미 다른 서버에 할당돼 있다면 그 할당을 회수한 뒤 다시 할당하세요.',
 };
 
 // 자격증명 파싱 실패만은 상류 detail을 덧붙인다. 서버가 문제된 KEY 이름만

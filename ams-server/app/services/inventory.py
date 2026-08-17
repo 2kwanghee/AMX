@@ -194,6 +194,7 @@ def create_account(
     owner: str | None = None,
     monthly_price: Decimal | None = None,
     currency: str | None = None,
+    assignment_excluded: bool = False,
 ) -> Account:
     get_tenant(db, tenant_id)
     if provider == "codex":
@@ -213,6 +214,7 @@ def create_account(
         secret_masked=crypto.mask_secret(credential_type, secret),
         status="available",
         monthly_price=monthly_price,
+        assignment_excluded=assignment_excluded,
     )
     # currency is NOT NULL with a server-side 'USD' default; leaving the
     # attribute unset (rather than assigning None) is what lets that default
@@ -442,6 +444,7 @@ def update_account(
     owner: str | None = None,
     monthly_price: Decimal | None | Any = UNSET,
     currency: str | None = None,
+    assignment_excluded: bool | None = None,
 ) -> Account:
     account = get_account(db, tenant_id, account_id)
     if (
@@ -472,6 +475,10 @@ def update_account(
         account.monthly_price = monthly_price
     if currency is not None:
         account.currency = currency
+    if assignment_excluded is not None:
+        # Flips the flag only. It never inspects or touches an existing
+        # assignment — a live assignment stays exactly as it was (decision 2).
+        account.assignment_excluded = assignment_excluded
     if secret is not None:
         # A rotated credential re-enters through the same door as the first one,
         # so it faces the same check — otherwise PATCH would be a way to park an
@@ -806,6 +813,18 @@ def create_assignment(
     # same rule structurally; this exists to turn it into a clean 404/409
     # instead of an IntegrityError, and to catch it before the write.
     account = get_account(db, tenant_id, account_id)
+    if account.assignment_excluded:
+        # An operator flagged this account as one a person runs directly from
+        # their own profile, outside AMS. Assigning it to a server too would
+        # put both sides racing the same OAuth refresh-token rotation, and
+        # whichever refreshes second finds its own token already invalidated
+        # (observed 2026-08-17). Existing assignments made before the flag was
+        # set are untouched — this only stops a NEW one from being created.
+        raise conflict(
+            "assignment.account_excluded",
+            "This account is excluded from assignment. Clear the exclusion on "
+            "the account before assigning it to a server.",
+        )
     get_server(db, tenant_id, server_id)
     if account.provider == "codex":
         _reject_second_codex_account(db, tenant_id, server_id)

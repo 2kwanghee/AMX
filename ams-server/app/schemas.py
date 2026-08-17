@@ -86,6 +86,9 @@ class AccountCreate(Wire):
     # cost allocation skips. A stored 0 is a real free plan, not an omission.
     monthly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     currency: str = Field(default="USD", pattern=_CURRENCY_PATTERN)
+    # Opt-in: an account a person runs directly from their own profile, kept
+    # out of new assignments so a server can never race its OAuth refresh.
+    assignment_excluded: bool = False
 
 
 class AccountUpdate(Wire):
@@ -95,6 +98,9 @@ class AccountUpdate(Wire):
     owner: str | None = Field(default=None, max_length=200)
     monthly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     currency: str | None = Field(default=None, pattern=_CURRENCY_PATTERN)
+    # None = leave unchanged. Unlike monthly_price, True/False are the only
+    # real values here, so there is no separate "not supplied" state to guard.
+    assignment_excluded: bool | None = None
 
 
 class Account(Wire):
@@ -103,6 +109,7 @@ class Account(Wire):
     provider: Provider = "claude"
     email: str
     owner: str | None = None
+    assignment_excluded: bool = False
     # Serialized by pydantic's Decimal default: a JSON string ("29.00"), which
     # keeps the two stored decimal places exact instead of handing the console a
     # binary float.

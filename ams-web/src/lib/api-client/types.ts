@@ -47,6 +47,8 @@ export interface Account {
   // Free-text label (a person, a team) for the console and for audit; not a
   // reference to an admin principal.
   owner?: string | null;
+  // opt-in. true면 새 배정에서 제외된 계정 — 신규 배정만 막고 기존 배정은 그대로 둔다.
+  assignmentExcluded?: boolean;
   credentialType: CredentialType;
   status: AccountStatus;
   secretMasked: string;
@@ -69,6 +71,8 @@ export interface AccountCreate {
   // credential set, for api_key the raw key. Write-only, never echoed back.
   secret: string;
   owner?: string;
+  // 미제공 시 서버 기본값 false(배정 가능).
+  assignmentExcluded?: boolean;
   // 금액은 문자열 그대로 전송(숫자 변환 금지 — 정밀도). currency 미제공 시 서버 기본 USD.
   monthlyPrice?: string;
   currency?: string;
@@ -78,6 +82,8 @@ export interface AccountUpdate {
   status?: AccountStatus;
   secret?: string;
   owner?: string;
+  // 미제공 = 유지. monthlyPrice와 달리 true/false 자체가 값이라 null 센티널이 없다.
+  assignmentExcluded?: boolean;
   // 명시 null = 지우기(clear), 미제공 = 유지(서버 model_fields_set 기준).
   monthlyPrice?: string | null;
   currency?: string;

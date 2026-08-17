@@ -180,6 +180,10 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const [selected, setSelected] = useState<string | null>(null);
   const [busyEdge, setBusyEdge] = useState<string | null>(null);
   const [connect, setConnect] = useState<{ accountId: string; serverId: string } | null>(null);
+  // 배정 제외 계정을 드래그했을 때 띄우는 안내. 어떤 요청도 보내지 않고 즉시
+  // 멎어야 하는 게이트라 connect(ConnectModal)와 별도 상태로 둔다 — recall이
+  // 나가는 move()로 흘러들지 않게 handleDrop에서 여기서 끊는다.
+  const [excludedNotice, setExcludedNotice] = useState<string | null>(null);
 
   const setNode = useCallback((id: string) => (el: HTMLElement | null) => {
     if (el) nodeRefs.current.set(id, el);
@@ -493,6 +497,17 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     if (from === 'server' && tType === 'account') { serverId = id; accountId = tId; }
     else if (from === 'account' && tType === 'server') { serverId = tId; accountId = id; }
     else return; // 같은 유형 위 드롭은 무효
+    // 배정 제외 계정은 이동 경로(move: recall → createAssignment)든 신규 연결
+    // 경로(confirm: createAssignment)든 여기서 끊는다. move()는 recall을 먼저
+    // 내보내는데 회수는 항상 purge라 되돌릴 수 없고, 그 뒤에 오는 409는 이미
+    // 늦다 — 그래서 어느 API 호출로도 진입하기 전에, ConnectModal을 열기 전에
+    // 계정 목록(이미 로드돼 있음)만으로 판정한다.
+    if (accounts.find((a) => a.id === accountId)?.assignmentExcluded) {
+      setExcludedNotice(
+        '이 계정은 할당 대상에서 제외돼 있어 여기로 할당할 수 없습니다. 계정 편집에서 제외를 해제한 뒤 다시 시도하세요.',
+      );
+      return;
+    }
     // 이미 같은 서버에 비-detached로 연결돼 있으면 무효(중복 생성 안 함). 회수된
     // 이력 행은 중복으로 보지 않아 같은 서버로의 재연결 드롭이 막히지 않는다.
     if (assignments.some((a) => a.accountId === accountId && a.serverId === serverId && a.state !== 'detached')) return;
@@ -705,6 +720,12 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
           srvNameOf={serverName}
           onClose={() => setConnect(null)}
         />
+      )}
+
+      {excludedNotice && (
+        <Modal title="배정 제외" onClose={() => setExcludedNotice(null)}>
+          <p>{excludedNotice}</p>
+        </Modal>
       )}
     </div>
   );
