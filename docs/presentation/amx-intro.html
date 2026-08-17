@@ -901,10 +901,23 @@ body.paused .paused-flag { opacity: 1; }
     u.lang = 'ko-KR';
     if (koVoice) u.voice = koVoice;
     u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
-    u.onend = function () {
-      if (mine !== speakToken) return;          // 그 사이 전환됨 → 무시
-      if (narrateOn && autoAdvance && cur < scenes.length - 1) jump(cur + 1);
-    };
+    // 발화 종료(onend)와 오류(onerror)는 같은 전진 로직을 공유한다. done으로 1회만 처리.
+    var done = false;
+    function finish() {
+      if (done || mine !== speakToken) return;  // 중복·전환 후 이벤트 무시
+      done = true;
+      if (!narrateOn || !autoAdvance) return;
+      // 전진 직전, 남은 연출 스텝을 장면 끝 시점으로 스냅해 즉시 모두 표시
+      t = starts[cur] + durs[cur];
+      applySteps(scenes[cur], durs[cur], true);
+      render();
+      if (cur >= scenes.length - 1) return;     // 마지막 장면이면 전진 없음
+      setTimeout(function () {
+        if (mine === speakToken && narrateOn && autoAdvance && cur < scenes.length - 1) jump(cur + 1);
+      }, 800);                                   // 잔여 스텝을 눈으로 확인할 짧은 여백
+    }
+    u.onend = finish;
+    u.onerror = finish;                          // TTS 오류·보이스 부재에도 자동 진행 유지
     // 일부 브라우저는 cancel 직후 speak가 씹히므로 다음 틱에 발화
     setTimeout(function () { if (mine === speakToken) synth.speak(u); }, 60);
   }
