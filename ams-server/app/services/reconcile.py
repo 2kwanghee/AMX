@@ -196,6 +196,17 @@ def _apply_converged(db: Session, command: AgentCommand, assignment: Assignment)
             kind="recall_failed",
             account_id=assignment.account_id,
         )
+        # The account has left this server, so every account-scoped alert opened
+        # under this (server, account) pair is now stale AND unresolvable: the
+        # dedupe key carries this server_id, and once the account is re-assigned
+        # elsewhere all auto-resolve paths key on the new server. Closes only this
+        # pair — the account stays alive and may still be genuinely alarmed on
+        # another server. Same transaction as the detach (the caller commits).
+        alerts.resolve_server_account_alerts(
+            db,
+            server_id=assignment.server_id,
+            account_id=assignment.account_id,
+        )
         account = db.scalar(
             select(Account).where(
                 Account.id == assignment.account_id,
@@ -242,6 +253,14 @@ def _settle_recall_detached(db: Session, assignment: Assignment) -> None:
         db,
         server_id=assignment.server_id,
         kind="recall_failed",
+        account_id=assignment.account_id,
+    )
+    # Same detach cleanup as the recall-CONVERGED branch of _apply_converged: this
+    # settle is the other way an assignment reaches ``detached``, so it has to close
+    # the same (server, account) alerts or a lost ack would leave them stranded.
+    alerts.resolve_server_account_alerts(
+        db,
+        server_id=assignment.server_id,
         account_id=assignment.account_id,
     )
     account = db.scalar(

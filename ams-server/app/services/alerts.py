@@ -13,8 +13,8 @@ index ``uq_alerts_open_dedupe`` (``WHERE status = 'open'``); the database, not
 application code, guarantees at most one open alert per ``dedupe_key``.
 
 ``dedupe_key`` is derived, never client-supplied:
-    server-scoped  (all_exhausted, server_offline)                        -> ``{server_id}:{kind}``
-    account-scoped (drift, quarantine, recall_failed, command_send_failed) -> ``{server_id}:{kind}:{account_id}``
+    server-scoped  (all_exhausted, server_offline, self_update_failed)    -> ``{server_id}:{kind}``
+    account-scoped (the 5 ``ACCOUNT_SCOPED_KINDS`` below)                  -> ``{server_id}:{kind}:{account_id}``
 """
 
 from __future__ import annotations
@@ -30,6 +30,30 @@ from app.config import get_settings
 from app.models import Alert, AlertWebhookOutbox, Server
 
 _ACTIVE_STATUSES = ("open", "acked")
+
+# The account-scoped alert kinds — the ones whose dedupe_key carries an
+# ``account_id`` and whose truth is bound to one (server, account) pair.
+# ``models.ALERT_KINDS`` is a flat tuple with no scope dimension, so the split
+# has to live somewhere; it lives here, derived from the ``open_alert`` call
+# sites that actually pass ``account_id``:
+#   drift                -> sync_from_report (this module)
+#   quarantine           -> app/grpc/server.py:979   (KIND_QUARANTINE event)
+#   credential_unusable  -> app/grpc/server.py:1000  (§5.7 agent guard signal)
+#                           app/grpc/server.py:1193  (§5.7 AMS cred_update guard)
+#   recall_failed        -> app/services/reconcile.py:165 (recall NACK),
+#                           app/services/commands.py:189 (recall retries out),
+#                           app/services/commands.py:565 (recall send failed)
+#   command_send_failed  -> app/services/commands.py:565 (other types)
+# Every other kind is server-scoped (all_exhausted, server_offline,
+# self_update_failed) or system-scoped (server_id NULL) and never names an
+# account, so none of them belong to an account's detach.
+ACCOUNT_SCOPED_KINDS = (
+    "drift",
+    "quarantine",
+    "recall_failed",
+    "command_send_failed",
+    "credential_unusable",
+)
 
 # G27. The usage-rollup watermark is a single global cursor, but a forward
 # wall-clock step that parks it in the future silently strands every tenant's
@@ -209,6 +233,44 @@ def resolve_account_alerts(
         .where(
             Alert.tenant_id == tenant_id,
             Alert.account_id == account_id,
+            Alert.status.in_(_ACTIVE_STATUSES),
+        )
+        .values(status="resolved", resolved_at=_now())
+        .returning(*_RESOLVE_RETURNING)
+    ).all()
+    _stage_resolved(db, rows)
+
+
+def resolve_server_account_alerts(
+    db: Session, *, server_id: uuid.UUID, account_id: uuid.UUID
+) -> None:
+    """Resolve the active account-scoped alerts of one ``(server, account)`` pair.
+
+    Detach cleanup. Account-scoped alerts dedupe on
+    ``{server_id}:{kind}:{account_id}``, so when an account is reassigned to a
+    different server every auto-resolve path keys on the NEW server_id and the
+    alerts opened under the old one can never be closed by the machinery that
+    opened them — the condition they describe cannot recur there either, because
+    that server no longer holds the account.
+
+    Deliberately narrower than ``resolve_account_alerts``: that one is for
+    ``delete_account``, where the account ceases to exist and *no* alert of any
+    kind can ever be true again. A detach leaves the account alive, so its alerts
+    on OTHER servers must stay open — the same problem may well still be real
+    there. Only the pair that just came apart is closed.
+
+    Kinds are restricted to ``ACCOUNT_SCOPED_KINDS`` so a server-scoped alert can
+    never be swept up by an account's detach. Stages on the caller's session and
+    stages a ``resolved`` webhook row per closed alert (§5.6.2) — the caller
+    commits, so the alerts close in the same transaction as the detach or not at
+    all. Idempotent.
+    """
+    rows = db.execute(
+        update(Alert)
+        .where(
+            Alert.server_id == server_id,
+            Alert.account_id == account_id,
+            Alert.kind.in_(ACCOUNT_SCOPED_KINDS),
             Alert.status.in_(_ACTIVE_STATUSES),
         )
         .values(status="resolved", resolved_at=_now())

@@ -25,10 +25,11 @@ from app.grpc import signing
 from app.grpc.proto import pb
 from app.grpc.server import ControlPlaneServicer
 from app.models import Alert, Server
-from app.services import alerts, inventory
+from app.services import alerts, commands, inventory, reconcile
 
 from tests.test_grpc_channel import (
     AGENT_ID,
+    _assignment_state,
     _create_assignment,
     _seed_tenant_account_server,
 )
@@ -511,3 +512,127 @@ def test_delete_account_refused_keeps_its_alerts_open(app_env):
         row = db.get(Alert, alert_id)
     assert row.status == "open"
     assert row.resolved_at is None
+
+
+# -- detach closes that (server, account) pair's alerts -------------------------
+def test_account_scoped_kinds_are_real_alert_kinds():
+    """``ACCOUNT_SCOPED_KINDS`` is hand-maintained (``ALERT_KINDS`` has no scope
+    dimension), so a typo in it would silently exclude a kind from detach cleanup
+    forever. Nothing else would notice — the query would just match no rows."""
+    from app import models
+
+    assert set(alerts.ACCOUNT_SCOPED_KINDS) <= set(models.ALERT_KINDS)
+    assert len(set(alerts.ACCOUNT_SCOPED_KINDS)) == len(alerts.ACCOUNT_SCOPED_KINDS)
+
+
+def _second_server(tenant_id):
+    with get_sessionmaker()() as db:
+        return inventory.create_server(
+            db, tenant_id, name="s2-" + uuid.uuid4().hex[:8], hostname="h2", switch_mode="auto"
+        ).id
+
+
+def _seed_detach_alerts(tenant_id, account_id, server_id, other_server_id):
+    """Open one active alert per surface the detach cleanup has to discriminate."""
+    return {
+        # account-scoped, on the pair that is about to come apart -> must close
+        "open": _open_account_alert(tenant_id, server_id, account_id, "credential_unusable"),
+        "acked": _open_account_alert(tenant_id, server_id, account_id, "quarantine", "acked"),
+        # same account, different server -> must stay open (the account lives on)
+        "other": _open_account_alert(tenant_id, other_server_id, account_id, "quarantine"),
+        # server-scoped on the same server -> nothing to do with this account
+        "server_scoped": _server_scoped_alert(tenant_id, server_id),
+    }
+
+
+def _server_scoped_alert(tenant_id, server_id):
+    _servicer()._store_event(server_id, tenant_id, _exhausted_event())
+    return _open_alerts(server_id, "all_exhausted")[0].id
+
+
+def _statuses(ids):
+    with get_sessionmaker()() as db:
+        return {k: db.get(Alert, v).status for k, v in ids.items()}
+
+
+def test_recall_ack_detach_closes_that_server_accounts_alerts(app_env):
+    """Detach path 1: a recall that acks CONVERGED (reconcile._apply_converged).
+
+    Account-scoped alerts dedupe on ``{server_id}:{kind}:{account_id}``, so once
+    the account moves to another server every auto-resolve path keys on the new
+    server_id and the alerts opened under the old one can never close. Detach is
+    the moment they stop being true, so it is the moment to close them.
+    """
+    tenant_id, account_id, server_id = _seed_tenant_account_server("detach1@ex.com")
+    other_server_id = _second_server(tenant_id)
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    ids = _seed_detach_alerts(tenant_id, account_id, server_id, other_server_id)
+
+    _set_state(tenant_id, assignment_id, "active")
+    with get_sessionmaker()() as db:
+        command_id = commands.request_recall(db, tenant_id, assignment_id).pending_command_id
+    with get_sessionmaker()() as db:
+        reconcile.apply_ack(
+            db, tenant_id=tenant_id, command_id=command_id, convergence=reconcile.CONVERGED
+        )
+    assert _assignment_state(tenant_id, assignment_id) == "detached"
+
+    got = _statuses(ids)
+    assert got["open"] == "resolved"
+    assert got["acked"] == "resolved"
+    # The account is still alive elsewhere; that condition may well still hold.
+    assert got["other"] == "open"
+    assert got["server_scoped"] == "open"
+
+
+def test_settled_recall_detach_closes_that_server_accounts_alerts(app_env):
+    """Detach path 2: the state-only settle (reconcile._settle_recall_detached).
+
+    A recall whose ack was lost reaches ``detached`` from the report instead of
+    from an ack, so it needs the same cleanup — otherwise which of the two paths
+    ran decides whether the operator is left with dead rows.
+    """
+    tenant_id, account_id, server_id = _seed_tenant_account_server("detach2@ex.com")
+    other_server_id = _second_server(tenant_id)
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    ids = _seed_detach_alerts(tenant_id, account_id, server_id, other_server_id)
+    _set_state(tenant_id, assignment_id, "recalling")
+
+    with get_sessionmaker()() as db:
+        reconcile.reconcile_from_report(
+            db, tenant_id=tenant_id, server_id=server_id, reported={}
+        )
+        db.commit()
+    assert _assignment_state(tenant_id, assignment_id) == "detached"
+
+    got = _statuses(ids)
+    assert got["open"] == "resolved"
+    assert got["acked"] == "resolved"
+    assert got["other"] == "open"
+    assert got["server_scoped"] == "open"
+
+
+def test_rolled_back_detach_keeps_the_alerts_open(app_env):
+    """The cleanup rides in the detach's transaction: no detach, no resolve.
+
+    Rolling the session back must leave both the assignment and the alerts exactly
+    as they were — an alert must never close without the detach that justified it.
+    """
+    tenant_id, account_id, server_id = _seed_tenant_account_server("detach3@ex.com")
+    other_server_id = _second_server(tenant_id)
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    ids = _seed_detach_alerts(tenant_id, account_id, server_id, other_server_id)
+    _set_state(tenant_id, assignment_id, "recalling")
+
+    with get_sessionmaker()() as db:
+        reconcile.reconcile_from_report(
+            db, tenant_id=tenant_id, server_id=server_id, reported={}
+        )
+        db.rollback()
+
+    assert _assignment_state(tenant_id, assignment_id) == "recalling"
+    got = _statuses(ids)
+    assert got["open"] == "open"
+    assert got["acked"] == "acked"
+    assert got["other"] == "open"
+    assert got["server_scoped"] == "open"
