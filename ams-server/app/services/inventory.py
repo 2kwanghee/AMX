@@ -183,6 +183,40 @@ def delete_tenant(db: Session, tenant_id: uuid.UUID) -> None:
     kek.invalidate_dek_cache(tenant_id)
 
 
+def _require_encodable_secret(secret: str) -> None:
+    """Refuse a secret the at-rest encryptor cannot encode, before it reaches it.
+
+    `crypto.encrypt_secret` and `crypto.mask_secret` both call the strict
+    `str.encode()`, so a string carrying an unpaired surrogate raises
+    `UnicodeEncodeError` in there — an `ApiError`-less 500 on a value the caller
+    supplied.
+
+    Measured reachability, since it decides what this is worth: over REST the
+    surrogate never gets this far. A body spelling one in pure ASCII
+    ("sk-ant-\\ud800-bad") is refused by pydantic itself with 422
+    `string_unicode` — it cannot build a `str` from those bytes
+    (tests/test_api_crud.py). The gRPC re-sync path decodes the credential from
+    bytes with a strict `.decode()` (grpc/server.py), so a surrogate cannot form
+    there either, and `crypto.dumps_credential` emits `ensure_ascii` JSON, so the
+    OAuth-completion secret is always ASCII. This function is therefore the guard
+    for every OTHER caller of `create_account`/`update_account` — scripts, tests,
+    a future transport — none of which has pydantic in front of it.
+
+    Provider-agnostic on purpose, and it runs after `_validate_codex_secret`, so
+    a Codex credential keeps refusing under its own code. Encodability is the
+    entire test here: shape, size and content stay with the per-provider checks.
+    """
+    try:
+        secret.encode("utf-8")
+    except UnicodeEncodeError:
+        # Nothing from the value is echoed — it is credential material (§7).
+        raise bad_request(
+            "account.secret_not_encodable",
+            "The credential contains characters that cannot be stored as UTF-8 "
+            "(unpaired surrogate); copy the credential again from the source.",
+        ) from None
+
+
 # -- Accounts -----------------------------------------------------------------
 def create_account(
     db: Session,
@@ -205,6 +239,7 @@ def create_account(
         # describe it, so the stored value is fixed here. It also keeps
         # mask_secret's prefix honest for the console.
         credential_type = "oauth"
+    _require_encodable_secret(secret)
     account = Account(
         tenant_id=tenant_id,
         provider=provider,
@@ -569,6 +604,7 @@ def update_account(
         # unusable auth.json on an already-registered Codex account.
         if account.provider == "codex":
             _validate_codex_secret(secret)
+        _require_encodable_secret(secret)
         account.encrypted_secret = crypto.encrypt_secret(secret, tenant_id=tenant_id, db=db)
         account.secret_masked = crypto.mask_secret(account.credential_type, secret)
         _apply_credential_metadata(account, secret)

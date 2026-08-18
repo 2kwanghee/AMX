@@ -197,6 +197,81 @@ def test_account_round_trip_never_echoes_the_secret(client):
     assert client.delete(f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}").status_code == 204
 
 
+# A lone surrogate, spelled the way a caller actually puts one on the wire: pure
+# ASCII bytes. The body is built as source text because httpx serialises `json=`
+# with `ensure_ascii=False` and would refuse to encode the surrogate itself.
+JSON_HEADERS = {"Content-Type": "application/json"}
+SURROGATE_BODY = (
+    '{"email":"a@example.com","credentialType":"api_key","secret":"sk-ant-\\ud800-bad"}'
+)
+SURROGATE_SECRET = "sk-ant-\ud800-bad"
+
+
+def test_a_secret_with_a_lone_surrogate_is_refused_at_the_api_never_a_500(client):
+    """The REST edge stops it: pydantic cannot build a `str` from those bytes.
+
+    Recorded as a test because it is the outer half of the defence — the inner
+    half is `inventory._require_encodable_secret` below, which is what keeps a
+    non-REST caller (a script, a future transport) out of the strict `.encode()`
+    inside `crypto.encrypt_secret`/`mask_secret`.
+    """
+    tenant_id = make_tenant(client)
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts", content=SURROGATE_BODY, headers=JSON_HEADERS
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "request.invalid"
+    assert "sk-ant" not in response.text
+    assert client.get(f"/api/v1/tenants/{tenant_id}/accounts").json()["items"] == []
+
+
+def test_creating_an_account_with_an_unencodable_secret_is_a_400(client, db):
+    """400, not the `UnicodeEncodeError` 500 the encryptor would raise (§7)."""
+    import pytest
+
+    from app.core.errors import ApiError
+    from app.services import inventory
+
+    tenant_id = make_tenant(client)
+    with pytest.raises(ApiError) as caught:
+        inventory.create_account(
+            db,
+            uuid.UUID(tenant_id),
+            email="surrogate@example.com",
+            credential_type="api_key",
+            secret=SURROGATE_SECRET,
+        )
+    assert caught.value.status == 400
+    assert caught.value.code == "account.secret_not_encodable"
+    assert "sk-ant" not in caught.value.detail
+    # A valid secret still enrols unchanged, and the refused one left no row.
+    account = make_account(client, tenant_id)
+    assert [a["id"] for a in client.get(f"/api/v1/tenants/{tenant_id}/accounts").json()["items"]] \
+        == [account["id"]]
+
+
+def test_rotating_to_an_unencodable_secret_is_a_400_and_keeps_the_stored_one(client, db):
+    import pytest
+
+    from app.core.errors import ApiError
+    from app.services import inventory
+
+    tenant_id = make_tenant(client)
+    account = make_account(client, tenant_id)
+    with pytest.raises(ApiError) as caught:
+        inventory.update_account(
+            db,
+            uuid.UUID(tenant_id),
+            uuid.UUID(account["id"]),
+            email=None,
+            status=None,
+            secret=SURROGATE_SECRET,
+        )
+    assert caught.value.code == "account.secret_not_encodable"
+    refetched = client.get(f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}").json()
+    assert refetched["secretMasked"] == account["secretMasked"]
+
+
 def test_duplicate_account_email_within_a_tenant_conflicts(client):
     tenant_id = make_tenant(client)
     make_account(client, tenant_id)
