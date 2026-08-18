@@ -186,6 +186,37 @@ def resolve(
     _stage_resolved(db, rows)
 
 
+def resolve_account_alerts(
+    db: Session, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> None:
+    """Resolve every active alert naming one account, on every server it touched.
+
+    ``alerts.account_id`` carries no foreign key — only ``(server_id, tenant_id)``
+    does — so nothing cascades when the account row goes away, and an
+    account-scoped alert left open then survives forever: the condition it
+    describes can no longer recur, so no auto-resolve path (report reconcile,
+    heartbeat, a stored cred_update) will ever close it. Called from
+    ``inventory.delete_account`` inside the delete's own transaction, so the
+    alerts close exactly when the account does or not at all.
+
+    Keyed on the account rather than on ``(server_id, kind)`` like ``resolve``:
+    the caller knows only the account, and a deleted account's alerts must go
+    regardless of which server or kind opened them. Tenant-scoped, so it can
+    never reach across tenants even if two rows shared an id.
+    """
+    rows = db.execute(
+        update(Alert)
+        .where(
+            Alert.tenant_id == tenant_id,
+            Alert.account_id == account_id,
+            Alert.status.in_(_ACTIVE_STATUSES),
+        )
+        .values(status="resolved", resolved_at=_now())
+        .returning(*_RESOLVE_RETURNING)
+    ).all()
+    _stage_resolved(db, rows)
+
+
 def _resolve_drift_except(
     db: Session, *, server_id: uuid.UUID, keep_account_ids: set[str]
 ) -> None:

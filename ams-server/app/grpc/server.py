@@ -939,10 +939,17 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 db.commit()
             except Exception:  # noqa: BLE001 - opaque: never surface SQL/parameters (§7)
                 db.rollback()
+                # The account is part of the identity of a lost alert: two of the
+                # three kinds opened here (quarantine, credential_unusable) are
+                # account-scoped, so server+kind alone cannot tell an operator WHOSE
+                # signal went missing. Derived the same way the alert was keyed;
+                # None for a server-scoped kind or an unparsable ref (§7: an id,
+                # never credential material).
                 _logger.warning(
-                    "account event alert not opened (server %s, kind %s)",
+                    "account event alert not opened (server %s, kind %s, account %s)",
                     server_id,
                     pb.AccountEvent.Kind.Name(event.kind),
+                    _event_account_id(payload),
                 )
 
     def _open_event_alert(
@@ -1166,6 +1173,45 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                     "cred_update rejected: credential carries no token material (account %s)",
                     account.id,
                 )
+                # An agent old enough to predate the agent-side §5.7 guard sends no
+                # KIND_CREDENTIAL_UNUSABLE event, so THIS reject is the only place
+                # the incident is observable — without an alert here a mixed-version
+                # fleet keeps the 08-17 original silent. Same kind and the same
+                # derived key (`{server}:{kind}:{account}`), so an agent that DOES
+                # send the event only refreshes the one open row rather than
+                # double-opening, and the recovery path (a cred_update that stores)
+                # closes both.
+                #
+                # Isolated on purpose: the reject verdict above is already final
+                # (nothing was written, the caller returns either way), and this
+                # gets its own commit/rollback so a refused alert write — e.g. a
+                # `ck_alerts_kind` the deployed schema has not been widened for —
+                # cannot unwind the session read loop or turn the reject into an
+                # exception. Opaque like every other failure path here: identifiers
+                # only, never credential material (§7).
+                try:
+                    alerts.open_alert(
+                        db,
+                        tenant_id=tenant_id,
+                        server_id=server_id,
+                        account_id=account.id,
+                        kind="credential_unusable",
+                        severity="warning",
+                        detail={
+                            "source": "ams_cred_update_guard",
+                            "detail": "pushed credential carries no token material",
+                            "provider": account.provider,
+                        },
+                    )
+                    db.commit()
+                except Exception:  # noqa: BLE001 - opaque, and never revives the push
+                    db.rollback()
+                    _logger.warning(
+                        "credential_unusable alert not opened "
+                        "(server %s, account %s)",
+                        server_id,
+                        account.id,
+                    )
                 return
             # Re-encrypt under the at-rest key and drop the plaintext before any
             # DB round-trip. A missing tenant DEK or a KEK-provider failure raises

@@ -15,9 +15,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
 from app.core import crypto
+from app.core.errors import ApiError
 from app.db import get_sessionmaker
 from app.grpc import signing
 from app.grpc.proto import pb
@@ -436,3 +438,76 @@ def test_events_endpoint_cross_tenant_404(app_env, client):
     tenant_b, _b, _server_b = _seed_tenant_account_server("evtB@ex.com")
     resp = client.get(f"/api/v1/tenants/{tenant_b}/servers/{server_a}/events")
     assert resp.status_code == 404
+
+
+# -- account deletion closes the account's alerts ------------------------------
+def _open_account_alert(tenant_id, server_id, account_id, kind, status="open"):
+    with get_sessionmaker()() as db:
+        alerts.open_alert(
+            db,
+            tenant_id=tenant_id,
+            server_id=server_id,
+            account_id=account_id,
+            kind=kind,
+            severity="warning",
+            detail={"reason": "seeded"},
+        )
+        db.commit()
+        row = db.scalar(
+            select(Alert).where(
+                Alert.server_id == server_id,
+                Alert.kind == kind,
+                Alert.account_id == account_id,
+            )
+        )
+        if status != "open":
+            row.status = status
+            db.commit()
+        return row.id
+
+
+def test_delete_account_closes_its_active_alerts(app_env):
+    """An account's alerts must not outlive the account.
+
+    ``alerts.account_id`` has no foreign key, so the delete cascades nothing, and
+    every auto-resolve path (report reconcile, heartbeat, a stored cred_update)
+    needs the account to still exist — an alert left open here stays open forever.
+    An **acked** alert counts as active too: an operator who acknowledged the
+    condition still ends up with a row that can never close.
+    """
+    tenant_id, account_id, server_id = _seed_tenant_account_server("delacct@ex.com")
+    open_id = _open_account_alert(tenant_id, server_id, account_id, "credential_unusable")
+    acked_id = _open_account_alert(tenant_id, server_id, account_id, "quarantine", "acked")
+    # Server-scoped control: account_id NULL, nothing to do with this account.
+    _servicer()._store_event(server_id, tenant_id, _exhausted_event())
+    server_scoped = _open_alerts(server_id, "all_exhausted")[0].id
+
+    with get_sessionmaker()() as db:
+        inventory.delete_account(db, tenant_id, account_id)
+
+    with get_sessionmaker()() as db:
+        rows = {a.id: a for a in db.scalars(select(Alert)).all()}
+    assert rows[open_id].status == "resolved"
+    assert rows[open_id].resolved_at is not None
+    assert rows[acked_id].status == "resolved"
+    assert rows[acked_id].resolved_at is not None
+    # The server-scoped alert is untouched — this closes an account, not a server.
+    assert rows[server_scoped].status == "open"
+
+
+def test_delete_account_refused_keeps_its_alerts_open(app_env):
+    """The resolve rides in the delete's transaction, so a refused delete (a live
+    assignment) must leave the alert open — otherwise a 409 would silently close
+    an alert whose condition still holds."""
+    tenant_id, account_id, server_id = _seed_tenant_account_server("delacct2@ex.com")
+    alert_id = _open_account_alert(tenant_id, server_id, account_id, "credential_unusable")
+    _create_assignment(tenant_id, account_id, server_id)  # pending -> live
+
+    with get_sessionmaker()() as db, pytest.raises(ApiError) as refused:
+        inventory.delete_account(db, tenant_id, account_id)
+    assert refused.value.code == "account.assigned"
+
+    with get_sessionmaker()() as db:
+        row = db.get(Alert, alert_id)
+    assert row.status == "open"
+    assert row.resolved_at is None

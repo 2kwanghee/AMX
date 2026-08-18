@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -1355,3 +1356,162 @@ def test_credential_unusable_resolved_by_successful_cred_update(app_env):
     resolved = _alerts(server_id, "credential_unusable", "resolved")
     assert len(resolved) == 1
     assert resolved[0].resolved_at is not None
+
+
+# -- AMS-side material reject: the alert, and what it must not disturb ---------
+_EMPTY_OAUTH_SET = json.dumps(
+    {"claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0, "scopes": []}}
+)
+
+
+def _session_kek() -> tuple[bytes, str]:
+    """A stand-in for one session's wrapped KEK + key_id.
+
+    ``_apply_cred_update`` only ever compares ``enc.key_id`` against the key_id it
+    was handed and opens the AEAD with the KEK it was handed, so a locally
+    generated pair exercises the same path as a SessionSetup one without the
+    stream. Used by the tests that drive the handler directly.
+    """
+    return secrets.token_bytes(32), "k-" + uuid.uuid4().hex[:8]
+
+
+def _push_directly(tenant_id, account_id, server_id, secret_json, observed, *, kek=None):
+    """Hand one cred_update to the servicer without a live session."""
+    kek_bytes, key_id = kek if kek is not None else _session_kek()
+    enc = _seal(kek_bytes, key_id, account_id, AGENT_ID, secret_json)
+    msg = _cred_update(account_id, enc, "", observed)
+    _servicer()._apply_cred_update(
+        msg.cred_update, server_id, tenant_id, AGENT_ID, kek_bytes, key_id
+    )
+
+
+def test_ams_material_reject_opens_credential_unusable_alert(app_env):
+    """The AMS-side reject must alert too, or a mixed-version fleet stays silent.
+
+    An agent older than the §5.7 material guard pushes the logged-out shell
+    itself, so it sends no ``KIND_CREDENTIAL_UNUSABLE`` event and the edge-trigger
+    path never fires — this reject is then the only place the incident is
+    observable. Mixed deployment is the normal case during a rollout.
+    """
+    tenant_id, account_id, server_id = _seed_tenant_account_server("amsguard@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+
+    _push_directly(
+        tenant_id, account_id, server_id, _EMPTY_OAUTH_SET, datetime.now(UTC)
+    )
+
+    opened = _alerts(server_id, "credential_unusable", "open")
+    assert len(opened) == 1
+    assert opened[0].severity == "warning"
+    assert opened[0].account_id == account_id
+    assert opened[0].tenant_id == tenant_id
+    # The detail names the source and carries no credential material (§7).
+    assert opened[0].detail["source"] == "ams_cred_update_guard"
+    assert original_rt not in json.dumps(opened[0].detail)
+    # The reject verdict itself is unchanged: nothing stored, no ratchet.
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    assert _stored(tenant_id, account_id).credential_observed_at is None
+
+
+def test_ams_and_agent_signals_share_one_open_alert(app_env):
+    """Both signals derive the same key (``{server}:{kind}:{account}``), so an
+    agent that DOES send the event refreshes the row instead of double-opening —
+    and the recovery path closes one alert, not two."""
+    tenant_id, account_id, server_id = _seed_tenant_account_server("bothsig@ex.com")
+    _assign(tenant_id, account_id, server_id)
+
+    _push_directly(
+        tenant_id, account_id, server_id, _EMPTY_OAUTH_SET, datetime.now(UTC)
+    )
+    _servicer()._store_event(server_id, tenant_id, _unusable_event(account_id))
+
+    assert len(_alerts(server_id, "credential_unusable", "open")) == 1
+
+
+def test_ams_material_reject_survives_a_refused_alert_write(app_env, monkeypatch):
+    """The alert is opened in its own transaction, so a DB that refuses the write
+    (a ``ck_alerts_kind`` not yet widened on this deployment) must not turn the
+    reject into an exception, nor let it store the shell."""
+    tenant_id, account_id, server_id = _seed_tenant_account_server("amsguardfail@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+
+    def refuse(*args, **kwargs):
+        raise IntegrityError("ck_alerts_kind (injected)", None, Exception("injected"))
+
+    monkeypatch.setattr(grpc_server.alerts, "open_alert", refuse)
+
+    rejects: list[str] = []
+    real_warning = grpc_server._logger.warning
+
+    def spy_warning(msg, *args, **kwargs):
+        rejects.append(msg % args if args else msg)
+        return real_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(grpc_server._logger, "warning", spy_warning)
+
+    _push_directly(
+        tenant_id, account_id, server_id, _EMPTY_OAUTH_SET, datetime.now(UTC)
+    )
+
+    assert _alerts(server_id, "credential_unusable") == []
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    assert _stored(tenant_id, account_id).credential_observed_at is None
+    assert any(
+        "credential_unusable alert not opened" in m
+        and str(account_id) in m
+        and str(server_id) in m
+        and "injected" not in m
+        for m in rejects
+    )
+
+
+def test_stale_push_that_stores_nothing_does_not_resolve_the_alert(app_env, monkeypatch):
+    """Regression guard: the auto-resolve must stay INSIDE the ``rowcount`` gate.
+
+    Moving ``alerts.resolve`` outside it passed the entire suite. The reason is
+    that the monotonicity pre-check refuses every ordinary stale push long before
+    the conditional UPDATE, so nothing ever reached the resolve with rowcount 0 —
+    the mutant was untestable by construction. The only push that gets there is
+    one that loses the atomic guard, which is exactly what the WHERE clause
+    exists for: a concurrent re-sync commits a newer ``observed_at`` between the
+    pre-check read and the UPDATE. That push stores nothing, so it is no proof the
+    credential came back and must leave the alert standing.
+
+    The race is made deterministic by hooking ``encrypt_secret``, which runs in
+    that window on this path.
+    """
+    tenant_id, account_id, server_id = _seed_tenant_account_server("staleresolve@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    original_rt = _decrypt_rt(tenant_id, account_id)
+    _servicer()._store_event(server_id, tenant_id, _unusable_event(account_id))
+    assert len(_alerts(server_id, "credential_unusable", "open")) == 1
+
+    winner = datetime.now(UTC)  # what the concurrent re-sync commits
+    loser = winner - timedelta(seconds=1)  # ours: beats NULL, loses to `winner`
+    real_encrypt = grpc_server.crypto.encrypt_secret
+
+    def encrypt_then_race(*args, **kwargs):
+        with get_sessionmaker()() as other:
+            inventory.get_account(other, tenant_id, account_id).credential_observed_at = winner
+            other.commit()
+        return real_encrypt(*args, **kwargs)
+
+    monkeypatch.setattr(grpc_server.crypto, "encrypt_secret", encrypt_then_race)
+
+    _push_directly(
+        tenant_id,
+        account_id,
+        server_id,
+        _oauth_secret("staleresolve@ex.com", "rt-loser-" + uuid.uuid4().hex),
+        loser,
+    )
+
+    # The guard held: the winner's stamp stands and the loser's secret is not stored.
+    row = _stored(tenant_id, account_id)
+    assert abs((row.credential_observed_at - winner).total_seconds()) < 1e-3
+    assert _decrypt_rt(tenant_id, account_id) == original_rt
+    # And the alert is still open — a push that stored nothing proves no recovery.
+    assert len(_alerts(server_id, "credential_unusable", "open")) == 1
+    assert _alerts(server_id, "credential_unusable", "resolved") == []
