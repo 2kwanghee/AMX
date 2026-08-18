@@ -168,5 +168,6 @@ def complete_oauth(
         provider=flow.provider,
         credential_type="oauth",
         secret=crypto.dumps_credential(credential_set),
+        assignment_excluded=body.assignment_excluded,
     )
     return schemas.Account.model_validate(account)

@@ -15,7 +15,7 @@ import pytest
 
 from app.core.crypto import decrypt_secret
 from app.services import oauth_enroll
-from tests.test_api_crud import make_tenant
+from tests.test_api_crud import make_server, make_tenant
 
 # P2a moved the per-provider endpoint constants off the module and into
 # OAUTH_PROFILES; the OAuth start/complete flow defaults to the "claude"
@@ -237,6 +237,61 @@ def test_a_422_on_oauth_start_never_echoes_the_body(client):
     )
     assert response.status_code == 422
     assert canary not in response.text
+
+
+# -- assignment_excluded on the OAuth path ------------------------------------
+def test_oauth_complete_with_assignment_excluded_marks_the_account(client, app):
+    tenant_id = make_tenant(client)
+    install_token_stub(app)
+    flow = start_flow(client, tenant_id)
+
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts:oauth-complete",
+        json={"flowId": flow["flowId"], "code": "auth-code-1", "assignmentExcluded": True},
+    )
+    assert response.status_code == 201, response.text
+    account = response.json()
+    assert account["assignmentExcluded"] is True
+
+    fetched = client.get(f"/api/v1/tenants/{tenant_id}/accounts/{account['id']}")
+    assert fetched.json()["assignmentExcluded"] is True
+
+
+def test_oauth_complete_without_the_field_defaults_to_not_excluded(client, app):
+    """Regression guard: omitting assignmentExcluded must preserve the
+    pre-existing OAuth enrollment behavior (not excluded)."""
+    tenant_id = make_tenant(client)
+    install_token_stub(app)
+    flow = start_flow(client, tenant_id)
+
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts:oauth-complete",
+        json={"flowId": flow["flowId"], "code": "auth-code-1"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["assignmentExcluded"] is False
+
+
+def test_an_account_enrolled_excluded_via_oauth_is_rejected_for_assignment(client, app):
+    """The registration-time flag must actually reach create_assignment's
+    guard — enrollment and rejection wired end to end, not just the stored
+    column."""
+    tenant_id = make_tenant(client)
+    install_token_stub(app)
+    flow = start_flow(client, tenant_id)
+
+    account = client.post(
+        f"/api/v1/tenants/{tenant_id}/accounts:oauth-complete",
+        json={"flowId": flow["flowId"], "code": "auth-code-1", "assignmentExcluded": True},
+    ).json()
+    server = make_server(client, tenant_id)
+
+    response = client.post(
+        f"/api/v1/tenants/{tenant_id}/assignments",
+        json={"accountId": account["id"], "serverId": server["id"]},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "assignment.account_excluded"
 
 
 def test_build_credential_set_requires_an_access_token():
