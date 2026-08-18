@@ -31,6 +31,22 @@ const KR_LABEL: Record<string, string> = {
   api_key: 'API 키',
   claude: 'Claude',
   codex: 'Codex',
+  // 경보 kind 전체 로스터(models.ALERT_KINDS와 1:1). 경보 표의 종류 칼럼이 이 맵을
+  // 거치므로, 여기서 빠진 kind는 영문 snake_case 그대로 노출된다.
+  all_exhausted: '전 계정 소진',
+  server_offline: '서버 오프라인',
+  self_update_failed: '자동 업데이트 실패',
+  drift: '상태 불일치',
+  quarantine: '계정 격리',
+  recall_failed: '회수 실패',
+  command_send_failed: '명령 전송 실패',
+  billing_watermark_future: '청구 워터마크 시계 앞점프',
+  langfuse_latency: 'Langfuse 지연',
+  langfuse_stale: 'Langfuse 수집 정지',
+  langfuse_usage_spike: '사용량 급증',
+  alert_webhook_dropped: '경보 웹훅 유실',
+  dangerous_command: '위험 명령 탐지',
+  credential_unusable: '자격증명 사용 불가',
 };
 
 export function krLabel(value?: string): string {

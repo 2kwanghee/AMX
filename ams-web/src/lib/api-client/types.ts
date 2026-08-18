@@ -268,6 +268,9 @@ export interface ServerEvent {
 }
 
 // -- Alerts (design §5.6 / p4-architecture §4). Not yet in openapi; Track A. ---
+// ams-server models.ALERT_KINDS와 1:1로 맞춘다(14종). 여기서 빠진 kind가 응답에
+// 실려도 krLabel이 string을 받아 화면은 죽지 않지만, 그만큼 타입이 계약 역할을
+// 못 하므로 서버 쪽 kind를 추가할 때 이 목록도 같이 늘린다.
 export type AlertKind =
   | 'all_exhausted'
   | 'drift'
@@ -275,7 +278,14 @@ export type AlertKind =
   | 'quarantine'
   | 'recall_failed'
   | 'command_send_failed'
-  | 'self_update_failed';
+  | 'self_update_failed'
+  | 'billing_watermark_future'
+  | 'langfuse_usage_spike'
+  | 'langfuse_stale'
+  | 'langfuse_latency'
+  | 'alert_webhook_dropped'
+  | 'dangerous_command'
+  | 'credential_unusable';
 export type AlertSeverity = 'critical' | 'warning';
 export type AlertStatus = 'open' | 'acked' | 'resolved';
 

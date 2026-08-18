@@ -61,6 +61,16 @@ type Config struct {
 	// disables the check entirely (the pre-guard behaviour), so Tick does not gate
 	// on it.
 	HasMaterial func([]byte) bool
+	// OnUnusable reports a HasMaterial drop upward so the FIRST incident is
+	// visible to an operator instead of only appearing in a log line. It is
+	// EDGE-triggered: called on the tick a drop is first seen for an account, then
+	// not again until the on-disk credential carries material once more or the
+	// active account changes. nil disables the notification and changes nothing
+	// else (same convention as HasMaterial). It runs while the engine lock is held,
+	// so it must not block on the network — an Outbox enqueue (local append) is the
+	// intended implementation. rec carries identifiers only; the credential
+	// material is never passed (§7).
+	OnUnusable func(rec store.Record)
 	// ServerCredential returns the long-lived session credential presented on the
 	// wire (CredentialUpdate.server_credential). Never nil.
 	ServerCredential func() string
@@ -84,10 +94,19 @@ type Resyncer struct {
 	credPath    string
 	fingerprint func([]byte) string
 	hasMaterial func([]byte) bool
+	onUnusable  func(store.Record)
 	serverCred  func() string
 	send        func(*amxv1.CredentialUpdate) bool
 	now         func() time.Time
 	logf        func(string, ...any)
+
+	// unusableEmail is the account (by email — the key the manifest lookup uses)
+	// currently judged credential-unusable, "" when none is. It is the edge-trigger
+	// state for OnUnusable: only a transition into a NEW value fires the callback,
+	// so a condition that persists across ticks is reported once. Read and written
+	// only inside detect, which holds the engine lock, so it needs no lock of its
+	// own.
+	unusableEmail string
 }
 
 // New validates cfg and returns a Resyncer.
@@ -114,6 +133,7 @@ func New(cfg Config) *Resyncer {
 		credPath:    cfg.CredentialsPath,
 		fingerprint: cfg.Fingerprint,
 		hasMaterial: cfg.HasMaterial,
+		onUnusable:  cfg.OnUnusable,
 		serverCred:  cfg.ServerCredential,
 		send:        cfg.Send,
 		now:         now,
@@ -198,8 +218,15 @@ func (r *Resyncer) detect(ctx context.Context) (*amxv1.CredentialUpdate, []byte,
 		wipe(plaintext)
 		// Identifier only — never the credential material (§7).
 		r.logf("resync: skipping push for %s: on-disk credential carries no token material", rec.Email)
+		r.markUnusable(rec)
 		return nil, nil, store.Record{}, false
 	}
+	// Past the guard the live credential carries material, so any earlier incident
+	// is over: clear the edge-trigger state so a LATER one is reported again. Only
+	// this point proves recovery — the early returns above (no KEK, no active
+	// account, unreadable file) observe nothing about the material and must leave
+	// the state alone.
+	r.unusableEmail = ""
 	if r.fingerprint(plaintext) == rec.Fingerprint {
 		wipe(plaintext) // unchanged: no rotation since the last seal
 		return nil, nil, store.Record{}, false
@@ -248,6 +275,21 @@ func (r *Resyncer) detect(ctx context.Context) (*amxv1.CredentialUpdate, []byte,
 		ObservedAt: timestamppb.New(r.now().UTC()),
 	}
 	return upd, plaintext, rec, true
+}
+
+// markUnusable fires OnUnusable exactly once per incident. A tick that re-observes
+// the SAME account already reported is silent (the guard drops on every tick at
+// the report interval, and one event per tick would bury the signal it exists to
+// raise); a different account is a different incident and fires again. Called from
+// detect with the engine lock held.
+func (r *Resyncer) markUnusable(rec store.Record) {
+	if r.unusableEmail == rec.Email {
+		return
+	}
+	r.unusableEmail = rec.Email
+	if r.onUnusable != nil {
+		r.onUnusable(rec)
+	}
 }
 
 func wipe(b []byte) {

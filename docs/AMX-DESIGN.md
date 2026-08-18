@@ -525,11 +525,15 @@ Claude Code는 로그인과 구분할 수 없다. setup-token 경로가 실패�
   이벤트 · reconcile 드리프트(`usage_snapshots.drift`) · 서버 오프라인. `dedupe_key`(server×kind[×account])로
   open 1건 유지, 다음 UsageReport에서 조건 해소 시 auto-resolve. `GET /alerts` · `POST /alerts/{id}:ack`.
   경보는 이벤트 유실에 강건하도록 **reconcile-on-report 재조회로도 재구성 가능**(§P3 결정8 best-effort 보완).
-  - **P3 기준 경보 kind(8종. 전체 로스터는 13종 — P4·P5가 langfuse 3종·`alert_webhook_dropped`·`dangerous_command`를 §5.6.1~5.6.3에서 더한다)**: 서버-scoped `all_exhausted`·`server_offline`·`self_update_failed`(`{server}:{kind}`),
+  - **P3 기준 경보 kind(8종. 전체 로스터는 14종 — P4·P5가 langfuse 3종·`alert_webhook_dropped`·`dangerous_command`를 §5.6.1~5.6.3에서, `credential_unusable`을 §5.7에서 더한다)**: 서버-scoped `all_exhausted`·`server_offline`·`self_update_failed`(`{server}:{kind}`),
     계정-scoped `drift`·`quarantine`·`recall_failed`·`command_send_failed`(`{server}:{kind}:{account}`),
     테넌트-scoped `billing_watermark_future`. 뒤 넷의 배선은 §5.2·회복 설계(§D1/D2)에, `billing_watermark_future`는
     watermark-future 스위퍼(§5.6.1 목록의 여섯 번째, 락 …06)가 `reported_at < watermark` 시계 앞점프를 감지해 여는
-    것으로 G27 자가치유(§보존 정책 주석)의 관측 지점이다.
+    것으로 G27 자가치유(§보존 정책 주석)의 관측 지점이다. P3 이후 더해진 계정-scoped `credential_unusable`
+    (`{server}:{kind}:{account}`, alembic 0026)은 §5.7 토큰 재료 가드의 드롭을 경보로 올린다. 해소는 같은 계정의
+    cred_update가 실제로 저장되는 시점이다. kind를 넓히는 마이그레이션이 아직 적용되지 않은 서버는 CHECK가
+    INSERT를 거부하는데, 이벤트별 경보 쓰기를 격리해 뒀으므로 스트림은 끊기지 않고 그 경보 하나만 누락된다
+    (스냅샷은 경보보다 먼저 커밋해 타임라인에 남는다).
 - **서버 오프라인 정합**: `last_seen_at` 만료 스위퍼(주기적 `< now-3틱 → offline`) — half-open 스트림에서
   online 고착·경보 미발화 방지.
 - **인증**: ams-server는 단일 관리자 Bearer 유지, BFF에 로그인→쿠키 세션 + `Principal` 반환형(P5 테넌트
@@ -744,6 +748,11 @@ refresh하며 refresh token을 회전 → AMS 보관본(`accounts.encrypted_secr
   tick 전에 전환·recall된 계정의 회전은 놓칠 수 있음 — 아래 폴백으로 정합성은 유지되므로 수용. 또한
   fingerprint가 바뀌었더라도 토큰 재료가 없는 세트(로그아웃 껍데기)는 push하지 않고 베이스라인도
   그대로 둔다 — AMS 편 검사와 같은 판정이며, 양편 공백 정의(공백 또는 제어문자)를 일치시켜야 한다.
+  드롭한 tick에는 에이전트가 `credential_unusable` 이벤트(`AccountEvent.KIND_CREDENTIAL_UNUSABLE`,
+  계정은 `from`)를 올려 AMS가 계정 범위 경보를 연다. 엣지 트리거라 사고당 한 번만 올라가며 재료가
+  돌아온 tick에 상태가 풀려 다음 사고를 다시 알린다. 다만 이 신호는 활성 계정이고 매니페스트 레코드가
+  있어야 나온다. 비활성 계정이나 AMS가 배달한 적 없는 계정의 같은 상태는 잡지 못한다. 경보는 같은
+  계정의 cred_update가 실제로 저장되는 시점에 닫힌다.
 - **폴백**: 역동기화 실패·유실 시 재배정은 §5.5 재인증으로 폴백(현 동작 유지) — 자동화 최적화이지
   정합성 필수 경로는 아님.
 

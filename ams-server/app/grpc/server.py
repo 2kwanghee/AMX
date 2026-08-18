@@ -906,31 +906,100 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 payload=payload,
             )
             db.add(snapshot)
-            db.flush()  # assign snapshot.id so an alert can cite it
-            # Promote the P3-carried all_exhausted hook to a real alert, and open
-            # a quarantine alert, in the snapshot's transaction (design note §4).
-            if event.kind == pb.AccountEvent.KIND_ALL_EXHAUSTED:
-                alerts.open_alert(
-                    db,
-                    tenant_id=tenant_id,
-                    server_id=server_id,
-                    kind="all_exhausted",
-                    severity="critical",
-                    detail=_event_detail(payload),
-                    source_snapshot_id=snapshot.id,
-                )
-            elif event.kind == pb.AccountEvent.KIND_QUARANTINE:
-                alerts.open_alert(
-                    db,
-                    tenant_id=tenant_id,
-                    server_id=server_id,
-                    account_id=_event_account_id(payload),
-                    kind="quarantine",
-                    severity="warning",
-                    detail=_event_detail(payload),
-                    source_snapshot_id=snapshot.id,
-                )
+            # The timeline entry is committed BEFORE any alert is opened, so a
+            # rejected alert write cannot take the event with it (design note §4
+            # kept the two in one transaction; the split is deliberate and only
+            # ever loses the alert, never the event). commit also assigns
+            # snapshot.id, which the alert cites.
             db.commit()
+            snapshot_id = snapshot.id
+            # Promote the P3-carried all_exhausted hook to a real alert, and open
+            # the quarantine / credential_unusable alerts.
+            #
+            # Every branch's write is isolated: the DB can refuse a kind the
+            # deployed schema does not yet admit (`ck_alerts_kind` is widened by a
+            # migration, and a server running one migration behind a newer agent
+            # WILL see a kind it does not know), and an uncaught IntegrityError
+            # here unwinds the session read loop and drops the whole agent stream —
+            # which the agent then re-kills on every reconnect, blocking
+            # deliver/recall for that server indefinitely. Same opaque convention
+            # as _apply_cred_update: roll back, log identifiers only (never the
+            # exception text or SQL parameters, §7), keep the session alive. This
+            # is what demotes a migration applied out of order from "that server is
+            # dead" to "that one alert is missing".
+            try:
+                self._open_event_alert(
+                    db,
+                    event,
+                    payload,
+                    server_id=server_id,
+                    tenant_id=tenant_id,
+                    snapshot_id=snapshot_id,
+                )
+                db.commit()
+            except Exception:  # noqa: BLE001 - opaque: never surface SQL/parameters (§7)
+                db.rollback()
+                _logger.warning(
+                    "account event alert not opened (server %s, kind %s)",
+                    server_id,
+                    pb.AccountEvent.Kind.Name(event.kind),
+                )
+
+    def _open_event_alert(
+        self,
+        db,
+        event: pb.AccountEvent,
+        payload: dict,
+        *,
+        server_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        snapshot_id: uuid.UUID,
+    ) -> None:
+        """Open the alert an AccountEvent kind implies. Caller commits and owns
+        the failure path (see _store_event) — every write in here is inside that
+        caller's guarded transaction."""
+        if event.kind == pb.AccountEvent.KIND_ALL_EXHAUSTED:
+            alerts.open_alert(
+                db,
+                tenant_id=tenant_id,
+                server_id=server_id,
+                kind="all_exhausted",
+                severity="critical",
+                detail=_event_detail(payload),
+                source_snapshot_id=snapshot_id,
+            )
+        elif event.kind == pb.AccountEvent.KIND_QUARANTINE:
+            alerts.open_alert(
+                db,
+                tenant_id=tenant_id,
+                server_id=server_id,
+                account_id=_event_account_id(payload),
+                kind="quarantine",
+                severity="warning",
+                detail=_event_detail(payload),
+                source_snapshot_id=snapshot_id,
+            )
+        elif event.kind == pb.AccountEvent.KIND_CREDENTIAL_UNUSABLE:
+            # The agent's §5.7 material guard dropped a re-sync push: the
+            # active account's on-disk credential carries no token material.
+            # This is the FIRST-incident signal — without it the operator only
+            # learns of a dead credential once the account is quarantined, by
+            # which time it is already unusable for work. Account-scoped
+            # (`{server}:{kind}:{account}`) because one account's credential is
+            # what went bad; the agent sends it edge-triggered, and open_alert
+            # is idempotent by dedupe_key, so a repeat only refreshes.
+            # Resolved by the next cred_update that actually stores (see
+            # _apply_cred_update), not from a report.
+            alerts.open_alert(
+                db,
+                tenant_id=tenant_id,
+                server_id=server_id,
+                account_id=_event_account_id(payload),
+                kind="credential_unusable",
+                severity="warning",
+                detail=_event_detail(payload),
+                source_snapshot_id=snapshot_id,
+            )
 
     def _apply_cred_update(
         self,
@@ -1175,6 +1244,26 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 return
             if result.rowcount:
                 _logger.info("cred_update applied (account %s)", account.id)
+                # A push that actually stored is first-hand proof the credential
+                # came back, so close any credential_unusable alert this account
+                # left open — otherwise it stands open forever, since nothing else
+                # observes the recovery. The credential write is COMMITTED above and
+                # must survive a failure here, so this resolve gets its own
+                # transaction and its own rollback: at worst a stale alert stays
+                # open, never a lost credential.
+                try:
+                    alerts.resolve(
+                        db,
+                        server_id=server_id,
+                        kind="credential_unusable",
+                        account_id=account.id,
+                    )
+                    db.commit()
+                except Exception:  # noqa: BLE001 - opaque, and never undoes the store
+                    db.rollback()
+                    _logger.warning(
+                        "credential_unusable alert not resolved (account %s)", account.id
+                    )
             else:
                 _logger.info("cred_update ignored: not newer (account %s)", account.id)
 
