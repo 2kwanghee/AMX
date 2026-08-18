@@ -920,3 +920,281 @@ def test_token_material_present_and_material_split():
     # A non-string value is unjudgeable, so it counts as material.
     assert grpc_server._token_material({"a": 123}, "a", "b") == (True, True)
     assert grpc_server._token_material({"a": ["x"]}, "a", "b") == (True, True)
+
+
+# -- Metadata refresh (§5.7): the row's expiry/scopes must track the rotation ---
+def _oauth_secret_meta(email: str, refresh_token: str, **oauth: object) -> str:
+    """`_oauth_secret` plus explicit claudeAiOauth metadata fields."""
+    payload = json.loads(_oauth_secret(email, refresh_token))
+    payload["claudeAiOauth"].update(oauth)
+    return json.dumps(payload)
+
+
+def _push(kek, key_id, account_id, secret_json, observed):
+    return _cred_update(
+        account_id, _seal(kek, key_id, account_id, AGENT_ID, secret_json), "", observed
+    )
+
+
+def test_cred_update_refreshes_expiry_and_scopes(app_env):
+    """The point of this change: a rotation carries a new expiry, and the row
+    must adopt it. Before, only encrypted_secret/secret_masked/observed_at moved,
+    so credential_expires_at kept the enrolment-time value and the console
+    eventually showed a live credential as expired."""
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("meta@example.com")
+    _assign(tenant_id, account_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    before = _stored(tenant_id, account_id)
+    assert before.credential_expires_at is None  # enrolment set carries no expiresAt
+    assert before.scopes == ["user:inference"]
+
+    observed = datetime.now(UTC)
+    expires = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=8)
+    secret = _oauth_secret_meta(
+        "meta@example.com",
+        "rt-meta-" + uuid.uuid4().hex,
+        expiresAt=int(expires.timestamp() * 1000),
+        scopes=["user:inference", "user:profile"],
+        accountUuid="acc-uuid-1234",
+        organizationName="Rotated Org",
+    )
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            await call.write(_push(kek, key_id, account_id, secret, observed))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, observed)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    row = _stored(tenant_id, account_id)
+    assert abs((row.credential_expires_at - expires).total_seconds()) < 1e-3
+    assert row.scopes == ["user:inference", "user:profile"]
+    assert row.account_uuid == "acc-uuid-1234"
+    assert row.organization_name == "Rotated Org"
+
+
+def test_cred_update_unparsable_secret_preserves_metadata(app_env):
+    """Extraction is best-effort: an opaque api_key body has no metadata to lift,
+    so the columns keep what the last parsable set put there rather than being
+    blanked."""
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("opaque@example.com")
+    _assign(tenant_id, account_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    t1 = datetime.now(UTC)
+    t2 = t1 + timedelta(seconds=5)
+    expires = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=3)
+    rich = _oauth_secret_meta(
+        "opaque@example.com",
+        "rt-rich-" + uuid.uuid4().hex,
+        expiresAt=int(expires.timestamp() * 1000),
+        scopes=["user:inference", "user:profile"],
+        accountUuid="acc-uuid-keepme",
+        organizationName="Keep Org",
+    )
+    opaque = "sk-ant-api03-" + uuid.uuid4().hex  # not JSON: nothing to lift
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            await call.write(_push(kek, key_id, account_id, rich, t1))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, t1)
+            await call.write(_push(kek, key_id, account_id, opaque, t2))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, t2)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    row = _stored(tenant_id, account_id)
+    # The opaque push WAS applied (observed_at advanced)...
+    assert abs((row.credential_observed_at - t2).total_seconds()) < 1e-3
+    # ...but it left every metadata column exactly as the rich set had it.
+    assert abs((row.credential_expires_at - expires).total_seconds()) < 1e-3
+    assert row.scopes == ["user:inference", "user:profile"]
+    assert row.account_uuid == "acc-uuid-keepme"
+    assert row.organization_name == "Keep Org"
+
+
+def test_cred_update_stale_push_does_not_move_metadata(app_env):
+    """Regression guard for atomicity: metadata rides in the same conditional
+    UPDATE as the secret, so a push the observed_at ratchet rejects must not
+    repaint the newer row's expiry/scopes either."""
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("stalemeta@example.com")
+    sentinel_id = _add_account(tenant_id, "stalemeta-sentinel@example.com", "rt-sentinel-orig")
+    _assign(tenant_id, account_id, server_id)
+    _assign(tenant_id, sentinel_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    t1 = datetime.now(UTC)
+    t0 = t1 - timedelta(seconds=120)  # strictly older -> must be ignored
+    ts = t1 + timedelta(seconds=5)
+    fresh_exp = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=6)
+    stale_exp = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=6)
+    fresh = _oauth_secret_meta(
+        "stalemeta@example.com",
+        "rt-fresh-" + uuid.uuid4().hex,
+        expiresAt=int(fresh_exp.timestamp() * 1000),
+        scopes=["user:inference", "user:profile"],
+        organizationName="Fresh Org",
+    )
+    stale = _oauth_secret_meta(
+        "stalemeta@example.com",
+        "rt-stale-" + uuid.uuid4().hex,
+        expiresAt=int(stale_exp.timestamp() * 1000),
+        scopes=["stale:scope"],
+        organizationName="Stale Org",
+    )
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            await call.write(_push(kek, key_id, account_id, fresh, t1))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, t1)
+            await call.write(_push(kek, key_id, account_id, stale, t0))
+            # Sentinel on the other account fences the stale push.
+            await call.write(
+                _push(
+                    kek, key_id, sentinel_id,
+                    _oauth_secret("stalemeta-sentinel@example.com", "rt-sentinel-new"),
+                    ts,
+                )
+            )
+            await asyncio.to_thread(_wait_observed, tenant_id, sentinel_id, ts)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    row = _stored(tenant_id, account_id)
+    assert abs((row.credential_observed_at - t1).total_seconds()) < 1e-3
+    assert abs((row.credential_expires_at - fresh_exp).total_seconds()) < 1e-3
+    assert row.scopes == ["user:inference", "user:profile"]
+    assert row.organization_name == "Fresh Org"
+
+
+def test_cred_update_unstorable_metadata_keeps_session_alive(app_env):
+    """A metadata field an agent can send but PostgreSQL cannot store must be
+    dropped, not written.
+
+    NUL and a lone surrogate are the two shapes that reach here intact: JSON
+    spells both with ASCII backslash-u escapes, so the UTF-8 decode and the
+    token-material guard upstream see nothing unusual, and the write then fails
+    inside the driver. Unhandled that ends the session — and the agent re-kills
+    it on every reconnect, so deliver/recall for that server stops — while the
+    driver's exception would carry the statement's bound parameters (the at-rest
+    ciphertext, the mask) into a gRPC status detail (§7).
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("unstorable@example.com")
+    _assign(tenant_id, account_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    t1 = datetime.now(UTC)
+    t2 = t1 + timedelta(seconds=5)
+    t3 = t1 + timedelta(seconds=10)
+    after_rt = "rt-after-" + uuid.uuid4().hex
+    nul = _oauth_secret_meta(
+        "unstorable@example.com", "rt-nul-" + uuid.uuid4().hex, organizationName="a\x00b"
+    )
+    surrogate = _oauth_secret_meta(
+        "unstorable@example.com", "rt-sur-" + uuid.uuid4().hex, organizationName="\ud800"
+    )
+    assert "\\u0000" in nul and "\\ud800" in surrogate  # pure ASCII on the wire
+    original_org = _stored(tenant_id, account_id).organization_name
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            # Each push must be APPLIED, not merely survived: observed_at
+            # advancing is what separates "sanitised, then stored" from "the
+            # write blew up and the last-resort handler swallowed it".
+            await call.write(_push(kek, key_id, account_id, nul, t1))
+            landed = await asyncio.to_thread(_wait_observed, tenant_id, account_id, t1)
+            assert abs((landed - t1).total_seconds()) < 1e-3, "NUL push was not stored"
+            await call.write(_push(kek, key_id, account_id, surrogate, t2))
+            landed = await asyncio.to_thread(_wait_observed, tenant_id, account_id, t2)
+            assert abs((landed - t2).total_seconds()) < 1e-3, "surrogate push was not stored"
+            # The session is still live and still accepting traffic.
+            await call.write(
+                _push(
+                    kek, key_id, account_id,
+                    _oauth_secret("unstorable@example.com", after_rt),
+                    t3,
+                )
+            )
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, t3)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    assert _decrypt_rt(tenant_id, account_id) == after_rt
+    row = _stored(tenant_id, account_id)
+    assert abs((row.credential_observed_at - t3).total_seconds()) < 1e-3
+    # Neither unstorable value reached the column.
+    assert row.organization_name == original_org
+    assert "\x00" not in (row.organization_name or "")
+
+
+UNSTORABLE_TEXT_CASES = [
+    ("NUL byte", "a\x00b", False),
+    ("lone surrogate", "\ud800", False),
+    ("at the 200-char ceiling", "o" * 200, True),
+    ("one char over the ceiling", "o" * 201, False),
+    ("multi-megabyte name", "o" * 2_000_000, False),
+    ("ordinary name", "Acme", True),
+]
+
+
+@pytest.mark.parametrize(("name", "value", "storable"), UNSTORABLE_TEXT_CASES)
+def test_metadata_text_storability_boundaries(name, value, storable):
+    """Text columns: the key is present only when the value can be written.
+    Rejection drops the field rather than truncating it — a half organisation
+    name would read as authentic in the console."""
+    secret = _oauth_secret_meta("b@ex.com", "rt", organizationName=value, accountUuid=value)
+    meta = inventory.credential_metadata_values("claude", secret)
+    assert ("organization_name" in meta) is storable, name
+    assert ("account_uuid" in meta) is storable, name
+    if storable:
+        assert meta["organization_name"] == value
+
+
+def test_metadata_scopes_item_and_count_limits():
+    """JSONB scopes: unstorable ITEMS are filtered out of the list, but breaching
+    the 64-item count drops the whole key so the column keeps its old value."""
+    at_cap = _oauth_secret_meta("b@ex.com", "rt", scopes=[f"s{i}" for i in range(64)])
+    assert len(inventory.credential_metadata_values("claude", at_cap)["scopes"]) == 64
+    over_cap = _oauth_secret_meta("b@ex.com", "rt", scopes=[f"s{i}" for i in range(65)])
+    assert "scopes" not in inventory.credential_metadata_values("claude", over_cap)
+    dirty = _oauth_secret_meta(
+        "b@ex.com", "rt", scopes=["user:inference", "a\x00b", "\ud800", "o" * 201, 7]
+    )
+    assert inventory.credential_metadata_values("claude", dirty)["scopes"] == ["user:inference"]
+
+
+def test_metadata_codex_lifts_nothing():
+    """Codex intentionally yields {}: `account_uuid` is only trustworthy next to
+    `_apply_codex_metadata`'s id_token/email cross-check, which a re-sync cannot
+    run, so an auth.json naming someone else's account cannot repaint the column.
+    """
+    hostile = json.dumps(
+        {"tokens": {"account_id": "acct_ATTACKER", "refresh_token": "rt", "access_token": "at"}}
+    )
+    assert inventory.credential_metadata_values("codex", hostile) == {}
+
+
+def test_metadata_extraction_never_raises_on_hostile_input():
+    """Every conversion failure degrades to an omitted key: this runs on the
+    session read loop, where an escaping exception drops the whole stream."""
+    for secret in (
+        "not json at all",
+        "[" * 20000 + "]" * 20000,
+        '{"claudeAiOauth": []}',
+        '{"claudeAiOauth": {"expiresAt": 1e308}}',
+        '{"claudeAiOauth": {"expiresAt": "soon", "scopes": "user:inference"}}',
+        '{"claudeAiOauth": {"organizationName": "", "accountUuid": 7}}',
+    ):
+        meta = inventory.credential_metadata_values("claude", secret)
+        assert "credential_expires_at" not in meta, secret[:40]
+        assert "organization_name" not in meta, secret[:40]
+        assert "account_uuid" not in meta, secret[:40]
