@@ -379,6 +379,106 @@ def _apply_codex_metadata(account: Account, secret: str) -> None:
             )
 
 
+# Metadata lifted from a credential is free text an agent chose, and the
+# columns it lands in are PostgreSQL `text`. A value that cannot round-trip
+# through the driver turns a routine write into an exception, so the ceiling
+# matches the repository's convention for operator-supplied free text
+# (`schemas.py` `owner: Field(max_length=200)`).
+_METADATA_TEXT_MAX_CHARS = 200
+# A scope list is a handful of entries in practice; the cap only bounds how much
+# an agent can push into a JSONB column in one re-sync.
+_METADATA_SCOPES_MAX_ITEMS = 64
+
+
+def _is_storable_text(value: str) -> bool:
+    """Whether `value` can actually be written to a `text`/JSONB column.
+
+    Three ways an authenticated-but-hostile string breaks the write, all of them
+    reachable from pure-ASCII wire bytes (JSON spells both a NUL and a lone
+    surrogate as ASCII backslash-u escapes, so neither the UTF-8 decode nor the
+    token-material guard upstream sees anything unusual):
+
+    * NUL — PostgreSQL `text` cannot hold it; psycopg raises `DataError`, and in
+      a JSONB value the server answers `untranslatable_character`.
+    * A lone surrogate — never encodable as UTF-8, so the driver raises
+      `UnicodeEncodeError` before a statement is even sent.
+    * Unbounded length — a multi-megabyte name is storable but is an amplifier,
+      not metadata.
+
+    Rejection drops the field (the caller omits the key). Truncating instead
+    would leave a half organisation name in the console looking authentic.
+    """
+    if len(value) > _METADATA_TEXT_MAX_CHARS:
+        return False
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def credential_metadata_values(provider: str, secret: str) -> dict[str, object]:
+    """Column values liftable from a credential plaintext, as a dict.
+
+    Returns ONLY the keys it managed to extract. A field that is missing,
+    unparsable, of the wrong type, or not storable (`_is_storable_text`) is
+    omitted rather than mapped to None, so a caller merging this into an UPDATE
+    leaves that column exactly as it was. That is the best-effort contract
+    `_apply_credential_metadata` has always had; it is spelled out as a return
+    value here so the gRPC re-sync path can share one extraction rule instead of
+    growing a second copy.
+
+    On the re-sync path every field here is UNTRUSTED input. The signature and
+    the AAD prove which agent sealed the record; they say nothing about what is
+    inside it, so shape and storability are the caller's problem, i.e. this
+    function's.
+
+    It never raises. Its other caller is the agent-session read loop, where an
+    escaping exception drops the whole stream, so every parse and conversion
+    failure degrades to an omitted key. One consequence on the enrolment path:
+    an `expiresAt` that used to make `datetime.fromtimestamp` raise (`1e308`,
+    `NaN` — a 500 before this) now simply leaves `credential_expires_at` alone.
+    No credential material is logged or echoed (§7).
+    """
+    values: dict[str, object] = {}
+    try:
+        payload = json.loads(secret)
+    except (ValueError, TypeError, RecursionError, MemoryError):
+        return values
+    if not isinstance(payload, dict):
+        return values
+    if provider == "codex":
+        # Deliberately empty, do not fill it in. The only column
+        # `_apply_codex_metadata` sets is `account_uuid` from
+        # `tokens.account_id`, and there it is inseparable from the id_token
+        # email cross-check that rejects an auth.json belonging to someone else.
+        # A re-sync cannot run that check (rejection there means raising, which
+        # would either refuse a healthy rotation or unwind the session loop), so
+        # lifting the value would be a way to write `account_uuid` while
+        # bypassing the guard that makes it trustworthy. Codex maps no expiry
+        # either, so returning nothing matches the pre-existing behaviour.
+        return values
+    oauth = payload.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return values
+    scopes = oauth.get("scopes")
+    if isinstance(scopes, list) and len(scopes) <= _METADATA_SCOPES_MAX_ITEMS:
+        values["scopes"] = [s for s in scopes if isinstance(s, str) and _is_storable_text(s)]
+    expires_at = oauth.get("expiresAt")
+    if isinstance(expires_at, (int, float)):
+        try:
+            values["credential_expires_at"] = datetime.fromtimestamp(expires_at / 1000, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            pass
+    for key, column in (("accountUuid", "account_uuid"), ("organizationName", "organization_name")):
+        value = oauth.get(key)
+        if isinstance(value, str) and value and _is_storable_text(value):
+            values[column] = value
+    return values
+
+
 def _apply_credential_metadata(account: Account, secret: str) -> None:
     """Lift the non-secret fields of a credential set onto the row.
 
@@ -391,25 +491,8 @@ def _apply_credential_metadata(account: Account, secret: str) -> None:
     if account.provider == "codex":
         _apply_codex_metadata(account, secret)
         return
-    try:
-        payload = json.loads(secret)
-    except (json.JSONDecodeError, TypeError):
-        return
-    if not isinstance(payload, dict):
-        return
-    oauth = payload.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        return
-    scopes = oauth.get("scopes")
-    if isinstance(scopes, list):
-        account.scopes = [s for s in scopes if isinstance(s, str)]
-    expires_at = oauth.get("expiresAt")
-    if isinstance(expires_at, (int, float)):
-        account.credential_expires_at = datetime.fromtimestamp(expires_at / 1000, tz=UTC)
-    for key, column in (("accountUuid", "account_uuid"), ("organizationName", "organization_name")):
-        value = oauth.get(key)
-        if isinstance(value, str) and value:
-            setattr(account, column, value)
+    for column, value in credential_metadata_values(account.provider, secret).items():
+        setattr(account, column, value)
 
 
 def list_accounts(

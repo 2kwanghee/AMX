@@ -1115,12 +1115,24 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                 )
                 return
             new_mask = crypto.mask_secret(account.credential_type, secret)
+            # Lift the non-secret metadata (expiry, scopes, account/org identity)
+            # from the plaintext already in hand — re-fetching it later is not
+            # possible, and without this the row keeps whatever the credential
+            # said at enrolment while every rotation moves the real expiry
+            # forward, so the console eventually reports a live credential as
+            # expired. Extraction is best-effort and never raises: an opaque or
+            # unparsable secret yields {} and leaves those columns untouched,
+            # and a raise here would unwind the session read loop. The fields are
+            # UNTRUSTED: the signature and the AAD prove which agent sealed the
+            # record, not that its contents are sane, so the extractor also drops
+            # anything a text/JSONB column cannot hold.
+            new_meta = inventory.credential_metadata_values(account.provider, secret)
             del secret
 
             # Atomic monotonic update: the WHERE clause makes the observed_at guard
             # part of the write, so a concurrent re-sync or a deliver reading in
             # parallel cannot lose to a stale push.
-            result = db.execute(
+            stmt = (
                 update(Account)
                 .where(
                     Account.id == account.id,
@@ -1135,9 +1147,32 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
                     secret_masked=new_mask,
                     credential_observed_at=observed_at,
                     updated_at=_now(),
+                    # Metadata rides in THIS statement, never a second one: the
+                    # WHERE clause above is the monotonicity guard, so a separate
+                    # UPDATE would write outside it and let a stale push repaint a
+                    # newer row's expiry/scopes. When the guard rejects the push
+                    # (rowcount 0) the metadata is correctly dropped with it.
+                    **new_meta,
                 )
             )
-            db.commit()
+            # Last line of defence. `credential_metadata_values` already refuses
+            # the known unstorable shapes, but an escaping DataError here would
+            # unwind the session read loop and kill the stream — and the agent
+            # would re-kill it on every reconnect, blocking deliver/recall for
+            # that server. Worse, a driver exception carries the statement's bound
+            # parameters, so it would surface the at-rest ciphertext and the mask
+            # in a gRPC status detail. Same opaque convention as the crypto
+            # failures above: roll back, log the account id and nothing else,
+            # leave the row untouched, keep the session alive.
+            try:
+                result = db.execute(stmt)
+                db.commit()
+            except Exception:  # noqa: BLE001 - opaque: never surface SQL/parameters (§7)
+                db.rollback()
+                _logger.warning(
+                    "cred_update rejected: could not be stored (account %s)", account.id
+                )
+                return
             if result.rowcount:
                 _logger.info("cred_update applied (account %s)", account.id)
             else:
