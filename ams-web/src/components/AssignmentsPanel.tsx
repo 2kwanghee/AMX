@@ -4,33 +4,14 @@ import { useState } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
 import { allowedAssignmentActions, api } from '@/lib/api-client/client';
 import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
-import type { Account, Assignment, AccountPage, AssignmentPage, ServerPage } from '@/lib/api-client/types';
-import { Badge, EmailChip, Icon, LiveDot, Modal, TimeCell, useAction, useMarkOnData, type IconName } from './common';
+import type { Assignment, AccountPage, AssignmentPage, ServerPage } from '@/lib/api-client/types';
+import { Badge, EmailChip, Icon, LiveDot, Modal, TimeCell, useAction, useMarkOnData } from './common';
+import { VERB_ICON, VERB_LABEL, VERB_STYLE } from './topology/verbs';
+import { currentActiveByServer } from '@/lib/assignment-active';
+
+export { currentActiveByServer };
 
 const POLL = 6000;
-
-const VERB_LABEL: Record<Verb, string> = {
-  deliver: '전달',
-  activate: '활성화',
-  deactivate: '비활성화',
-  recover: '복구',
-  'switch-now': '즉시 전환',
-  recall: '회수',
-};
-
-// verb별 아이콘 + 버튼 강조. 즉시 전환=액센트, 회수=warn, 나머지=소프트.
-const VERB_ICON: Record<Verb, IconName> = {
-  deliver: 'send',
-  activate: 'power',
-  deactivate: 'pause',
-  recover: 'rotate',
-  'switch-now': 'zap',
-  recall: 'undo',
-};
-const VERB_STYLE: Partial<Record<Verb, string>> = {
-  'switch-now': 'accent',
-  recall: 'warn',
-};
 
 // 동기화 셀 — pendingCommandId는 명령이 날아가는 동안만 값이 있고 ack 시점에
 // 비워지므로, 평상시엔 ackedAt/deliveredAt로 마지막 동기화 결과를 보여준다.
@@ -66,28 +47,6 @@ function SyncCell({ a }: { a: Assignment }) {
     );
   }
   return <span className="muted">대기</span>;
-}
-
-// 같은 서버에 할당된 계정 중 lastSwitchedAt이 가장 최신(non-null)인 계정을 그
-// 서버의 "현재 활성"으로 판정한다. 반환: serverId -> 현재 활성 accountId.
-export function currentActiveByServer(
-  assignments: Assignment[],
-  accounts: Account[],
-): Map<string, string> {
-  const switchedAt = new Map(accounts.map((a) => [a.id, a.lastSwitchedAt]));
-  const best = new Map<string, { accountId: string; t: number }>();
-  for (const a of assignments) {
-    if (a.state === 'detached') continue; // 회수된 연결은 "현재 활성" 판정에서 제외
-    const iso = switchedAt.get(a.accountId);
-    if (!iso) continue;
-    const t = new Date(iso).getTime();
-    if (Number.isNaN(t)) continue;
-    const cur = best.get(a.serverId);
-    if (!cur || t > cur.t) best.set(a.serverId, { accountId: a.accountId, t });
-  }
-  const out = new Map<string, string>();
-  for (const [serverId, v] of best) out.set(serverId, v.accountId);
-  return out;
 }
 
 // 계정 → 서버 연결선. 활성 행은 점이 흐르고, 그 외는 정적 점선 화살표.
