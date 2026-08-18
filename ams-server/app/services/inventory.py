@@ -37,6 +37,7 @@ from app.models import (
     TenantDek,
     UsageSnapshot,
 )
+from app.services import alerts
 
 # "Field not supplied" for PATCH arguments whose None is itself a value the
 # caller can mean (update_account.monthly_price: None clears the price).
@@ -596,6 +597,12 @@ def delete_account(db: Session, tenant_id: uuid.UUID, account_id: uuid.UUID) -> 
     )
     if live:
         raise conflict("account.assigned", "Recall the account's assignment first.")
+    # Every account-scoped alert this account left open would otherwise outlive it
+    # forever: alerts.account_id has no FK (so the delete cascades nothing) and the
+    # auto-resolve paths all need the account to still exist. Closed in the SAME
+    # transaction as the delete, so the alerts survive a failed delete and never
+    # close without one.
+    alerts.resolve_account_alerts(db, tenant_id=tenant_id, account_id=account_id)
     db.delete(account)
     db.commit()
 
