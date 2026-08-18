@@ -1,10 +1,13 @@
 package claude
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
 const (
@@ -51,6 +54,194 @@ func TestWriteFileAtomic(t *testing.T) {
 		if strings.Contains(e.Name(), ".amx-") {
 			t.Fatalf("temp file leaked: %s", e.Name())
 		}
+	}
+}
+
+// TestStageCredentialMergesExistingClaudeJSON pins the merge behavior at
+// claude.go:107-126: an existing .claude.json is read and merged, not
+// replaced, so runner state the daemon never touches (machineID,
+// firstStartTime, and any other key Claude Code keeps there) survives
+// staging untouched. It also pins that a pre-existing theme is preserved
+// rather than overwritten, and that oauthAccount/hasCompletedOnboarding are
+// populated from AddMeta.
+func TestStageCredentialMergesExistingClaudeJSON(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".claude.json")
+	existing := `{"machineID":"m-123","firstStartTime":"2026-01-01T00:00:00Z","theme":"light","numStartups":42}`
+	if err := os.WriteFile(configPath, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New()
+	meta := provider.AddMeta{Email: "a@example.com", AccountUUID: "acc-1", OrganizationName: "Acme"}
+	if err := d.StageCredential(dir, []byte(credV1), meta); err != nil {
+		t.Fatalf("StageCredential: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("staged .claude.json is not valid JSON: %v", err)
+	}
+
+	// Runner state must survive the merge untouched.
+	wantSurvive := map[string]string{
+		"machineID":      `"m-123"`,
+		"firstStartTime": `"2026-01-01T00:00:00Z"`,
+		"numStartups":    `42`,
+	}
+	for k, want := range wantSurvive {
+		if string(got[k]) != want {
+			t.Errorf("%s = %s, want %s (runner state must survive merge)", k, got[k], want)
+		}
+	}
+
+	// theme already present -> preserved, not overwritten with the default.
+	if string(got["theme"]) != `"light"` {
+		t.Errorf("theme = %s, want preserved %q", got["theme"], "light")
+	}
+
+	if string(got["hasCompletedOnboarding"]) != "true" {
+		t.Errorf("hasCompletedOnboarding = %s, want true", got["hasCompletedOnboarding"])
+	}
+
+	var oauth struct {
+		EmailAddress     string `json:"emailAddress"`
+		AccountUUID      string `json:"accountUuid"`
+		OrganizationUUID string `json:"organizationUuid"`
+		OrganizationName string `json:"organizationName"`
+	}
+	if err := json.Unmarshal(got["oauthAccount"], &oauth); err != nil {
+		t.Fatalf("oauthAccount not valid JSON: %v", err)
+	}
+	if oauth.EmailAddress != meta.Email || oauth.AccountUUID != meta.AccountUUID || oauth.OrganizationName != meta.OrganizationName {
+		t.Errorf("oauthAccount = %+v, want fields from AddMeta %+v", oauth, meta)
+	}
+	// AddMeta carries no organization UUID field at all (see provider.AddMeta);
+	// claude.go never sets identity.OAuthAccount.OrganizationUUID, so it must
+	// always serialize as the zero value.
+	if oauth.OrganizationUUID != "" {
+		t.Errorf("organizationUuid = %q, want empty (AddMeta has no such field)", oauth.OrganizationUUID)
+	}
+}
+
+// TestStageCredentialFirstTimeNoExistingClaudeJSON pins first-time staging
+// (no prior .claude.json): StageCredential must not error, and must default
+// theme to "dark" and set hasCompletedOnboarding, since there is nothing to
+// preserve.
+func TestStageCredentialFirstTimeNoExistingClaudeJSON(t *testing.T) {
+	dir := t.TempDir()
+	d := New()
+	if err := d.StageCredential(dir, []byte(credV1), provider.AddMeta{Email: "a@example.com"}); err != nil {
+		t.Fatalf("StageCredential: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("staged .claude.json is not valid JSON: %v", err)
+	}
+	if string(got["theme"]) != `"dark"` {
+		t.Errorf("theme = %s, want default %q when absent", got["theme"], "dark")
+	}
+	if string(got["hasCompletedOnboarding"]) != "true" {
+		t.Errorf("hasCompletedOnboarding = %s, want true", got["hasCompletedOnboarding"])
+	}
+}
+
+// TestStageCredentialDegradesCorruptClaudeJSON pins the documented failure
+// mode at claude.go:110-111: an existing .claude.json that fails to parse
+// degrades to a fresh map rather than aborting the stage. StageCredential
+// must still succeed and the result must carry the onboarding defaults, with
+// none of the corrupt content preserved (there is nothing valid to merge).
+func TestStageCredentialDegradesCorruptClaudeJSON(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".claude.json")
+	if err := os.WriteFile(configPath, []byte(`{not valid json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := New()
+	if err := d.StageCredential(dir, []byte(credV1), provider.AddMeta{Email: "a@example.com"}); err != nil {
+		t.Fatalf("StageCredential must tolerate a corrupt existing .claude.json, got: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("staged .claude.json must be valid JSON even after a corrupt input, got: %v", err)
+	}
+	if string(got["hasCompletedOnboarding"]) != "true" {
+		t.Errorf("hasCompletedOnboarding = %s, want true", got["hasCompletedOnboarding"])
+	}
+	if string(got["theme"]) != `"dark"` {
+		t.Errorf("theme = %s, want default %q (fresh map, nothing to preserve)", got["theme"], "dark")
+	}
+}
+
+// TestStageCredentialWritesCredentialBytesExactly pins that the credential
+// blob lands in .credentials.json byte-for-byte, and that both staged files
+// carry 0o600 (claude.go:92,126). Asserted by length, never by printing the
+// credential content (§7).
+func TestStageCredentialWritesCredentialBytesExactly(t *testing.T) {
+	dir := t.TempDir()
+	d := New()
+	cred := []byte(credV1)
+	if err := d.StageCredential(dir, cred, provider.AddMeta{Email: "a@example.com"}); err != nil {
+		t.Fatalf("StageCredential: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, ".credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(cred) {
+		t.Errorf("credential file length = %d, want %d (bytes must round-trip exactly)", len(got), len(cred))
+	}
+	match := len(got) == len(cred)
+	if match {
+		for i := range got {
+			if got[i] != cred[i] {
+				match = false
+				break
+			}
+		}
+	}
+	if !match {
+		t.Error("credential file content does not match the staged bytes exactly")
+	}
+	if perm := mustStat(t, filepath.Join(dir, ".credentials.json")).Mode().Perm(); perm != 0o600 {
+		t.Errorf(".credentials.json perm = %o, want 600", perm)
+	}
+	if perm := mustStat(t, filepath.Join(dir, ".claude.json")).Mode().Perm(); perm != 0o600 {
+		t.Errorf(".claude.json perm = %o, want 600", perm)
+	}
+}
+
+// TestStageCredentialCreatesConfigDir pins that a missing configDir is
+// created (claude.go:85, MkdirAll 0o700) rather than StageCredential
+// erroring out.
+func TestStageCredentialCreatesConfigDir(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "nested", "config")
+	d := New()
+	if err := d.StageCredential(dir, []byte(credV1), provider.AddMeta{Email: "a@example.com"}); err != nil {
+		t.Fatalf("StageCredential: %v", err)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("configDir not created: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatal("configDir path is not a directory")
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("configDir perm = %o, want 700", perm)
 	}
 }
 
