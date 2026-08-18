@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { api, krApiError } from '@/lib/api-client/client';
+import { fmtCalls, fmtExact, fmtTokens } from '@/lib/usage-format';
 import type {
   LangfuseModelRow,
   LangfuseUsage,
@@ -33,9 +34,14 @@ function defaultRange(): { from: string; to: string } {
 }
 
 // -- 숫자 표기 ----------------------------------------------------------------
-// 토큰·호출 수는 정수(Number 안전 범위). 자릿수 구분만 넣는다.
-function fmtInt(n: number): string {
-  return Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : '—';
+// 표기 규칙은 lib/usage-format.ts에 있다(node 환경 단위 테스트 대상). 여기서는
+// 토큰 셀마다 정확한 값을 title로 달아, 압축 표기가 가린 자릿수를 잃지 않게 한다.
+function TokenCell({ value }: { value: number }) {
+  return (
+    <td className="num" title={fmtExact(value)}>
+      {fmtTokens(value)}
+    </td>
+  );
 }
 
 // -- 집계 ---------------------------------------------------------------------
@@ -170,11 +176,13 @@ export function LangfuseUsagePanel({ tenantId }: { tenantId: string }) {
       <div className="usage-totals">
         <div className="usage-total">
           <span className="usage-total-label">총 토큰</span>
-          <span className="usage-total-value">{fmtInt(totalTokens)}</span>
+          <span className="usage-total-value" title={fmtExact(totalTokens)}>
+            {fmtTokens(totalTokens)}
+          </span>
         </div>
         <div className="usage-total">
           <span className="usage-total-label">호출 수</span>
-          <span className="usage-total-value">{fmtInt(totalObservations)}</span>
+          <span className="usage-total-value">{fmtCalls(totalObservations)}</span>
         </div>
       </div>
 
@@ -193,8 +201,10 @@ export function LangfuseUsagePanel({ tenantId }: { tenantId: string }) {
                 <th>모델</th>
                 <th className="num">입력</th>
                 <th className="num">출력</th>
+                {/* 읽기/쓰기로 짝을 맞춰 방향을 분명히 한다(원 지표는 각각
+                    cache_read_input_tokens / cache_creation_input_tokens). */}
                 <th className="num">캐시 읽기</th>
-                <th className="num">캐시 생성</th>
+                <th className="num">캐시 쓰기</th>
                 <th className="num">총 토큰</th>
                 <th className="num">호출</th>
               </tr>
@@ -223,8 +233,8 @@ export function LangfuseUsagePanel({ tenantId }: { tenantId: string }) {
               {users.map((u) => (
                 <tr key={u.userId}>
                   <td><span className="mono">{u.userId}</span></td>
-                  <td className="num">{fmtInt(u.totalTokens)}</td>
-                  <td className="num">{fmtInt(u.observations)}</td>
+                  <TokenCell value={u.totalTokens} />
+                  <td className="num">{fmtCalls(u.observations)}</td>
                 </tr>
               ))}
             </tbody>
@@ -247,12 +257,12 @@ function ModelRow({ line }: { line: ModelAgg }) {
             <span className="mono">{line.model}</span>
           </span>
         </td>
-        <td className="num">{fmtInt(line.inputTokens)}</td>
-        <td className="num">{fmtInt(line.outputTokens)}</td>
-        <td className="num">{fmtInt(line.cacheReadTokens)}</td>
-        <td className="num">{fmtInt(line.cacheCreationTokens)}</td>
-        <td className="num">{fmtInt(line.totalTokens)}</td>
-        <td className="num">{fmtInt(line.observations)}</td>
+        <TokenCell value={line.inputTokens} />
+        <TokenCell value={line.outputTokens} />
+        <TokenCell value={line.cacheReadTokens} />
+        <TokenCell value={line.cacheCreationTokens} />
+        <TokenCell value={line.totalTokens} />
+        <td className="num">{fmtCalls(line.observations)}</td>
       </tr>
       {hasTrend && open && (
         <tr className="usage-detail-row">
@@ -269,8 +279,8 @@ function ModelRow({ line }: { line: ModelAgg }) {
                 {line.days.map((d) => (
                   <tr key={d.day}>
                     <td><span className="mono">{d.day}</span></td>
-                    <td className="num">{fmtInt(d.totalTokens)}</td>
-                    <td className="num">{fmtInt(d.observations)}</td>
+                    <TokenCell value={d.totalTokens} />
+                    <td className="num">{fmtCalls(d.observations)}</td>
                   </tr>
                 ))}
               </tbody>
