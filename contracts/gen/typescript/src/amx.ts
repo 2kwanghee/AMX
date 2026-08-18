@@ -1037,6 +1037,16 @@ export enum AccountEvent_Kind {
   KIND_QUARANTINE = 2,
   /** KIND_ALL_EXHAUSTED - critical — AMS alerts and considers extra assignment (§6.4) */
   KIND_ALL_EXHAUSTED = 3,
+  /**
+   * KIND_CREDENTIAL_UNUSABLE - The active account's on-disk credential carries no token material (a
+   * logged-out shell), so the agent dropped the §5.7 re-sync push instead of
+   * overwriting the live copy AMS holds. It states only what was observed — a
+   * token-less credential file — not a refresh failure, which the agent never
+   * sees. The affected account rides in `from` (`to` is unset, as for
+   * quarantine). Edge-triggered: sent on the tick the condition is first seen
+   * for an account, not once per 5-minute tick while it persists.
+   */
+  KIND_CREDENTIAL_UNUSABLE = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -1054,6 +1064,9 @@ export function accountEvent_KindFromJSON(object: any): AccountEvent_Kind {
     case 3:
     case "KIND_ALL_EXHAUSTED":
       return AccountEvent_Kind.KIND_ALL_EXHAUSTED;
+    case 4:
+    case "KIND_CREDENTIAL_UNUSABLE":
+      return AccountEvent_Kind.KIND_CREDENTIAL_UNUSABLE;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -1071,6 +1084,8 @@ export function accountEvent_KindToJSON(object: AccountEvent_Kind): string {
       return "KIND_QUARANTINE";
     case AccountEvent_Kind.KIND_ALL_EXHAUSTED:
       return "KIND_ALL_EXHAUSTED";
+    case AccountEvent_Kind.KIND_CREDENTIAL_UNUSABLE:
+      return "KIND_CREDENTIAL_UNUSABLE";
     case AccountEvent_Kind.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";

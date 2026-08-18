@@ -29,6 +29,7 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/transport"
 	"github.com/2kwanghee/AMX/ama-agent/internal/tsamx"
 	amxv1 "github.com/2kwanghee/AMX/contracts/gen/go"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // reportInterval is the usage-report cadence (SSOT §6.5, design note §1).
@@ -289,6 +290,36 @@ func run() error {
 	if cfgDir := drv.ConfigHome(); cfgDir != "" {
 		credPath = drv.CredentialPath(cfgDir)
 	}
+	// The material guard (§5.7) drops a token-less credential set with a log line
+	// only, so the FIRST incident — the credential going dead under a live account —
+	// is invisible to an operator until the account is later quarantined. Queue an
+	// AccountEvent on that drop instead, so AMS opens a credential_unusable alert.
+	// resync calls this edge-triggered (once per incident), and the Outbox carries
+	// it across a disconnect. Identifiers only: no token, no hash, no path (§7), and
+	// detail is a fixed human-readable string, not derived from the credential.
+	unusableEvent := func(providerKey string) func(store.Record) {
+		return func(rec store.Record) {
+			ev := &amxv1.AccountEvent{
+				SchemaVersion: 1,
+				AgentId:       agentID,
+				EventId:       reporter.NewEventID(),
+				OccurredAt:    timestamppb.New(time.Now().UTC()),
+				Kind:          amxv1.AccountEvent_KIND_CREDENTIAL_UNUSABLE,
+				// The affected account rides in `from`, the same slot quarantine uses
+				// (`to` stays unset — nothing became active).
+				From: &amxv1.AccountRef{
+					AmsAccountId: rec.AMSAccountID,
+					Email:        rec.Email,
+					AccountUuid:  rec.AccountUUID,
+					Provider:     providerKey,
+				},
+				Detail: "on-disk credential carries no token material",
+			}
+			// A disk-append error only forfeits restart durability for this one event;
+			// it is still queued in memory, so the live session still delivers it.
+			_ = outbox.Enqueue(ev)
+		}
+	}
 	resyncer := resync.New(resync.Config{
 		AgentID:          agentID,
 		Store:            st,
@@ -299,6 +330,7 @@ func run() error {
 		CredentialsPath:  credPath,
 		Fingerprint:      drv.Fingerprint,
 		HasMaterial:      drv.HasCredentialMaterial,
+		OnUnusable:       unusableEvent(drv.Name()),
 		ServerCredential: handler.ServerCredential,
 		Send: func(u *amxv1.CredentialUpdate) bool {
 			return client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_CredUpdate{CredUpdate: u}})
@@ -326,6 +358,7 @@ func run() error {
 			CredentialsPath:  codexCred,
 			Fingerprint:      codexDrv.Fingerprint,
 			HasMaterial:      codexDrv.HasCredentialMaterial,
+			OnUnusable:       unusableEvent(codexDrv.Name()),
 			ServerCredential: handler.ServerCredential,
 			Send: func(u *amxv1.CredentialUpdate) bool {
 				return client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_CredUpdate{CredUpdate: u}})

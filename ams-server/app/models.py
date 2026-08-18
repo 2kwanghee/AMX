@@ -80,6 +80,9 @@ ALERT_KINDS = (
     # P5 위험명령 감지(danger_hook.py 발). system 범위·server_id NULL, auto-resolve
     # 없음(이벤트성 — 관리자가 ack/resolve). dedupe는 host+pattern+명령 sha256 기반.
     "dangerous_command",
+    # §5.7 토큰 재료 가드가 로그아웃 껍데기를 드롭할 때 에이전트가 올리는 1차 사고
+    # 신호(계정 범위). 해소는 같은 계정의 cred_update가 실제로 저장되는 시점.
+    "credential_unusable",
 )
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")

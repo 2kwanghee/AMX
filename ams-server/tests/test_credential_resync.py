@@ -18,12 +18,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core import crypto, kek
 from app.db import get_sessionmaker
 from app.grpc import server as grpc_server
 from app.grpc import signing
 from app.grpc.proto import pb, pb_grpc
+from app.models import Alert
 from app.services import commands, inventory
 
 from tests.test_grpc_channel import (
@@ -1198,3 +1201,157 @@ def test_metadata_extraction_never_raises_on_hostile_input():
         assert "credential_expires_at" not in meta, secret[:40]
         assert "organization_name" not in meta, secret[:40]
         assert "account_uuid" not in meta, secret[:40]
+
+
+# -- credential_unusable alert (first-incident signal + auto-resolve) ----------
+def _unusable_event(account_id: uuid.UUID) -> pb.AccountEvent:
+    """The event the agent queues when its §5.7 material guard drops a push.
+
+    The affected account rides in ``from`` (``to`` unset), the same slot
+    quarantine uses.
+    """
+    event = pb.AccountEvent(
+        schema_version=1,
+        agent_id=AGENT_ID,
+        event_id="evt_" + uuid.uuid4().hex,
+        kind=pb.AccountEvent.KIND_CREDENTIAL_UNUSABLE,
+        detail="on-disk credential carries no token material",
+    )
+    getattr(event, "from").ams_account_id = str(account_id)
+    return event
+
+
+def _servicer() -> grpc_server.ControlPlaneServicer:
+    return grpc_server.ControlPlaneServicer(
+        signing.Signer.from_env_or_generate(), session_factory=get_sessionmaker()
+    )
+
+
+def _alerts(server_id, kind, status=None):
+    with get_sessionmaker()() as db:
+        where = [Alert.server_id == server_id, Alert.kind == kind]
+        if status is not None:
+            where.append(Alert.status == status)
+        return db.scalars(select(Alert).where(*where)).all()
+
+
+def test_credential_unusable_event_opens_account_scoped_warning(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("unusable@example.com")
+    _servicer()._store_event(server_id, tenant_id, _unusable_event(account_id))
+
+    opened = _alerts(server_id, "credential_unusable", "open")
+    assert len(opened) == 1
+    assert opened[0].severity == "warning"
+    assert opened[0].account_id == account_id
+    assert opened[0].tenant_id == tenant_id
+    assert opened[0].source_snapshot_id is not None
+
+
+def test_credential_unusable_event_dedupes_to_single_open(app_env):
+    """The agent is edge-triggered, but a reconnect flush or a second incident can
+    resend; the alert must stay one row per (server, kind, account)."""
+    tenant_id, account_id, server_id = _seed_tenant_account_server("unusable2@example.com")
+    svc = _servicer()
+    for _ in range(3):
+        svc._store_event(server_id, tenant_id, _unusable_event(account_id))
+
+    assert len(_alerts(server_id, "credential_unusable", "open")) == 1
+
+
+def test_event_alert_failure_keeps_session_and_snapshot(app_env, monkeypatch):
+    """A1: an alert write the DB refuses rejects the alert, not the session.
+
+    ``ck_alerts_kind`` is widened by a migration, so a server running one
+    migration behind a newer agent WILL be handed a kind it does not admit and
+    the INSERT raises IntegrityError. Left uncaught it unwinds the session read
+    loop and drops the whole agent stream, which the agent re-kills on every
+    reconnect — deliver/recall for that server would stay blocked. It must
+    instead be an opaque per-event reject: the switch_event snapshot still
+    lands (it is committed first), a rejected line is logged with identifiers
+    only, and a cred_update pushed afterwards on the SAME session still applies.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("alertfail@ex.com")
+    _assign(tenant_id, account_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+
+    # Stand in for the CHECK the deployed schema has not been widened for yet.
+    def refuse(*args, **kwargs):
+        raise IntegrityError("ck_alerts_kind (injected)", None, Exception("injected"))
+
+    monkeypatch.setattr(grpc_server.alerts, "open_alert", refuse)
+
+    rejects: list[str] = []
+    real_warning = grpc_server._logger.warning
+
+    def spy_warning(msg, *args, **kwargs):
+        rejects.append(msg % args if args else msg)
+        return real_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(grpc_server._logger, "warning", spy_warning)
+
+    observed = datetime.now(UTC)
+    new_rt = "rt-after-alert-failure-" + uuid.uuid4().hex
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            await call.write(pb.AmaMessage(event=_unusable_event(account_id)))
+            enc = _seal(
+                kek, key_id, account_id, AGENT_ID,
+                _oauth_secret("alertfail@ex.com", new_rt),
+            )
+            await call.write(_cred_update(account_id, enc, "", observed))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, observed)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+
+    # (a) the session survived: a cred_update sent after the failed alert applied.
+    assert _decrypt_rt(tenant_id, account_id) == new_rt
+    # (b) no alert row exists, so the failure was not silently half-written.
+    assert _alerts(server_id, "credential_unusable") == []
+    # (c) the timeline kept the event even though its alert was refused.
+    with get_sessionmaker()() as db:
+        assert inventory.list_switch_events(db, tenant_id, server_id, limit=10, offset=0)[1] == 1
+    # (d) an opaque line naming identifiers only.
+    assert any(
+        "account event alert not opened" in m
+        and str(server_id) in m
+        and "KIND_CREDENTIAL_UNUSABLE" in m
+        and "injected" not in m
+        for m in rejects
+    )
+
+
+def test_credential_unusable_resolved_by_successful_cred_update(app_env):
+    """A cred_update that actually stores is the proof the credential came back,
+    so it closes the standing alert. Nothing else observes the recovery."""
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, account_id, server_id = _seed_tenant_account_server("recovered@example.com")
+    _assign(tenant_id, account_id, server_id)
+    token = _issue_enroll(tenant_id, server_id)
+    _servicer()._store_event(server_id, tenant_id, _unusable_event(account_id))
+    assert len(_alerts(server_id, "credential_unusable", "open")) == 1
+
+    observed = datetime.now(UTC)
+    new_rt = "rt-recovered-" + uuid.uuid4().hex
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            call, kek, key_id = await _open_session(channel, token)
+            enc = _seal(
+                kek, key_id, account_id, AGENT_ID,
+                _oauth_secret("recovered@example.com", new_rt),
+            )
+            await call.write(_cred_update(account_id, enc, "", observed))
+            await asyncio.to_thread(_wait_observed, tenant_id, account_id, observed)
+            await call.done_writing()
+
+    asyncio.run(scenario())
+
+    assert _decrypt_rt(tenant_id, account_id) == new_rt
+    assert _alerts(server_id, "credential_unusable", "open") == []
+    resolved = _alerts(server_id, "credential_unusable", "resolved")
+    assert len(resolved) == 1
+    assert resolved[0].resolved_at is not None

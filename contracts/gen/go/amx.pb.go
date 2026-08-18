@@ -457,6 +457,14 @@ const (
 	AccountEvent_KIND_SWITCH        AccountEvent_Kind = 1
 	AccountEvent_KIND_QUARANTINE    AccountEvent_Kind = 2
 	AccountEvent_KIND_ALL_EXHAUSTED AccountEvent_Kind = 3 // critical — AMS alerts and considers extra assignment (§6.4)
+	// The active account's on-disk credential carries no token material (a
+	// logged-out shell), so the agent dropped the §5.7 re-sync push instead of
+	// overwriting the live copy AMS holds. It states only what was observed — a
+	// token-less credential file — not a refresh failure, which the agent never
+	// sees. The affected account rides in `from` (`to` is unset, as for
+	// quarantine). Edge-triggered: sent on the tick the condition is first seen
+	// for an account, not once per 5-minute tick while it persists.
+	AccountEvent_KIND_CREDENTIAL_UNUSABLE AccountEvent_Kind = 4
 )
 
 // Enum value maps for AccountEvent_Kind.
@@ -466,12 +474,14 @@ var (
 		1: "KIND_SWITCH",
 		2: "KIND_QUARANTINE",
 		3: "KIND_ALL_EXHAUSTED",
+		4: "KIND_CREDENTIAL_UNUSABLE",
 	}
 	AccountEvent_Kind_value = map[string]int32{
-		"KIND_UNSPECIFIED":   0,
-		"KIND_SWITCH":        1,
-		"KIND_QUARANTINE":    2,
-		"KIND_ALL_EXHAUSTED": 3,
+		"KIND_UNSPECIFIED":         0,
+		"KIND_SWITCH":              1,
+		"KIND_QUARANTINE":          2,
+		"KIND_ALL_EXHAUSTED":       3,
+		"KIND_CREDENTIAL_UNUSABLE": 4,
 	}
 )
 
@@ -3390,7 +3400,7 @@ const file_amx_proto_rawDesc = "" +
 	"\x15CONVERGENCE_CONVERGED\x10\x01\x12\x17\n" +
 	"\x13CONVERGENCE_PENDING\x10\x02\x12\x18\n" +
 	"\x14CONVERGENCE_DIVERGED\x10\x03\x12\x18\n" +
-	"\x14CONVERGENCE_REJECTED\x10\x04\"\xeb\x04\n" +
+	"\x14CONVERGENCE_REJECTED\x10\x04\"\x89\x05\n" +
 	"\fAccountEvent\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12\x19\n" +
 	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12\x19\n" +
@@ -3403,12 +3413,13 @@ const file_amx_proto_rawDesc = "" +
 	"\x02to\x18\b \x01(\v2\x12.amx.v1.AccountRefR\x02to\x126\n" +
 	"\fpool_summary\x18\t \x01(\v2\x13.amx.v1.PoolSummaryR\vpoolSummary\x12\x16\n" +
 	"\x06detail\x18\n" +
-	" \x01(\tR\x06detail\"Z\n" +
+	" \x01(\tR\x06detail\"x\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vKIND_SWITCH\x10\x01\x12\x13\n" +
 	"\x0fKIND_QUARANTINE\x10\x02\x12\x16\n" +
-	"\x12KIND_ALL_EXHAUSTED\x10\x03\"b\n" +
+	"\x12KIND_ALL_EXHAUSTED\x10\x03\x12\x1c\n" +
+	"\x18KIND_CREDENTIAL_UNUSABLE\x10\x04\"b\n" +
 	"\aTrigger\x12\x17\n" +
 	"\x13TRIGGER_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TRIGGER_AT_LIMIT\x10\x01\x12\x12\n" +

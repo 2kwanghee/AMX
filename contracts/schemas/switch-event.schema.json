@@ -40,9 +40,9 @@
       "required": ["kind"],
       "properties": {
         "kind": {
-          "description": "switch = active credential changed; quarantine = tsamx isolated an account; all_exhausted = every account is at or above the threshold.",
+          "description": "switch = active credential changed; quarantine = tsamx isolated an account; all_exhausted = every account is at or above the threshold; credential_unusable = the active account's on-disk credential carries no token material, so the §5.7 re-sync push was dropped (edge-triggered, once per incident; the account rides in `from`).",
           "type": "string",
-          "enum": ["switch", "quarantine", "all_exhausted"]
+          "enum": ["switch", "quarantine", "all_exhausted", "credential_unusable"]
         },
         "trigger": {
           "description": "at-limit = utilization crossed the 95% threshold (D10); manual = AMS SwitchNow; failover = previous account failed.",

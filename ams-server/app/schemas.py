@@ -316,6 +316,7 @@ AlertKind = Literal[
     "langfuse_latency",
     "alert_webhook_dropped",
     "dangerous_command",
+    "credential_unusable",
 ]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]

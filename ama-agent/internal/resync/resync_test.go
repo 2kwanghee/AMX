@@ -21,6 +21,8 @@ const (
 	testAgent  = "ama_test"
 	testAMSID  = "acc-1"
 	testEmail  = "a@x.io"
+	testAMSID2 = "acc-2"
+	testEmail2 = "b@x.io"
 	credV1     = `{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1"}}`
 	credV2     = `{"claudeAiOauth":{"accessToken":"a2","refreshToken":"r2"}}`
 	credV1Acc2 = `{"claudeAiOauth":{"accessToken":"a3","refreshToken":"r1"}}` // access rotated, refresh same
@@ -52,6 +54,7 @@ type harness struct {
 	engine   *sync.Mutex
 	mu       sync.Mutex
 	sent     []*amxv1.CredentialUpdate
+	unusable []store.Record
 	sendOK   bool
 	now      time.Time
 }
@@ -64,6 +67,14 @@ func newHarness(t *testing.T, kh *store.KEKHolder) *harness {
 // newHarnessWithMaterial builds the same harness with an explicit HasMaterial
 // hook, so a test can exercise the nil (check-disabled) contract.
 func newHarnessWithMaterial(t *testing.T, kh *store.KEKHolder, hasMaterial func([]byte) bool) *harness {
+	t.Helper()
+	return newHarnessWithHooks(t, kh, hasMaterial, true)
+}
+
+// newHarnessWithHooks additionally controls whether OnUnusable is wired at all:
+// wireUnusable=false leaves it nil, the contract a deployment that wants no
+// notification relies on.
+func newHarnessWithHooks(t *testing.T, kh *store.KEKHolder, hasMaterial func([]byte) bool, wireUnusable bool) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	drv := claude.New()
@@ -80,6 +91,14 @@ func newHarnessWithMaterial(t *testing.T, kh *store.KEKHolder, hasMaterial func(
 		sendOK:   true,
 		now:      time.Unix(1_700_000_000, 0).UTC(),
 	}
+	var onUnusable func(store.Record)
+	if wireUnusable {
+		onUnusable = func(rec store.Record) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.unusable = append(h.unusable, rec)
+		}
+	}
 	h.r = New(Config{
 		AgentID:          testAgent,
 		Store:            st,
@@ -89,6 +108,7 @@ func newHarnessWithMaterial(t *testing.T, kh *store.KEKHolder, hasMaterial func(
 		CredentialsPath:  credPath,
 		Fingerprint:      drv.Fingerprint,
 		HasMaterial:      hasMaterial,
+		OnUnusable:       onUnusable,
 		ServerCredential: func() string { return "srv-cred" },
 		Send: func(u *amxv1.CredentialUpdate) bool {
 			h.mu.Lock()
@@ -129,6 +149,26 @@ func (h *harness) sentCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.sent)
+}
+
+// unusableSeen returns the records OnUnusable was called with, in order.
+func (h *harness) unusableSeen() []store.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]store.Record(nil), h.unusable...)
+}
+
+// seedSecond installs a SECOND delivered account and makes it the active one,
+// leaving the credential file where it is.
+func (h *harness) seedSecond(t *testing.T, cred string) {
+	t.Helper()
+	if err := h.st.Upsert(store.Record{AMSAccountID: testAMSID2, Email: testEmail2}, []byte(cred)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.bridge.Add(context.Background(), provider.AddRequest{Email: testEmail2, Enable: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.bridge.SetActiveEmail(testEmail2)
 }
 
 // TestRotationDetectedAndSealed: a refresh-token change produces one
@@ -340,4 +380,98 @@ func TestTickUsesEngineLock(t *testing.T) {
 		t.Fatal("engine lock still held after Tick")
 	}
 	h.engine.Unlock()
+}
+
+// TestUnusableCallbackEdgeTriggered: the material guard drops on EVERY tick while
+// the credential stays token-less (the guard is stateless), so OnUnusable must be
+// edge-triggered — one call per incident, not one per tick — or the signal drowns
+// in its own repetitions at the report cadence. Recovery must re-arm it.
+func TestUnusableCallbackEdgeTriggered(t *testing.T) {
+	h := newHarness(t, keks(t))
+	h.seedDelivered(t, credV1)
+
+	h.writeCred(t, credEmptyTokens)
+	h.r.Tick(context.Background())
+	h.r.Tick(context.Background())
+	h.r.Tick(context.Background())
+	if got := h.sentCount(); got != 0 {
+		t.Fatalf("token-less credential pushed: %d", got)
+	}
+	seen := h.unusableSeen()
+	if len(seen) != 1 {
+		t.Fatalf("want exactly 1 notification across 3 dropping ticks, got %d", len(seen))
+	}
+	// Identifiers the AMS-side alert is keyed on must be present.
+	if seen[0].AMSAccountID != testAMSID || seen[0].Email != testEmail {
+		t.Fatalf("wrong account in notification: %+v", seen[0])
+	}
+
+	// Recovery: the credential carries material again. No new notification, and the
+	// push proceeds as before the notification existed.
+	h.writeCred(t, credV2)
+	h.r.Tick(context.Background())
+	if got := h.sentCount(); got != 1 {
+		t.Fatalf("recovered credential not pushed: %d", got)
+	}
+	if got := len(h.unusableSeen()); got != 1 {
+		t.Fatalf("recovery must not notify: %d", got)
+	}
+
+	// A SECOND incident on the same account fires again — the recovery tick above
+	// cleared the edge state.
+	h.writeCred(t, credEmptyTokens)
+	h.r.Tick(context.Background())
+	h.r.Tick(context.Background())
+	if got := len(h.unusableSeen()); got != 2 {
+		t.Fatalf("second incident: want 2 notifications, got %d", got)
+	}
+}
+
+// TestUnusableCallbackRefiresForDifferentAccount: a different active account is a
+// different incident, so it notifies even though the previous one was never seen
+// to recover (the account was switched away instead).
+func TestUnusableCallbackRefiresForDifferentAccount(t *testing.T) {
+	h := newHarness(t, keks(t))
+	h.seedDelivered(t, credV1)
+
+	h.writeCred(t, credEmptyTokens)
+	h.r.Tick(context.Background())
+	if got := len(h.unusableSeen()); got != 1 {
+		t.Fatalf("first account: want 1 notification, got %d", got)
+	}
+
+	// Switch to a second delivered account whose credential file is still the
+	// token-less shell.
+	h.seedSecond(t, credV1)
+	h.r.Tick(context.Background())
+	seen := h.unusableSeen()
+	if len(seen) != 2 {
+		t.Fatalf("second account: want 2 notifications, got %d", len(seen))
+	}
+	if seen[1].AMSAccountID != testAMSID2 || seen[1].Email != testEmail2 {
+		t.Fatalf("second notification names the wrong account: %+v", seen[1])
+	}
+}
+
+// TestNilOnUnusableKeepsGuard: OnUnusable nil is "notification disabled" — the
+// guard itself must behave exactly as it did before the hook existed (drop, do not
+// advance the baseline, push the recovered credential).
+func TestNilOnUnusableKeepsGuard(t *testing.T) {
+	h := newHarnessWithHooks(t, keks(t), claude.New().HasCredentialMaterial, false)
+	h.seedDelivered(t, credV1)
+
+	h.writeCred(t, credEmptyTokens)
+	h.r.Tick(context.Background())
+	if got := h.sentCount(); got != 0 {
+		t.Fatalf("token-less credential pushed with nil OnUnusable: %d", got)
+	}
+	if got := len(h.unusableSeen()); got != 0 {
+		t.Fatalf("nil OnUnusable recorded a notification: %d", got)
+	}
+
+	h.writeCred(t, credV2)
+	h.r.Tick(context.Background())
+	if got := h.sentCount(); got != 1 {
+		t.Fatalf("recovered credential not pushed with nil OnUnusable: %d", got)
+	}
 }

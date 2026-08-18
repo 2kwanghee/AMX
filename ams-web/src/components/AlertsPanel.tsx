@@ -3,7 +3,7 @@
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import type { AlertPage, ServerPage } from '@/lib/api-client/types';
-import { Badge, LiveDot, TimeCell, useAction, useMarkOnData } from './common';
+import { Badge, LiveDot, TimeCell, krLabel, useAction, useMarkOnData } from './common';
 
 const POLL = 7000;
 
@@ -80,7 +80,7 @@ export function AlertsPanel({ tenantId }: { tenantId: string }) {
               {items.map((a) => (
                 <tr key={a.id}>
                   <td><Badge value={a.severity} /></td>
-                  <td>{a.kind}</td>
+                  <td>{krLabel(a.kind)}</td>
                   <td>{serverLabel(a.serverId)}</td>
                   <td className="muted">
                     {(() => {

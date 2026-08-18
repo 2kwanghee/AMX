@@ -474,10 +474,12 @@ class AccountEvent(_message.Message):
         KIND_SWITCH: _ClassVar[AccountEvent.Kind]
         KIND_QUARANTINE: _ClassVar[AccountEvent.Kind]
         KIND_ALL_EXHAUSTED: _ClassVar[AccountEvent.Kind]
+        KIND_CREDENTIAL_UNUSABLE: _ClassVar[AccountEvent.Kind]
     KIND_UNSPECIFIED: AccountEvent.Kind
     KIND_SWITCH: AccountEvent.Kind
     KIND_QUARANTINE: AccountEvent.Kind
     KIND_ALL_EXHAUSTED: AccountEvent.Kind
+    KIND_CREDENTIAL_UNUSABLE: AccountEvent.Kind
     class Trigger(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         TRIGGER_UNSPECIFIED: _ClassVar[AccountEvent.Trigger]
