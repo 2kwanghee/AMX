@@ -147,6 +147,8 @@ class OauthCompleteRequest(Wire):
     flow_id: str
     code: str = Field(min_length=1)
     email: EmailStr | None = None
+    # See AccountCreate.assignment_excluded.
+    assignment_excluded: bool = False
 
 
 # -- Server -------------------------------------------------------------------

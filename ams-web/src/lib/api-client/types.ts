@@ -102,6 +102,7 @@ export interface OauthCompleteRequest {
   flowId: string;
   code: string;
   email?: string;
+  assignmentExcluded?: boolean;
 }
 
 export interface Server {

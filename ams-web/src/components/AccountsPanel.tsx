@@ -108,6 +108,7 @@ function RegisterModal({
   const [flow, setFlow] = useState<OauthStartResponse | null>(null);
   const [code, setCode] = useState('');
   const [email, setEmail] = useState('');
+  const [assignmentExcluded, setAssignmentExcluded] = useState(false);
   const act = useAction();
 
   const providerSelect = (
@@ -172,6 +173,14 @@ function RegisterModal({
           <input value={code} onChange={(e) => setCode(e.target.value)} />
           <label>이메일 수동 지정 (선택)</label>
           <input value={email} onChange={(e) => setEmail(e.target.value)} />
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={assignmentExcluded}
+              onChange={(e) => setAssignmentExcluded(e.target.checked)}
+            />
+            개인이 자기 프로필에서 직접 쓰는 계정이라 새 배정 대상에서 뺀다
+          </label>
           {act.error && <p className="err">{act.error}</p>}
           <button
             className="primary"
@@ -179,7 +188,13 @@ function RegisterModal({
             disabled={act.busy || !code}
             onClick={() =>
               act.run(
-                () => api.oauthComplete(tenantId, { flowId: flow.flowId, code, email: email || undefined }),
+                () =>
+                  api.oauthComplete(tenantId, {
+                    flowId: flow.flowId,
+                    code,
+                    email: email || undefined,
+                    assignmentExcluded: assignmentExcluded || undefined,
+                  }),
                 onDone,
               )
             }
@@ -426,6 +441,7 @@ function DirectImport({
 }) {
   const [email, setEmail] = useState('');
   const [secret, setSecret] = useState('');
+  const [assignmentExcluded, setAssignmentExcluded] = useState(false);
   const act = useAction();
   return (
     <Modal title="API 키 가져오기" onClose={onClose}>
@@ -433,13 +449,30 @@ function DirectImport({
       <input value={email} onChange={(e) => setEmail(e.target.value)} />
       <label>시크릿 (API 키)</label>
       <textarea value={secret} onChange={(e) => setSecret(e.target.value)} rows={3} />
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={assignmentExcluded}
+          onChange={(e) => setAssignmentExcluded(e.target.checked)}
+        />
+        개인이 자기 프로필에서 직접 쓰는 계정이라 새 배정 대상에서 뺀다
+      </label>
       {act.error && <p className="err">{act.error}</p>}
       <button
         className="primary"
         style={{ marginTop: 14 }}
         disabled={act.busy || !email || !secret}
         onClick={() =>
-          act.run(() => api.createAccount(tenantId, { email, credentialType: 'api_key', secret }), onDone)
+          act.run(
+            () =>
+              api.createAccount(tenantId, {
+                email,
+                credentialType: 'api_key',
+                secret,
+                assignmentExcluded: assignmentExcluded || undefined,
+              }),
+            onDone,
+          )
         }
       >
         가져오기
