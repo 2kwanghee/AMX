@@ -217,6 +217,8 @@ const KR_API_ERROR: Record<string, string> = {
     '이 계정은 아직 서버에 연결돼 있습니다. 할당을 회수하고 삭제한 뒤 계정을 지우세요.',
   'account.duplicate_email':
     '이 테넌트에 같은 이메일의 계정이 이미 있습니다. 다른 이메일을 쓰거나 기존 계정을 편집하세요.',
+  'account.secret_not_encodable':
+    '붙여넣은 자격증명에 UTF-8로 저장할 수 없는 문자가 섞여 있습니다. 원본에서 다시 복사해 붙여넣으세요.',
 
   'admin.duplicate_email':
     '같은 이메일로 등록된 관리자가 이미 있습니다. 새로 만들지 말고 기존 관리자를 편집하세요.',
