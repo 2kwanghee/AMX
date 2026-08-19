@@ -1,0 +1,819 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMX 토큰노믹스 브리핑</title>
+<style>
+  :root{
+    --navy:#0B1F3A;
+    --navy-2:#12294A;
+    --navy-3:#1B3557;
+    --paper:#FFFFFF;
+    --paper-2:#F4F6FA;
+    --ink:#0B1F3A;
+    --ink-2:#33465F;
+    --muted:#64748B;
+    --line:#D9E0EA;
+    --accent:#2F6FED;
+    --accent-2:#5B8DF0;
+    --accent-soft:rgba(47,111,237,.10);
+    --g1:#0B1F3A;
+    --g2:#4A5D75;
+    --g3:#8595A9;
+    --g4:#C3CDDA;
+    --g5:#E4EAF1;
+    --ok:#1E8E6A;
+    --warn:#C9822B;
+    --danger:#C2453C;
+    --shadow:0 18px 50px rgba(11,31,58,.16);
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:#060F1E;
+    font-family:var(--sans);
+    color:var(--ink);
+    word-break:keep-all;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  #deck{position:fixed;inset:0}
+  .slide{
+    position:absolute;inset:0;
+    display:none;
+    padding:5.2vh 6vw 7.5vh;
+    background:var(--paper);
+    opacity:0;
+    flex-direction:column;
+  }
+  .slide.active{display:flex;opacity:1}
+  .slide.dark{background:var(--navy);color:#EAF0F8}
+
+  .eyebrow{
+    display:flex;align-items:center;gap:.7rem;
+    font-size:.74rem;font-weight:700;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--accent);
+    margin:0 0 1.1rem;
+  }
+  .eyebrow::before{content:"";width:34px;height:3px;background:var(--accent);border-radius:2px;display:inline-block}
+  .dark .eyebrow{color:var(--accent-2)}
+  .dark .eyebrow::before{background:var(--accent-2)}
+
+  .atitle{
+    font-size:clamp(1.5rem,3.05vw,2.6rem);
+    line-height:1.18;font-weight:750;letter-spacing:-.01em;
+    margin:0 0 .3rem;max-width:20em;color:var(--ink);
+  }
+  .dark .atitle{color:#FFFFFF}
+  .atitle .hl{color:var(--accent)}
+  .dark .atitle .hl{color:var(--accent-2)}
+  .subline{font-size:clamp(.9rem,1.2vw,1.05rem);color:var(--muted);margin:.1rem 0 0;max-width:44em;line-height:1.55}
+  .dark .subline{color:#A9B9CE}
+
+  .body{flex:1;display:flex;flex-direction:column;justify-content:center;min-height:0}
+
+  .foot{
+    position:absolute;left:6vw;right:6vw;bottom:3vh;
+    display:flex;justify-content:space-between;align-items:center;
+    font-size:.7rem;color:var(--g3);
+    border-top:1px solid var(--line);padding-top:.7rem;letter-spacing:.02em;
+  }
+  .dark .foot{color:#6C8098;border-top-color:rgba(255,255,255,.12)}
+  .foot .src{font-style:italic}
+  .foot .pg b{color:var(--ink);font-weight:700}
+  .dark .foot .pg b{color:#EAF0F8}
+
+  #bar{position:fixed;left:0;bottom:0;height:4px;background:var(--accent);width:0;z-index:40;transition:width .5s cubic-bezier(.2,.7,.2,1)}
+
+  .nav{position:fixed;bottom:2.4vh;right:2.4vw;display:flex;gap:.5rem;z-index:41}
+  .nav button{
+    width:42px;height:42px;border-radius:50%;border:1px solid var(--line);
+    background:rgba(255,255,255,.9);color:var(--ink);font-size:1.1rem;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;transition:.18s;box-shadow:0 4px 14px rgba(11,31,58,.12)
+  }
+  .nav button:hover{background:var(--accent);color:#fff;border-color:var(--accent);transform:translateY(-2px)}
+  #dots{position:fixed;bottom:2.9vh;left:50%;transform:translateX(-50%);display:flex;gap:7px;z-index:41}
+  #dots span{width:8px;height:8px;border-radius:50%;background:var(--g4);cursor:pointer;transition:.2s}
+  #dots span.on{background:var(--accent);transform:scale(1.35)}
+
+  #grid{position:fixed;inset:0;background:rgba(6,15,30,.94);z-index:60;display:none;padding:6vh 8vw;overflow:auto}
+  #grid.show{display:block}
+  #grid h3{color:#fff;font-size:1.1rem;letter-spacing:.08em;text-transform:uppercase;margin:0 0 2rem}
+  .gwrap{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem}
+  .gcard{background:#132A49;border:1px solid #22406A;border-radius:12px;padding:1.1rem 1.2rem;cursor:pointer;transition:.18s;color:#DCE6F3}
+  .gcard:hover{background:var(--accent);border-color:var(--accent);transform:translateY(-3px)}
+  .gcard .n{font-size:.72rem;color:var(--accent-2);font-weight:700;letter-spacing:.1em}
+  .gcard:hover .n{color:#dbe7ff}
+  .gcard .t{font-size:.92rem;margin-top:.4rem;line-height:1.35;font-weight:600}
+  #grid .close{position:absolute;top:4vh;right:6vw;color:#9fb2ca;font-size:1rem;cursor:pointer;letter-spacing:.05em}
+
+  .reveal{opacity:0;transform:translateY(16px)}
+  .slide.active .reveal.in{opacity:1;transform:none;transition:opacity .55s ease,transform .55s cubic-bezier(.2,.7,.2,1)}
+
+  .cols{display:grid;gap:1.4rem}
+  .cols.c2{grid-template-columns:1fr 1fr}
+  .cols.c3{grid-template-columns:repeat(3,1fr)}
+  .cols.c5{grid-template-columns:repeat(5,1fr)}
+
+  .card{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:1.3rem 1.35rem;box-shadow:var(--shadow)}
+  .card h4{margin:.1rem 0 .55rem;font-size:1.02rem;letter-spacing:-.01em}
+  .card p{margin:0;color:var(--ink-2);font-size:.86rem;line-height:1.6}
+  .card .tag{display:inline-block;font-size:.66rem;font-weight:700;letter-spacing:.08em;color:var(--accent);
+    background:var(--accent-soft);padding:.2rem .5rem;border-radius:6px;text-transform:uppercase;margin-bottom:.6rem}
+
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:1rem}
+  .kpi{background:var(--navy);color:#fff;border-radius:14px;padding:1.3rem 1.1rem;position:relative;overflow:hidden}
+  .kpi::after{content:"";position:absolute;right:-20px;bottom:-20px;width:70px;height:70px;border-radius:50%;background:rgba(47,111,237,.28)}
+  .kpi .num{font-size:2rem;font-weight:780;letter-spacing:-.02em;line-height:1}
+  .kpi .unit{font-size:.95rem;font-weight:600;opacity:.8;margin-left:.15rem}
+  .kpi .lab{font-size:.76rem;color:#AFC1DA;margin-top:.55rem;line-height:1.4;position:relative;z-index:1}
+
+  .chain{display:flex;align-items:stretch;gap:0;margin-top:.5rem}
+  .step{flex:1;background:var(--paper-2);border:1px solid var(--line);border-radius:12px;padding:1rem .9rem;position:relative;transition:.4s}
+  .step.lit{background:var(--navy);color:#fff;border-color:var(--navy);box-shadow:var(--shadow)}
+  .step .sn{font-size:.7rem;font-weight:700;letter-spacing:.1em;color:var(--accent)}
+  .step.lit .sn{color:var(--accent-2)}
+  .step h5{margin:.35rem 0 .3rem;font-size:.98rem}
+  .step p{margin:0;font-size:.76rem;line-height:1.45;color:var(--ink-2)}
+  .step.lit p{color:#C8D6EA}
+  .arrow{display:flex;align-items:center;justify-content:center;width:34px;color:var(--g3);font-size:1.3rem;flex:0 0 34px}
+
+  .bars{display:flex;flex-direction:column;gap:.9rem;margin-top:.4rem}
+  .brow{display:grid;grid-template-columns:9.5rem 1fr;align-items:center;gap:1rem}
+  .brow .bl{font-size:.85rem;font-weight:600;text-align:right;color:var(--ink-2)}
+  .btrack{background:var(--g5);border-radius:8px;height:34px;position:relative;overflow:hidden}
+  .bfill{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:8px;background:linear-gradient(90deg,var(--accent),var(--accent-2));
+    transition:width 1.1s cubic-bezier(.2,.7,.2,1);display:flex;align-items:center;justify-content:flex-end;padding-right:.7rem;color:#fff;font-size:.78rem;font-weight:700}
+  .bfill.gray{background:linear-gradient(90deg,var(--g2),var(--g3))}
+  .bfill.warm{background:linear-gradient(90deg,#B4622A,#D08A4A)}
+
+  /* 토큰노믹스 전용: 창 사용률 + 구속 표시 + 소멸 구간 */
+  .btrack .thr{position:absolute;top:0;bottom:0;width:2px;background:var(--danger);z-index:3}
+  .btrack .thr::after{content:"95%";position:absolute;top:-1.15rem;left:-1rem;font-size:.6rem;font-weight:700;color:var(--danger);letter-spacing:.04em}
+  .bind{display:inline-block;font-size:.6rem;font-weight:700;letter-spacing:.08em;color:#fff;background:var(--danger);
+    padding:.12rem .38rem;border-radius:4px;margin-left:.45rem;vertical-align:.1em}
+  .expire{background:repeating-linear-gradient(45deg,rgba(133,149,169,.28) 0 6px,rgba(133,149,169,.10) 6px 12px);
+    position:absolute;top:0;bottom:0;right:0;border-radius:0 8px 8px 0}
+  .exlab{font-size:.72rem;color:var(--muted);margin-top:.5rem;line-height:1.5}
+
+  .matrix{position:relative;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;height:100%;min-height:0}
+  .quad{border:1px solid var(--line);border-radius:14px;padding:1.15rem 1.2rem;background:var(--paper-2);transition:.45s;position:relative}
+  .quad.hot{background:var(--navy);color:#fff;border-color:var(--navy);box-shadow:var(--shadow);transform:translateY(-3px)}
+  .quad .qn{font-size:.7rem;letter-spacing:.1em;font-weight:700;color:var(--accent)}
+  .quad.hot .qn{color:var(--accent-2)}
+  .quad h5{margin:.35rem 0 .4rem;font-size:1rem}
+  .quad p{margin:0;font-size:.8rem;line-height:1.5;color:var(--ink-2)}
+  .quad.hot p{color:#C8D6EA}
+  .axis{position:absolute;font-size:.68rem;font-weight:700;letter-spacing:.08em;color:var(--g3);text-transform:uppercase}
+
+  .ba{display:grid;grid-template-columns:1fr 3rem 1fr;gap:0;align-items:stretch}
+  .ba .side{border-radius:14px;padding:1.4rem 1.5rem}
+  .ba .before{background:var(--paper-2);border:1px solid var(--line)}
+  .ba .after{background:var(--navy);color:#fff}
+  .ba .mid{display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:1.6rem}
+  .ba h5{margin:0 0 .9rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}
+  .ba .before h5{color:var(--danger)}
+  .ba .after h5{color:var(--accent-2)}
+  .ba li{list-style:none;padding:.42rem 0 .42rem 1.4rem;position:relative;font-size:.86rem;line-height:1.5;border-bottom:1px dashed rgba(120,140,170,.25)}
+  .ba li:last-child{border-bottom:0}
+  .ba .before li::before{content:"×";position:absolute;left:0;color:var(--danger);font-weight:700}
+  .ba .after li::before{content:"✓";position:absolute;left:0;color:var(--accent-2);font-weight:700}
+  .ba .after li{color:#DCE6F3}
+
+  .chips{display:flex;flex-wrap:wrap;gap:.55rem;margin-top:.3rem}
+  .chip{font-size:.78rem;font-weight:600;padding:.4rem .75rem;border-radius:999px;border:1px solid var(--line);background:var(--paper-2);color:var(--ink-2);opacity:0;transform:scale(.85)}
+  .slide.active .chip.pop{opacity:1;transform:none;transition:.4s cubic-bezier(.2,1.3,.4,1)}
+  .chip.s{border-color:#F0C9C6;background:#FBEDEC;color:#A63A32}
+  .chip.a{border-color:#F1DDBE;background:#FBF2E2;color:#946018}
+  .chip.l{border-color:#C9DCF6;background:#EAF1FC;color:#2456B4}
+  .chip.new{border-color:#B9E2D2;background:#E7F6F0;color:#136B50}
+
+  .plist{list-style:none;margin:.3rem 0 0;padding:0;display:flex;flex-direction:column;gap:.7rem}
+  .plist li{padding-left:1.5rem;position:relative;font-size:.9rem;line-height:1.55;color:var(--ink-2)}
+  .plist li::before{content:"";position:absolute;left:0;top:.55em;width:8px;height:8px;border-radius:2px;background:var(--accent);transform:rotate(45deg)}
+  .plist li b{color:var(--ink)}
+  .dark .plist li{color:#C4D2E4}
+  .dark .plist li b{color:#fff}
+
+  .lead{font-size:1.05rem;line-height:1.7;color:var(--ink-2);max-width:40em}
+  .dark .lead{color:#C4D2E4}
+
+  .cover-mark{font-size:.8rem;letter-spacing:.4em;color:var(--accent-2);font-weight:700;text-transform:uppercase}
+  .cover-title{font-size:clamp(2.4rem,6vw,4.6rem);font-weight:800;letter-spacing:-.02em;line-height:1.02;margin:1.1rem 0 .4rem;color:#fff}
+  .cover-sub{font-size:clamp(1rem,1.7vw,1.35rem);color:#AFC1DA;max-width:34em;line-height:1.5}
+  .exec{display:grid;grid-template-columns:repeat(3,1fr);gap:1.1rem;margin-top:2.6rem;max-width:64rem}
+  .exec .e{border-left:3px solid var(--accent-2);padding:.3rem 0 .3rem 1.1rem}
+  .exec .e .k{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-2);font-weight:700}
+  .exec .e .v{font-size:.98rem;color:#DCE6F3;margin-top:.5rem;line-height:1.55}
+
+  .hintbadge{position:fixed;top:2.2vh;right:2.4vw;font-size:.68rem;color:var(--g3);z-index:41;letter-spacing:.03em}
+  .slide.dark ~ .hintbadge{color:#6C8098}
+
+  @media (max-width:820px){
+    .cols.c3,.cols.c5,.kpis,.exec{grid-template-columns:1fr 1fr}
+    .chain{flex-direction:column}.arrow{width:auto;height:24px;transform:rotate(90deg)}
+    .ba{grid-template-columns:1fr}.ba .mid{transform:rotate(90deg);padding:.5rem}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .reveal,.chip{opacity:1!important;transform:none!important}
+    .bfill,.step,.quad{transition:none!important}
+    #bar{transition:none}
+  }
+</style>
+
+<div id="deck">
+
+  <!-- 1 · COVER -->
+  <section class="slide dark active" data-title="표지 · 토큰노믹스에서 출발했다">
+    <div class="body">
+      <div class="cover-mark reveal">AMX · Account Management &amp; eXchange</div>
+      <h1 class="cover-title reveal">토큰은 재고가 아니라<br><span style="color:var(--accent-2)">유통기한이 있는 흐름</span>이다</h1>
+      <p class="cover-sub reveal">그 한 가지를 깨달은 데서 AMX 설계가 시작됐다. 계정 운영 자동화는 결과이고, 출발점은 토큰의 경제 구조였다.</p>
+      <div class="exec">
+        <div class="e reveal"><div class="k">착안</div><div class="v">구독 한도는 월 정액 재고가 아니라 5시간과 7일 롤링 윈도우다. 안 쓴 용량은 이월되지 않고 사라진다.</div></div>
+        <div class="e reveal"><div class="k">문제</div><div class="v">한 계정이 포화되면 일이 멈추는데 옆 계정의 남은 창은 그대로 소멸한다. 같은 돈으로 얻는 실효 용량이 배치에 따라 갈린다.</div></div>
+        <div class="e reveal"><div class="k">설계</div><div class="v">토큰을 실측하고, 포화 전에 라우팅하고, 쓴 만큼 귀속시킨다. AMX가 하는 일은 이 셋이다.</div></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX 설계 문서(AMX-DESIGN.md 2.2·5.6.1), 2026.08.19 기준</span><span class="pg"><b>01</b> / 16</span></div>
+  </section>
+
+  <!-- 2 · TOKENOMICS 1 -->
+  <section class="slide" data-title="토큰노믹스 ① 토큰이 단위이자 가격이다">
+    <div class="eyebrow">Tokenomics 1 · 단위</div>
+    <h2 class="atitle">AI 코딩에서 토큰은 <span class="hl">작업의 단위이면서 동시에 가격</span>이다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <p class="lead">사람의 노동은 시간으로 세고 시간으로 값을 매긴다. AI 에이전트의 노동은 토큰으로 센다. 그리고 그 토큰이 곧 청구서다.</p>
+          <p class="lead" style="margin-top:1rem">단위와 가격이 같은 물건이면 운영 방식이 달라진다. 얼마나 일했는지 알려면 얼마 썼는지를 알아야 하고, 얼마 쓸지 정하려면 얼마나 일할지를 정해야 한다. <b style="color:var(--ink)">측정과 예산이 분리되지 않는다.</b></p>
+        </div>
+        <div class="reveal">
+          <div class="cols" style="grid-template-columns:1fr;gap:1rem">
+            <div class="card"><span class="tag">사람의 노동</span><h4>시간으로 세고, 시간으로 값을 매긴다</h4><p>측정 단위와 과금 단위가 같아도 총량이 예측 가능하다. 하루는 언제나 여덟 시간이다.</p></div>
+            <div class="card" style="border-color:var(--accent);box-shadow:0 18px 50px rgba(47,111,237,.18)"><span class="tag">에이전트의 노동</span><h4>토큰으로 세고, 토큰으로 값을 매긴다</h4><p>같은 한 줄을 고치는 데 쓰는 토큰이 맥락 길이와 캐시 상태에 따라 수십 배 벌어진다. 총량이 예측되지 않는다.</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: 설계 배경(토큰 단위 관측 필요성), AMX-DESIGN.md 5.6.1</span><span class="pg"><b>02</b> / 16</span></div>
+  </section>
+
+  <!-- 3 · TOKENOMICS 2 : WINDOW -->
+  <section class="slide" data-title="토큰노믹스 ② 구독은 월 정액이 아니다">
+    <div class="eyebrow">Tokenomics 2 · 시간창</div>
+    <h2 class="atitle">구독 한도는 월 단위 재고가 아니라 <span class="hl">5시간과 7일 롤링 윈도우</span>다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <div class="card" style="background:var(--paper-2)">
+            <span class="tag">한 계정의 두 창</span>
+            <div class="bars" style="margin-top:1.1rem">
+              <div class="brow"><span class="bl">5시간 창</span><div class="btrack"><div class="bfill" data-w="61" data-txt="61%"></div><span class="thr" style="left:95%"></span></div></div>
+              <div class="brow"><span class="bl">7일 창</span><div class="btrack"><div class="bfill gray" data-w="44" data-txt="44%"></div><span class="thr" style="left:95%"></span></div></div>
+              <div class="brow"><span class="bl">구속 사용률</span><div class="btrack"><div class="bfill warm" data-w="61" data-txt="61%"></div><span class="thr" style="left:95%"></span></div></div>
+            </div>
+            <p class="exlab" style="margin-top:1rem">둘 중 <b style="color:var(--ink)">더 높은 쪽</b>이 실제 한도를 결정한다<span class="bind">binding</span> 7일 창이 여유로워도 5시간 창이 차면 일은 멈춘다.</p>
+          </div>
+        </div>
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>두 창이 동시에 걸린다.</b> 5시간(300분)과 7일(10080분) 사용률을 각각 계산한 뒤 최댓값을 본다. 이것이 binding window 사용률이다.</li>
+            <li><b>창은 이월되지 않는다.</b> 5시간이 지나면 그 구간의 미사용 용량은 다음 구간으로 넘어가지 않는다. 그냥 사라진다.</li>
+            <li><b>그래서 용량은 재고가 아니다.</b> 창고에 쌓아두는 물건이 아니라 계속 흐르면서 상하는 물건이다. 관리 방식이 근본적으로 달라진다.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 2.2(binding-window), 950~969행 usage 스냅샷 스키마</span><span class="pg"><b>03</b> / 16</span></div>
+  </section>
+
+  <!-- 4 · TOKENOMICS 3 : PERISHABLE -->
+  <section class="slide" data-title="토큰노믹스 ③ 유휴는 소멸하고 포화는 차단한다">
+    <div class="eyebrow">Tokenomics 3 · 소멸과 차단</div>
+    <h2 class="atitle">한쪽은 <span class="hl">일을 막고</span> 다른 쪽은 <span class="hl">돈을 버린다</span>. 동시에 일어난다</h2>
+    <div class="body">
+      <div class="reveal" style="margin-bottom:1.4rem">
+        <div class="card" style="background:var(--paper-2)">
+          <span class="tag">같은 시각, 세 계정</span>
+          <div class="bars" style="margin-top:1.1rem">
+            <div class="brow"><span class="bl">계정 A</span><div class="btrack"><div class="bfill warm" data-w="97" data-txt="포화 · 작업 중단"></div><span class="thr" style="left:95%"></span></div></div>
+            <div class="brow"><span class="bl">계정 B</span><div class="btrack"><div class="bfill gray" data-w="18" data-txt="18%"></div><div class="expire" style="width:82%"></div><span class="thr" style="left:95%"></span></div></div>
+            <div class="brow"><span class="bl">계정 C</span><div class="btrack"><div class="bfill gray" data-w="6" data-txt="6%"></div><div class="expire" style="width:94%"></div><span class="thr" style="left:95%"></span></div></div>
+          </div>
+          <p class="exlab" style="margin-top:1rem">사선 구간은 이 창이 닫히면 사라지는 용량이다. A에 붙은 작업은 멈춰 있고, B와 C가 가진 여유는 그대로 소멸한다. 세 계정 구독료는 똑같이 나간다.</p>
+        </div>
+      </div>
+      <div class="cols c3">
+        <div class="card reveal"><span class="tag">낭비 1</span><h4>소멸하는 유휴</h4><p>안 쓴 창은 이월되지 않는다. 유휴 계정의 구독료는 실효 용량 없이 지출로만 남는다.</p></div>
+        <div class="card reveal"><span class="tag">낭비 2</span><h4>차단하는 포화</h4><p>포화된 계정에 묶인 작업은 옆에 여유가 있어도 멈춘다. 사람이 알아채고 갈아끼울 때까지 멈춘 상태다.</p></div>
+        <div class="card reveal" style="border-color:var(--accent)"><span class="tag">그래서</span><h4>배치가 곧 비용이다</h4><p>같은 계정 수, 같은 구독료로도 어디에 어떻게 붙였는지에 따라 실제로 쓸 수 있는 용량이 달라진다.</p></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 2.2·5.3(전환 판정), D10 임계치</span><span class="pg"><b>04</b> / 16</span></div>
+  </section>
+
+  <!-- 5 · TOKENOMICS 4 : PRICE VARIES -->
+  <section class="slide" data-title="토큰노믹스 ④ 같은 토큰도 가격이 다르다">
+    <div class="eyebrow">Tokenomics 4 · 종류별 가격</div>
+    <h2 class="atitle">토큰은 <span class="hl">종류마다 값이 다르다</span>. 합산해서 보면 원가를 알 수 없다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>다섯 종류가 섞여 있다.</b> input, output, cache_read, cache_creation, total. 캐시 읽기는 새 입력보다 훨씬 싸고, 캐시 쓰기는 한 번 비싸게 치른 뒤 여러 번 아낀다.</li>
+            <li><b>합산 지표는 거짓말을 한다.</b> Langfuse의 inputTokens는 캐시를 포함한 합계다. 그것을 입력으로 표시하면 입력이 부풀고 캐시는 0으로 보인다. 이중 오표시였다.</li>
+            <li><b>usageByType으로 갈랐다.</b> 종류별로 쪼개 각 컬럼에 실측값을 쌓는다. 그래야 캐시가 실제로 일하는지, 어느 계정이 비싼 방식으로 쓰는지 보인다.</li>
+          </ul>
+        </div>
+        <div class="card reveal" style="background:var(--paper-2)">
+          <span class="tag">한 세션의 실측 예 (sonnet)</span>
+          <div class="bars" style="margin-top:.9rem">
+            <div class="brow"><span class="bl">input</span><div class="btrack"><div class="bfill" data-w="1" data-txt=""></div></div></div>
+            <div class="brow"><span class="bl">cache_read</span><div class="btrack"><div class="bfill gray" data-w="91" data-txt="557.7K"></div></div></div>
+            <div class="brow"><span class="bl">cache_creation</span><div class="btrack"><div class="bfill gray" data-w="10" data-txt="57.3K"></div></div></div>
+            <div class="brow"><span class="bl">총 토큰</span><div class="btrack"><div class="bfill warm" data-w="100" data-txt="615.0K"></div></div></div>
+          </div>
+          <p class="exlab" style="margin-top:.9rem">순수 input은 24 토큰이다. 나머지 전부가 캐시다. 합산 지표는 이 615K를 통째로 입력으로 보여줬다. 원가 구조를 완전히 반대로 읽게 만드는 오표시였다.</p>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 5.6.1, langfuse_metrics.py usageByType, 2026.08.15 실측</span><span class="pg"><b>05</b> / 16</span></div>
+  </section>
+
+  <!-- 6 · DESIGN CONCLUSION -->
+  <section class="slide dark" data-title="설계 결론 · 실측·라우팅·귀속">
+    <div class="eyebrow">Design · 설계 결론</div>
+    <h2 class="atitle" style="color:#fff">그래서 시스템이 할 일은 셋이다. <span style="color:var(--accent-2)">실측하고, 라우팅하고, 귀속시킨다</span></h2>
+    <div class="body">
+      <div class="cols c3">
+        <div class="card reveal" style="background:var(--navy-2);border-color:var(--navy-3)">
+          <span class="tag" style="background:rgba(91,141,240,.18);color:var(--accent-2)">실측</span>
+          <h4 style="color:#fff">추정하지 않는다</h4>
+          <p style="color:#C8D6EA">토큰을 종류별로 실측하고 창별 사용률을 계정마다 수집한다. 남은 용량을 모르면 라우팅도 귀속도 성립하지 않는다.</p>
+        </div>
+        <div class="card reveal" style="background:var(--navy-2);border-color:var(--navy-3)">
+          <span class="tag" style="background:rgba(91,141,240,.18);color:var(--accent-2)">라우팅</span>
+          <h4 style="color:#fff">포화 전에 옮긴다</h4>
+          <p style="color:#C8D6EA">구속 사용률이 임계에 닿으면 여유 있는 계정으로 자동 전환한다. 소멸할 용량을 일에 쓰고, 멈춤을 없앤다.</p>
+        </div>
+        <div class="card reveal" style="background:var(--navy-2);border-color:var(--navy-3)">
+          <span class="tag" style="background:rgba(91,141,240,.18);color:var(--accent-2)">귀속</span>
+          <h4 style="color:#fff">쓴 만큼 돌린다</h4>
+          <p style="color:#C8D6EA">사용량 원장을 일 단위로 롤업해 구독료를 실사용에 배분한다. 근거가 추정이 아니라 데이터다.</p>
+        </div>
+      </div>
+      <p class="subline reveal" style="margin-top:1.8rem;max-width:52em">계정 운영 자동화는 이 셋을 하려면 필연적으로 따라오는 결과다. 배정과 회수, 하트비트와 경보는 목적이 아니라 <b style="color:#fff">실측과 라우팅을 신뢰할 수 있게 만드는 장치</b>다.</p>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md 1, AMX-DESIGN.md 5.2~5.7</span><span class="pg"><b>06</b> / 16</span></div>
+  </section>
+
+  <!-- 7 · COMPONENTS + CHAIN -->
+  <section class="slide" data-title="구성요소와 프로세스 체인">
+    <div class="eyebrow">Architecture · 구성요소</div>
+    <h2 class="atitle">다섯 구성요소가 <span class="hl">배정에서 회수까지</span> 한 체인을 나눠 맡는다</h2>
+    <div class="body">
+      <div class="cols c5 reveal" style="margin-bottom:1.5rem">
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">콘솔</span><h4>ams-web</h4><p>관리자 웹 화면. 등록·배정·상태·경보·정책을 다룬다.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">중앙 두뇌</span><h4>ams-server</h4><p>장부·명령·보고 대조를 담당하는 관제실.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">서버 상주</span><h4>ama-agent</h4><p>명령 실행·30초 하트비트·5분 사용량 보고.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">전환기</span><h4>tsamx</h4><p>한 서버 안에서 계정을 갈아끼우는 스위치.</p></div>
+        <div class="card" style="padding:1rem 1.05rem"><span class="tag">계약</span><h4>contracts</h4><p>세 언어 구성요소가 지키는 통신 규격(proto·OpenAPI).</p></div>
+      </div>
+      <div class="chain" id="chain7">
+        <div class="step"><div class="sn">STEP 1 · 배정</div><h5>콘솔에서 계정을 서버에 지정</h5><p>장부에 배정을 기록한다</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">STEP 2 · 하달</div><h5>자격증명 암호화 전달</h5><p>에이전트가 받아 tsamx에 등록</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">STEP 3 · 전환</div><h5>구속 사용률 95%에서 교체</h5><p>여유 있는 계정으로 넘기고 보고</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">STEP 4 · 회수</div><h5>완전 분리·재배정 대기</h5><p>purge 후 중앙이 대조·정착</p></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md 2, AMX-DESIGN.md 5.1·5.2</span><span class="pg"><b>07</b> / 16</span></div>
+  </section>
+
+  <!-- 8 · SERVICE 1 -->
+  <section class="slide" data-title="서비스① 배정·회수와 배정 제외">
+    <div class="eyebrow">Service 1 · 배정·회수</div>
+    <h2 class="atitle">회수는 <span class="hl">완전 분리</span>, 실패해도 스스로 낫는다. 그리고 <span class="hl">섞이면 안 되는 계정</span>은 아예 막는다</h2>
+    <div class="body">
+      <div class="cols c2">
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>회수는 늘 purge다.</b> provider와 무관하게 해당 서버에서 완전히 떼어내고 이력은 detached 배정 행과 이벤트로만 남긴다.</li>
+            <li><b>자격증명 역동기화.</b> 서버에서 회전된 자격증명을 중앙이 최신화한다. 그래야 다른 서버로 옮길 때 죽은 정보를 넘기지 않는다.</li>
+            <li><b>배정 제외(신규).</b> 사람이 개인 프로필에서 직접 쓰는 계정은 표시해두면 신규 배정이 거부된다. 같은 계정을 두 곳에서 쓰면 토큰 회전이 맞부딪쳐 양쪽이 깨지기 때문이다.</li>
+          </ul>
+        </div>
+        <div class="card reveal" style="background:var(--paper-2)">
+          <span class="tag">회수 실패 자가치유</span>
+          <div class="bars" style="margin-top:.8rem">
+            <div class="brow"><span class="bl">자동 재recall</span><div class="btrack"><div class="bfill" data-w="50" data-txt="상한 3회"></div></div></div>
+            <div class="brow"><span class="bl">수동 재요청</span><div class="btrack"><div class="bfill gray" data-w="50" data-txt="상한 3회"></div></div></div>
+            <div class="brow"><span class="bl">총 예산</span><div class="btrack"><div class="bfill" data-w="100" data-txt="6회 · 성공 시 경보 자동 해소"></div></div></div>
+          </div>
+          <p class="exlab" style="margin-top:.9rem">두 상한이 모두 소진되면 자동 회복을 멈추고 <b style="color:var(--danger)">recall_failed</b> 경보만 남긴다. 마지막 탈출구는 global-admin의 force recall이다.</p>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 5.2·5.7, O2 결정, 배정 제외(PR 114·118)</span><span class="pg"><b>08</b> / 16</span></div>
+  </section>
+
+  <!-- 9 · SERVICE 2 -->
+  <section class="slide" data-title="서비스② 자동 전환">
+    <div class="eyebrow">Service 2 · 자동 전환</div>
+    <h2 class="atitle">구속 사용률 <span class="hl">95%</span>에서 넘긴다. 소멸할 용량을 일로 바꾸는 지점이다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <div class="kpi" style="max-width:none;margin-bottom:1.1rem">
+            <div><span class="num" data-count="95" data-suffix="%"></span></div>
+            <div class="lab">자동 전환 임계값. 5시간과 7일 창의 최댓값이 이 선에 닿으면 후보를 랭킹해 교체한다.</div>
+          </div>
+          <ul class="plist">
+            <li><b>중앙 정책 하달.</b> threshold, strategy, cooldown, hysteresis 네 축을 세션마다 다시 못 박는다.</li>
+            <li><b>안정화 장치.</b> 히스테리시스가 임계선 진동을, 쿨다운이 잦은 전환을 누르고 실패한 계정은 격리한다.</li>
+            <li><b>전 계정 소진</b> 감지 시 크리티컬 이벤트로 즉시 통지한다. 라우팅으로 더는 메울 수 없다는 신호다.</li>
+          </ul>
+        </div>
+        <div class="reveal">
+          <div class="card"><span class="tag">전환 판정 흐름</span>
+            <div class="chain" style="flex-direction:column;gap:0;margin-top:.6rem" id="chain9">
+              <div class="step"><div class="sn">1</div><h5>구속 사용률 95% 도달</h5><p>5시간·7일 창의 최댓값 기준</p></div>
+              <div class="arrow" style="transform:rotate(90deg)">→</div>
+              <div class="step"><div class="sn">2</div><h5>후보 랭킹</h5><p>남은 창이 넉넉한 계정을 고른다</p></div>
+              <div class="arrow" style="transform:rotate(90deg)">→</div>
+              <div class="step"><div class="sn">3</div><h5>전환 후 즉시 보고</h5><p>switch_event로 중앙 통지</p></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 2.2·5.3, D10 임계치</span><span class="pg"><b>09</b> / 16</span></div>
+  </section>
+
+  <!-- 10 · SERVICE 3 -->
+  <section class="slide" data-title="서비스③ 실시간 관제와 경보 14종">
+    <div class="eyebrow">Service 3 · 실시간 관제</div>
+    <h2 class="atitle">경보 <span class="hl">14종</span>. 실측과 라우팅을 믿을 수 있게 만드는 장치다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:start">
+        <div class="reveal">
+          <ul class="plist" style="margin-bottom:1.1rem">
+            <li><b>상황판.</b> 콘솔이 폴링해 서버·계정·배정 상태를 비춘다. 30초 하트비트가 끊기면 서버는 offline으로 넘어간다.</li>
+            <li><b>자가복원 경보.</b> 이벤트가 유실돼도 보고 재조회로 경보를 다시 세운다.</li>
+            <li><b>조치까지 잇는다(신규).</b> 경보 표에 대상 계정을 띄우고, 종류마다 사유와 다음 행동을 한글로 보여준다. 어느 계정인지 모르면 경보는 조치로 이어지지 않는다.</li>
+          </ul>
+          <p class="subline">계정이 다른 서버로 옮겨가거나 삭제되면 옛 경보를 닫는다. 죽은 행이 쌓이면 목록 자체를 믿지 않게 된다.</p>
+        </div>
+        <div class="reveal">
+          <div class="card"><span class="tag">경보 로스터 14종</span>
+            <div class="chips" style="margin-top:.7rem">
+              <span class="chip s">all_exhausted</span><span class="chip s">server_offline</span>
+              <span class="chip s">self_update_failed</span><span class="chip a">drift</span>
+              <span class="chip a">quarantine</span><span class="chip a">recall_failed</span>
+              <span class="chip a">command_send_failed</span><span class="chip a">billing_watermark_future</span>
+              <span class="chip l">langfuse_usage_spike</span><span class="chip l">langfuse_stale</span>
+              <span class="chip l">langfuse_latency</span><span class="chip">alert_webhook_dropped</span>
+              <span class="chip s">dangerous_command</span>
+              <span class="chip new">credential_unusable</span>
+            </div>
+            <p class="exlab" style="margin-top:.9rem">마지막 하나가 이번에 늘었다. 자격증명이 토큰 없는 껍데기가 된 것을 <b style="color:var(--ink)">사고 발생 시점에</b> 알린다. 이전에는 계정이 못 쓰게 된 뒤 격리 경보로만 뒤늦게 드러났다.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 5.6~5.6.3, 경보 로스터 14종(PR 121·122·123)</span><span class="pg"><b>10</b> / 16</span></div>
+  </section>
+
+  <!-- 11 · SERVICE 4 -->
+  <section class="slide" data-title="서비스④ 사용량 실측과 비용 귀속">
+    <div class="eyebrow">Service 4 · 사용량·비용</div>
+    <h2 class="atitle">토큰을 종류별로 실측해 과금 근거를 <span class="hl">추정이 아닌 원장</span>으로 남긴다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>종류별 실측.</b> 러너 세션 훅이 보낸 기록을 중앙이 폴링해 다섯 종류를 각 컬럼에 쌓는다. 합산 지표의 오표시를 갈라낸 결과다.</li>
+            <li><b>단위를 붙였다(신규).</b> 토큰은 자릿수가 24에서 수십억까지 벌어져 K와 M으로 압축하고, 호출 수에는 회를 붙였다. 압축이 가린 정확한 값은 툴팁에 남긴다.</li>
+            <li><b>영구 보존.</b> 일 단위 롤업은 삭제 정책을 타지 않는다. 비용 배분의 입력이라 영구히 남긴다. 원문 스냅샷은 90일이다.</li>
+          </ul>
+        </div>
+        <div class="card reveal" style="background:var(--paper-2)">
+          <span class="tag">콘솔 표기 (실제 화면)</span>
+          <div class="bars" style="margin-top:.9rem">
+            <div class="brow"><span class="bl">입력</span><div class="btrack"><div class="bfill" data-w="8" data-txt="24"></div></div></div>
+            <div class="brow"><span class="bl">캐시 읽기</span><div class="btrack"><div class="bfill gray" data-w="91" data-txt="557.7K"></div></div></div>
+            <div class="brow"><span class="bl">캐시 쓰기</span><div class="btrack"><div class="bfill gray" data-w="12" data-txt="57.3K"></div></div></div>
+            <div class="brow"><span class="bl">총 토큰</span><div class="btrack"><div class="bfill warm" data-w="100" data-txt="615.0K"></div></div></div>
+            <div class="brow"><span class="bl">호출</span><div class="btrack"><div class="bfill" data-w="24" data-txt="50회"></div></div></div>
+          </div>
+          <p class="exlab" style="margin-top:.9rem">캐시 생성을 캐시 쓰기로 바꿔 읽기와 짝을 맞췄다. 방향이 드러나야 캐시가 비용을 아끼는지 늘리는지 읽을 수 있다.</p>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 5.6.1, 사용량 단위 표기(PR 117)</span><span class="pg"><b>11</b> / 16</span></div>
+  </section>
+
+  <!-- 12 · SERVICE 5 -->
+  <section class="slide" data-title="서비스⑤ 보안·감사">
+    <div class="eyebrow">Service 5 · 보안·감사</div>
+    <h2 class="atitle">암호 채널과 <span class="hl">서명 명령</span>, 감사 로그로 자동화에 통제선을 함께 깐다</h2>
+    <div class="body">
+      <div class="matrix reveal">
+        <div class="quad"><div class="qn">채널</div><h5>암호화 제어면</h5><p>중앙과 에이전트 사이 gRPC는 TLS와 mTLS, 저장 자격증명은 테넌트 DEK를 KEK로 감싸는 봉투암호화다.</p></div>
+        <div class="quad"><div class="qn">명령</div><h5>서명·멱등 명령</h5><p>모든 명령은 command_id로 멱등하고 수렴 회신으로 확정한다. 드리프트를 감지하면 교정 재하달한다.</p></div>
+        <div class="quad"><div class="qn">감시</div><h5>위험 명령 감지</h5><p>훅이 파괴적 명령을 탐지해 통보한다. 차단은 하지 않고 원문은 마스킹해 해시만 보낸다.</p></div>
+        <div class="quad"><div class="qn">기록</div><h5>관리 감사 로그</h5><p>변경성 REST를 누가 언제 무엇을 바꿨는지 남긴다. 자격증명이 실리는 바디는 저장하지 않는다.</p></div>
+        <span class="axis" style="left:50%;top:-1.6rem;transform:translateX(-50%)">예방  ←→  탐지</span>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 5.5·5.6.3·5.6.4·7, f2-envelope</span><span class="pg"><b>12</b> / 16</span></div>
+  </section>
+
+  <!-- 13 · RECENT HARDENING -->
+  <section class="slide" data-title="최근 강화 · 자격증명 무효화 방어 체인">
+    <div class="eyebrow">Hardening · 최근 강화</div>
+    <h2 class="atitle">한 건의 실사고에서 <span class="hl">네 층의 방어선</span>이 나왔다</h2>
+    <div class="body">
+      <div class="reveal" style="margin-bottom:1.3rem">
+        <p class="lead" style="max-width:56em">같은 계정을 개인 프로필과 관리 대상 서버가 함께 쓰다가 토큰 회전이 맞부딪쳤다. 한쪽 자격증명이 토큰 없는 껍데기가 됐고, 그것이 중앙 보관본까지 덮어썼다. 여기서 나온 조치를 층으로 정리하면 이렇다.</p>
+      </div>
+      <div class="chain" id="chain13">
+        <div class="step"><div class="sn">층 1 · 전파 차단</div><h5>껍데기는 올려보내지 않는다</h5><p>에이전트와 중앙 양편에서 토큰 재료가 없는 세트를 거부한다</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">층 2 · 원인 차단</div><h5>섞일 계정을 아예 막는다</h5><p>배정 제외 표시로 신규 배정을 거부한다</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">층 3 · 조기 탐지</div><h5>사고 시점에 알린다</h5><p>credential_unusable 경보를 열고 복구되면 스스로 닫는다</p></div>
+        <div class="arrow">→</div>
+        <div class="step"><div class="sn">층 4 · 기존 오염 탐지</div><h5>이미 저장된 것을 찾는다</h5><p>전 계정을 복호해 가드와 같은 판정으로 스캔한다</p></div>
+      </div>
+      <p class="subline reveal" style="margin-top:1.4rem">방어선을 넣는 과정에서 새 위험도 함께 드러났다. 메타데이터를 저장하기 시작하니 에이전트가 보낸 값이 처음으로 DB에 닿았고, 저장할 수 없는 문자가 세션을 끊을 수 있었다. 서명은 출처를 증명하지만 내용을 보증하지 않는다는 것을 그때 확인했다.</p>
+    </div>
+    <div class="foot"><span class="src">자료: PR 113·114·116·118·120·121·122·123, 프로젝트 메모리 발견물 26·34</span><span class="pg"><b>13</b> / 16</span></div>
+  </section>
+
+  <!-- 14 · BEFORE / AFTER + KPI -->
+  <section class="slide" data-title="가치 · Before와 After">
+    <div class="eyebrow">Value · 장점</div>
+    <h2 class="atitle">손으로 하던 운영이 <span class="hl">자동·관측 가능·복원 가능</span>으로 바뀐다</h2>
+    <div class="body">
+      <div class="ba reveal" style="margin-bottom:1.4rem">
+        <div class="side before"><h5>Before · 수작업</h5>
+          <ul style="margin:0;padding:0"><li>포화를 사람이 알아채고 갈아끼움</li><li>유휴 계정의 창은 그대로 소멸</li><li>회수 누락으로 죽은 계정 재사용</li><li>합산 지표로 원가 구조 오독</li></ul>
+        </div>
+        <div class="mid">→</div>
+        <div class="side after"><h5>After · AMX</h5>
+          <ul style="margin:0;padding:0"><li>구속 사용률 95%에서 자동 전환</li><li>여유 있는 계정으로 라우팅</li><li>회수 실패 자가치유와 경보 14종</li><li>토큰 5종 실측과 원장 기반 귀속</li></ul>
+        </div>
+      </div>
+      <div class="kpis reveal">
+        <div class="kpi"><div><span class="num" data-count="95" data-suffix="%"></span></div><div class="lab">자동 전환 임계</div></div>
+        <div class="kpi"><div><span class="num" data-count="2" data-suffix="개 창"></span></div><div class="lab">5시간·7일 최댓값</div></div>
+        <div class="kpi"><div><span class="num" data-count="5" data-suffix="종"></span></div><div class="lab">토큰 실측 축</div></div>
+        <div class="kpi"><div><span class="num" data-count="14" data-suffix="종"></span></div><div class="lab">경보 로스터</div></div>
+        <div class="kpi"><div><span class="num" data-count="30" data-suffix="s"></span></div><div class="lab">하트비트 주기</div></div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: AMX-DESIGN.md 5(수치는 설계 문서 근거)</span><span class="pg"><b>14</b> / 16</span></div>
+  </section>
+
+  <!-- 15 · ADOPTION + CODEX -->
+  <section class="slide" data-title="사내 도입과 Codex 제약">
+    <div class="eyebrow">Adoption · 도입과 제약</div>
+    <h2 class="atitle">지금 우리 상황에 그대로 맞는다. <span class="hl">제약은 제약으로</span> 밝힌다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:start">
+        <div class="reveal">
+          <div class="cols" style="grid-template-columns:1fr 1fr;gap:1rem">
+            <div class="card" style="padding:1.05rem 1.1rem"><span class="tag">얻는 것</span><h4>한도 소진 무중단</h4><p>포화 전에 라우팅해 작업이 멈추지 않는다.</p></div>
+            <div class="card" style="padding:1.05rem 1.1rem"><span class="tag">얻는 것</span><h4>계정 현황 단일 화면</h4><p>어느 서버가 어느 계정을 쓰는지 한 곳에서 본다.</p></div>
+            <div class="card" style="padding:1.05rem 1.1rem"><span class="tag">얻는 것</span><h4>과금 근거 확보</h4><p>어느 계정이 얼마 썼는지 데이터로 남는다.</p></div>
+            <div class="card" style="padding:1.05rem 1.1rem"><span class="tag">얻는 것</span><h4>요금 사고 방지</h4><p>교체 순간의 오청구를 래퍼가 막는다.</p></div>
+          </div>
+        </div>
+        <div class="reveal">
+          <div class="card" style="background:var(--paper-2)">
+            <span class="tag" style="color:var(--warn);background:#FBF2E2">Codex의 구조적 제약</span>
+            <ul class="plist" style="margin-top:.5rem">
+              <li>서버 한 대에 계정 하나다. auth.json이 한 장이라 두 번째 배정을 거부한다.</li>
+              <li>서버당 1계정이라 <b>풀 회전이 성립하지 않는다.</b> Claude 수준의 자동 전환은 불가하다.</li>
+              <li>관측 훅이 Claude 전용이라 Codex 토큰 실측은 아직 공백이다.</li>
+            </ul>
+            <p class="exlab" style="margin-top:.9rem">그래서 Codex에서는 토큰노믹스의 라우팅 축이 동작하지 않는다. 배정·회수와 과금 창 방어는 Claude와 동일하게 제공한다. 제약을 성과로 포장하지 않는다.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md 6, DEPLOYMENT-RUNNER.md codex, BACKLOG G44</span><span class="pg"><b>15</b> / 16</span></div>
+  </section>
+
+  <!-- 16 · CLOSE -->
+  <section class="slide dark" data-title="마무리 · 한 줄 요약과 다음 단계">
+    <div class="eyebrow">Close · 마무리</div>
+    <h2 class="atitle" style="color:#fff">코어는 완료됐다. 다음은 <span style="color:var(--accent-2)">파일럿</span>으로 실환경을 통과하는 일이다</h2>
+    <div class="body">
+      <div class="cols c2" style="align-items:center">
+        <div class="reveal">
+          <ul class="plist">
+            <li><b>현재.</b> 전 단계와 안정화를 끝냈다. 최근에는 자격증명 무효화 방어 체인과 경보의 조치 가능성을 보강했다.</li>
+            <li><b>다음 1.</b> 다른 섹션을 끝낸 뒤 파일럿을 돌리고 그 시점에 한꺼번에 병합한다.</li>
+            <li><b>다음 2.</b> Codex 관측 공백은 훅 일반화 결정을 매듭지은 뒤 착수한다.</li>
+            <li><b>다음 3.</b> 상용 서비스화는 사내 내재화를 끝낸 뒤 재개한다.</li>
+          </ul>
+        </div>
+        <div class="reveal">
+          <div class="card" style="background:var(--navy-2);border-color:var(--navy-3)">
+            <span class="tag" style="background:rgba(91,141,240,.18);color:var(--accent-2)">한 줄 요약</span>
+            <p style="color:#DCE6F3;font-size:1rem;line-height:1.7">구독 용량이 <b style="color:#fff">유통기한 있는 흐름</b>이라는 사실에서 출발해, 토큰을 실측하고 포화 전에 라우팅하고 쓴 만큼 귀속시키는 시스템. 계정 운영 자동화는 그 결과다.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span class="src">자료: OVERVIEW.md 6~7, BACKLOG.md, 프로젝트 메모리(파일럿 방침)</span><span class="pg"><b>16</b> / 16</span></div>
+  </section>
+
+</div>
+
+<div id="bar"></div>
+<div class="hintbadge">← → 이동 · G 목차</div>
+<div id="dots"></div>
+<div class="nav">
+  <button id="prev" aria-label="이전">‹</button>
+  <button id="next" aria-label="다음">›</button>
+</div>
+
+<div id="grid">
+  <span class="close">✕ 닫기 (G)</span>
+  <h3>슬라이드 목차</h3>
+  <div class="gwrap" id="gwrap"></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var slides = Array.prototype.slice.call(document.querySelectorAll(".slide"));
+  var total = slides.length;
+  var cur = 0;
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var dots = document.getElementById("dots");
+  var gwrap = document.getElementById("gwrap");
+  slides.forEach(function(s, i){
+    var d = document.createElement("span");
+    d.addEventListener("click", function(){ go(i); });
+    dots.appendChild(d);
+    var g = document.createElement("div");
+    g.className = "gcard";
+    g.innerHTML = '<div class="n">' + String(i + 1).padStart(2, "0") + '</div><div class="t">' +
+                  (s.getAttribute("data-title") || "슬라이드") + '</div>';
+    g.addEventListener("click", function(){ toggleGrid(false); go(i); });
+    gwrap.appendChild(g);
+  });
+  var dotEls = dots.children;
+
+  function stagger(slide){
+    var items = slide.querySelectorAll(".reveal");
+    items.forEach(function(el, i){
+      el.classList.remove("in");
+      if (reduce){ el.classList.add("in"); return; }
+      setTimeout(function(){ el.classList.add("in"); }, 90 + i * 120);
+    });
+  }
+
+  function animateBars(slide){
+    var fills = slide.querySelectorAll(".bfill");
+    fills.forEach(function(f, i){
+      var w = f.getAttribute("data-w") || "0";
+      var txt = f.getAttribute("data-txt") || "";
+      f.style.width = "0";
+      f.textContent = "";
+      var delay = reduce ? 0 : 300 + i * 130;
+      setTimeout(function(){
+        f.style.width = w + "%";
+        f.textContent = txt;
+      }, delay);
+    });
+  }
+
+  function countUp(slide){
+    var nums = slide.querySelectorAll("[data-count]");
+    nums.forEach(function(el, i){
+      var target = parseFloat(el.getAttribute("data-count"));
+      var suffix = el.getAttribute("data-suffix") || "";
+      if (reduce){ el.textContent = target + suffix; return; }
+      var start = null, dur = 900, delay = 200 + i * 120;
+      setTimeout(function(){
+        function frame(ts){
+          if (start === null) start = ts;
+          var p = Math.min((ts - start) / dur, 1);
+          var eased = 1 - Math.pow(1 - p, 3);
+          el.textContent = Math.round(target * eased) + suffix;
+          if (p < 1) requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      }, delay);
+    });
+  }
+
+  function litChain(slide){
+    var steps = slide.querySelectorAll(".step");
+    steps.forEach(function(st){ st.classList.remove("lit"); });
+    if (reduce){ steps.forEach(function(st){ st.classList.add("lit"); }); return; }
+    steps.forEach(function(st, i){
+      setTimeout(function(){ st.classList.add("lit"); }, 500 + i * 420);
+    });
+  }
+
+  function litMatrix(slide){
+    var quads = slide.querySelectorAll(".quad");
+    if (!quads.length) return;
+    var idx = 0;
+    quads.forEach(function(q){ q.classList.remove("hot"); });
+    if (reduce) return;
+    function cycle(){
+      quads.forEach(function(q){ q.classList.remove("hot"); });
+      quads[idx].classList.add("hot");
+      idx = (idx + 1) % quads.length;
+    }
+    cycle();
+    slide._mtimer = setInterval(cycle, 1400);
+  }
+
+  function popChips(slide){
+    var chips = slide.querySelectorAll(".chip");
+    chips.forEach(function(c, i){
+      c.classList.remove("pop");
+      if (reduce){ c.classList.add("pop"); return; }
+      setTimeout(function(){ c.classList.add("pop"); }, 250 + i * 70);
+    });
+  }
+
+  function play(slide){
+    stagger(slide);
+    animateBars(slide);
+    countUp(slide);
+    litChain(slide);
+    litMatrix(slide);
+    popChips(slide);
+  }
+
+  function clearTimers(slide){
+    if (slide._mtimer){ clearInterval(slide._mtimer); slide._mtimer = null; }
+  }
+
+  function go(n){
+    if (n < 0 || n >= total || n === cur) { if (n === cur) return; }
+    if (n < 0) n = 0;
+    if (n >= total) n = total - 1;
+    var prevSlide = slides[cur];
+    clearTimers(prevSlide);
+    prevSlide.classList.remove("active");
+    cur = n;
+    var s = slides[cur];
+    s.classList.add("active");
+    for (var i = 0; i < dotEls.length; i++){
+      dotEls[i].className = (i === cur) ? "on" : "";
+    }
+    document.getElementById("bar").style.width = ((cur + 1) / total * 100) + "%";
+    play(s);
+  }
+
+  function next(){ if (cur < total - 1) go(cur + 1); }
+  function prev(){ if (cur > 0) go(cur - 1); }
+
+  document.getElementById("next").addEventListener("click", next);
+  document.getElementById("prev").addEventListener("click", prev);
+
+  var grid = document.getElementById("grid");
+  function toggleGrid(force){
+    var show = (typeof force === "boolean") ? force : !grid.classList.contains("show");
+    grid.classList.toggle("show", show);
+  }
+  document.querySelector("#grid .close").addEventListener("click", function(){ toggleGrid(false); });
+
+  document.addEventListener("keydown", function(e){
+    if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " "){ e.preventDefault(); next(); }
+    else if (e.key === "ArrowLeft" || e.key === "PageUp"){ e.preventDefault(); prev(); }
+    else if (e.key === "Home"){ go(0); }
+    else if (e.key === "End"){ go(total - 1); }
+    else if (e.key === "g" || e.key === "G"){ toggleGrid(); }
+    else if (e.key === "Escape"){ toggleGrid(false); }
+    else if (/^[0-9]$/.test(e.key)){
+      var n = parseInt(e.key, 10);
+      if (n >= 1 && n <= total) go(n - 1);
+    }
+  });
+
+  document.getElementById("deck").addEventListener("click", function(e){
+    if (e.target.closest("button, a, #dots, .gcard")) return;
+    next();
+  });
+
+  document.getElementById("bar").style.width = (1 / total * 100) + "%";
+  dotEls[0].className = "on";
+  play(slides[0]);
+})();
+</script>

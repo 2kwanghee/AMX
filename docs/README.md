@@ -84,4 +84,8 @@ PROD-GUIDE의 TLS 절로 부족할 때, 인증서를 직접 다루는 사람이 
 - **[presentation/amx-process.html](presentation/amx-process.html)** — 프로세스별 소개 발표 자료(정적
   HTML, 오프라인 단일 파일). 구성요소·주요 서비스 5선·장점·도입 메리트·Codex 제약을 14장 컨설팅
   덱으로 담는다. 발표자가 직접 발표하는 10분 브리핑용이다.
+- **[presentation/amx-tokenomics.html](presentation/amx-tokenomics.html)** — 토큰노믹스 관점의 소개
+  발표 자료(정적 HTML, 오프라인 단일 파일, 16장). 구독 한도가 5시간·7일 롤링 윈도우이고 미사용
+  용량이 소멸한다는 착안에서 출발해, 실측·라우팅·귀속이라는 설계 결론과 각 서비스를 잇는다.
+  `amx-process.html`의 후속 버전이며 최근 강화(자격증명 무효화 방어 체인·경보 14종)까지 반영한다.
 - **cswapGitRepo.txt** — tsamx 원본(claude-swap) 저장소 주소를 적어 둔 한 줄 메모.
