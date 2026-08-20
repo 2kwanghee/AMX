@@ -37,6 +37,12 @@ ama-agent/bin/
 *.key
 credentials*.json
 
+# ── 훅 상태 파일 ─────────────────────────────────────────────
+# 훅은 마지막 실패 1줄만 자기 옆 상태 파일에 남긴다(기본 경로). 저장소 안에서 훅을
+# 실행하면 생기므로 추적 대상이 아니다. danger_hook 도 같은 규약이다.
+deploy/langfuse/.session_usage_hook.state
+deploy/langfuse/.danger_hook.state
+
 # ── 로컬 도구 설정 ───────────────────────────────────────────
 .claude/settings.local.json
 .idea/

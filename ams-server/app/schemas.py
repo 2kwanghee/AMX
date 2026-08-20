@@ -12,9 +12,15 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+)
 from pydantic.alias_generators import to_camel
 
 TenantStatus = Literal["active", "suspended"]
@@ -365,6 +371,117 @@ class DangerCommandIngest(Wire):
 
 class DangerCommandIngestAck(Wire):
     accepted: bool = True
+
+
+# -- Session cost-structure ingest (session_usage_hook.py 발) ------------------
+# Stop 훅이 세션 트랜스크립트의 ``message.usage``만 모델별로 집계해 보낸다. 프롬프트·
+# 응답·툴 입출력 원문은 어떤 필드에도 담기지 않는다 — 이 스키마에는 원문을 담을 수 있는
+# 자유 텍스트 필드가 세션 id·모델명·계정 이메일·호스트·cwd뿐이고 모두 길이 상한이 있다.
+# danger 수신과 같은 무인 경로(정적 토큰, TenantScope 아님).
+
+# 카운트 맵({티어: 횟수}, {stop_reason: 횟수})의 상한. 무자격 도달 가능 경로라 키 개수·
+# 키 길이·값 범위를 모두 묶는다 — 상한 없는 dict는 JSONB에 임의 문자열을 적재하는 통로다.
+_COUNT_MAP_MAX_KEYS = 20
+# 실측 키는 stop_sequence(13자)가 최장이다. 훅도 같은 상한에서 초과분을 하나의 버킷으로
+# 접으므로(session_usage_hook._MAX_COUNT_KEY_CHARS), 두 쪽 상한이 어긋나 정상 보고가
+# 422가 되는 일은 없다.
+_COUNT_MAP_MAX_KEY_LEN = 32
+# 값 상한은 토큰 필드(_Count)와 같다. 상한이 없으면 {"end_turn": 10**40} 이 그대로 JSONB에
+# 들어가고, 콘솔이 클라이언트에서 합산하므로 JS 정수 정밀도가 무너진다.
+_COUNT_MAP_MAX_VALUE = 2**53
+
+
+def _check_count_map(v: dict[str, int]) -> dict[str, int]:
+    if len(v) > _COUNT_MAP_MAX_KEYS:
+        raise ValueError(f"at most {_COUNT_MAP_MAX_KEYS} keys")
+    for key, count in v.items():
+        if not key or len(key) > _COUNT_MAP_MAX_KEY_LEN:
+            raise ValueError(f"key length must be 1..{_COUNT_MAP_MAX_KEY_LEN}")
+        if count < 0 or count > _COUNT_MAP_MAX_VALUE:
+            raise ValueError(f"counts must be 0..{_COUNT_MAP_MAX_VALUE}")
+    return v
+
+
+CountMap = Annotated[dict[str, int], AfterValidator(_check_count_map)]
+# 토큰 카운터 공통 제약: 음수 없음, 상한은 int64 안(비정상 큰 값은 422로 거른다).
+_Count = Annotated[int, Field(ge=0, le=2**53)]
+
+
+class SessionUsageModelStat(Wire):
+    """한 세션 안에서 **모델 하나**가 쓴 비용 구조. 세션은 모델을 섞는다(주 모델 + 서브에이전트)."""
+
+    model: str = Field(min_length=1, max_length=200)
+    input_tokens: _Count = 0
+    output_tokens: _Count = 0
+    cache_read_tokens: _Count = 0
+    # 이 둘이 이 경로의 존재 이유다 — 1시간/5분 캐시 쓰기는 가격이 다르다.
+    cache_create_1h_tokens: _Count = 0
+    cache_create_5m_tokens: _Count = 0
+    # output_tokens의 부분집합(추가 항목이 아니다).
+    thinking_tokens: _Count = 0
+    web_search_requests: _Count = 0
+    web_fetch_requests: _Count = 0
+    # provider message id로 중복 제거한 assistant 메시지 수(트랜스크립트는 한 응답을
+    # content 블록마다 한 줄씩 반복해 적으므로 줄 수를 그대로 쓰면 이중 계산된다).
+    message_count: _Count = 0
+    service_tier_counts: CountMap = Field(default_factory=dict)
+    stop_reason_counts: CountMap = Field(default_factory=dict)
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class SessionUsageIngest(Wire):
+    session_id: str = Field(min_length=1, max_length=200)
+    # tsamx가 보고한 활성 계정 이메일. 훅 조회가 실패하면 없이 온다 — 그래도 세션
+    # 단위 데이터는 유효하므로 서버는 account_id를 NULL로 두고 받아들인다.
+    account_email: str | None = Field(default=None, max_length=320)
+    # hostname·cwd는 받되 **저장하지 않는다**: 수집 대상은 비용 구조 축뿐이라
+    # session_usage에 대응 컬럼이 없다. 훅이 이미 보내는 값이라 거부하면 422가 되므로
+    # 받아서 무시하고, 길이 상한만 걸어 둔다(나중에 컬럼이 필요해지면 스키마 변경 없이
+    # 마이그레이션만 추가하면 된다).
+    hostname: str | None = Field(default=None, max_length=253)
+    cwd: str | None = Field(default=None, max_length=1024)
+    # 훅이 읽기 상한(줄 수·바이트·레코드당 iterations)에 걸려 일부를 버렸으면 True.
+    # 세션 단위 사실이라 그 세션의 모든 모델 행에 같은 값이 들어간다.
+    truncated: bool = False
+    # 한 세션의 모델 수는 실측 3~5개 수준이다. 상한은 폭주 방지용.
+    models: list[SessionUsageModelStat] = Field(min_length=1, max_length=50)
+
+
+class SessionUsageIngestAck(Wire):
+    accepted: bool = True
+    # 페이로드에서 upsert된 (session, model) 행 수.
+    rows: int = 0
+    # 이메일이 이 테넌트의 계정과 매칭됐는지. 훅은 쓰지 않지만 운영자가 귀속 실패를
+    # 눈으로 확인할 수 있게 돌려준다(이메일 자체는 되돌려주지 않는다).
+    account_resolved: bool = False
+
+
+class SessionUsageRow(Wire):
+    session_id: str
+    model: str
+    account_email: str | None = None
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_create_1h_tokens: int
+    cache_create_5m_tokens: int
+    thinking_tokens: int
+    web_search_requests: int
+    web_fetch_requests: int
+    message_count: int
+    service_tier_counts: dict[str, int]
+    stop_reason_counts: dict[str, int]
+    # 부분 집계 표시(훅이 읽기 상한에 걸린 세션). 콘솔이 그 행에 표시한다.
+    truncated: bool = False
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class SessionUsageResponse(Wire):
+    rows: list[SessionUsageRow]
+    # 가장 최근 보고 시각(행 없으면 null) — 콘솔이 "아직 수집 없음"을 구분하는 신호.
+    last_reported_at: datetime | None = None
 
 
 class EventPage(Wire):

@@ -398,6 +398,41 @@ export interface LangfuseUsage {
   uiUrl?: string | null;
 }
 
+// -- 세션 실측 비용구조 (Stop 훅 수집) ----------------------------------------
+// GET /tenants/{id}/usage/sessions?days=N. Langfuse 집계(위)가 합쳐서 보여주는
+// 캐시 쓰기를 세션·모델 단위로 쪼갠 값이다. 1시간 캐시와 5분 캐시는 가격이 다른데
+// Langfuse의 usageByType은 둘을 합쳐 보고하므로, 이 경로만 구분을 보존한다.
+// 필드 이름의 1H/5M 대문자는 서버 스키마의 camelCase 별칭 생성 결과 그대로다.
+export interface SessionUsageRow {
+  sessionId: string;
+  model: string;
+  accountEmail?: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreate1HTokens: number;
+  cacheCreate5MTokens: number;
+  // 출력 토큰의 부분집합(더하는 값이 아니다).
+  thinkingTokens: number;
+  webSearchRequests: number;
+  webFetchRequests: number;
+  messageCount: number;
+  // {요금 티어: 메시지 수}, {stop_reason: 메시지 수}. 값이 늘어도 타입은 그대로다.
+  serviceTierCounts: Record<string, number>;
+  stopReasonCounts: Record<string, number>;
+  // 훅이 읽기 상한(줄 수·바이트·iterations)에 걸려 일부를 버린 세션이면 true.
+  // 부분 집계이므로 합계를 그대로 신뢰하면 안 된다.
+  truncated: boolean;
+  startedAt?: string | null;
+  endedAt?: string | null;
+}
+
+export interface SessionUsage {
+  rows: SessionUsageRow[];
+  // 훅이 마지막으로 보고한 시각. null이면 아직 수집이 없다(오류가 아니다).
+  lastReportedAt?: string | null;
+}
+
 // -- 감사 로그 (관리 API 감사 추적) ------------------------------------------
 // GET /tenants/{id}/audit-logs?from&to&limit&pageToken. 관리자가 콘솔·API로
 // 수행한 변경 연산의 추적 기록이다. from/to는 ISO 8601(생략 시 서버 기본 범위).

@@ -32,6 +32,7 @@ const ALLOWLIST: RegExp[] = [
   ),
   new RegExp(`^tenants/${ID}/usage/cost$`),
   new RegExp(`^tenants/${ID}/usage/langfuse$`),
+  new RegExp(`^tenants/${ID}/usage/sessions$`),
   new RegExp(`^tenants/${ID}/alerts$`),
   new RegExp(`^tenants/${ID}/alerts/${ID}:ack$`),
   new RegExp(`^tenants/${ID}/audit-logs$`),

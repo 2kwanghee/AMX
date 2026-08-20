@@ -143,6 +143,20 @@ class Settings:
     danger_ingest_token: str | None = None
     danger_tenant_id: str | None = None
     danger_rate_limit_per_min: int = 120
+    # 세션 비용구조 수신(session_usage_hook.py → POST /api/v1/ingest/session-usage).
+    # danger 수신과 같은 무인 경로 규약(정적 토큰, TenantScope 아님, 미설정 시 404)이나
+    # **토큰은 공유하지 않는다**: 위험명령 통보는 critical 경보를 여는 쓰기이고 이쪽은
+    # 진단 집계 upsert라, 한 호스트에 세션 훅만 무장시킬 수 있어야 한다. 귀속 테넌트는
+    # `session_tenant_id`, 없으면 `langfuse_tenant_id`로 폴백한다(danger와 같은 폴백
+    # 모양이지만 danger 설정을 경유하지 않는다 — 두 경로는 서로 독립이다).
+    session_ingest_token: str | None = None
+    session_tenant_id: str | None = None
+    session_rate_limit_per_min: int = 60
+    # session_usage 보존 창(일). 이 테이블은 진단 입력이라 어떤 적분도 이 위에서
+    # 돌지 않는다 — usage_snapshots의 정산 경계 가드가 필요 없는 단순 age purge다.
+    # 하위 소비자가 없으므로 audit처럼 opt-in(0=영구)으로 두지 않고 기본 90일로
+    # 켜 둔다. 0 이하면 purge 비활성.
+    session_usage_retention_days: int = 90
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -173,6 +187,17 @@ class Settings:
         # 토큰과 귀속 테넌트가 **둘 다** 있어야 활성. 어느 하나라도 없으면 경보를 어디에
         # 매달지 알 수 없으므로 엔드포인트를 404로 비활성한다.
         return bool(self.danger_ingest_token and self.danger_tenant)
+
+    @property
+    def session_tenant(self) -> str | None:
+        """세션 사용량을 귀속시킬 테넌트. 전용 설정이 우선, 없으면 langfuse 테넌트."""
+        return self.session_tenant_id or self.langfuse_tenant_id
+
+    @property
+    def session_ingest_enabled(self) -> bool:
+        # 토큰과 귀속 테넌트가 **둘 다** 있어야 활성. 어느 하나라도 없으면 행을 어느
+        # 테넌트에 넣을지 알 수 없으므로 엔드포인트를 404로 비활성한다.
+        return bool(self.session_ingest_token and self.session_tenant)
 
 
 def _pubkey_from_seed(seed_b64: str) -> str:
@@ -323,6 +348,14 @@ def load_settings() -> Settings:
         danger_tenant_id=os.environ.get("AMX_DANGER_TENANT_ID", "").strip() or None,
         danger_rate_limit_per_min=int(
             os.environ.get("AMX_DANGER_RATE_LIMIT_PER_MIN", "120")
+        ),
+        session_ingest_token=os.environ.get("AMX_SESSION_INGEST_TOKEN", "").strip() or None,
+        session_tenant_id=os.environ.get("AMX_SESSION_TENANT_ID", "").strip() or None,
+        session_rate_limit_per_min=int(
+            os.environ.get("AMX_SESSION_RATE_LIMIT_PER_MIN", "60")
+        ),
+        session_usage_retention_days=int(
+            os.environ.get("AMX_SESSION_USAGE_RETENTION_DAYS", "90")
         ),
     )
 

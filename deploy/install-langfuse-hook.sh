@@ -5,9 +5,11 @@
 #
 # What it does
 # ------------
-#   1. Copies the vendored hook to  <CONFIG_DIR>/hooks/langfuse_hook.py
-#   2. Merges a Stop hook entry into <CONFIG_DIR>/settings.json (other keys and
-#      hooks preserved; re-running with the same command is a no-op).
+#   1. Copies the vendored hook to  <CONFIG_DIR>/hooks/langfuse_hook.py and the
+#      self-authored session cost-structure hook to session_usage_hook.py
+#   2. Merges TWO Stop hook entries into <CONFIG_DIR>/settings.json — the langfuse
+#      tracer and the session-usage reporter coexist on the same event (other keys
+#      and hooks preserved; re-running with the same commands is a no-op).
 #   3. Writes <CONFIG_DIR>/amx-langfuse.env (mode 0600) with the credentials and
 #      TRACE_TO_LANGFUSE=true. The amx-claude wrapper sources this file and, only
 #      then, exports the keys — so ONLY sessions launched through the wrapper are
@@ -28,7 +30,7 @@
 #   sh deploy/install-langfuse-hook.sh --with-danger-hook \
 #     --base-url http://host:3100 --public-key pk-... --secret-key sk-...
 #
-#   sh deploy/install-langfuse-hook.sh --uninstall   # remove env + Stop + danger entries
+#   sh deploy/install-langfuse-hook.sh --uninstall   # remove env + both Stop + danger entries
 #
 # CONFIG_DIR defaults to $CLAUDE_CONFIG_DIR or ~/.claude (must match the wrapper
 # and the AMA service account — see docs/DEPLOYMENT-RUNNER.md).
@@ -45,6 +47,7 @@ sq() { printf "%s" "$1" | sed "s/'/'\\\\''/g"; }
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd) || die "cannot resolve script dir"
 SRC_HOOK="$SCRIPT_DIR/langfuse/langfuse_hook.py"
 SRC_DANGER_HOOK="$SCRIPT_DIR/langfuse/danger_hook.py"
+SRC_SESSION_HOOK="$SCRIPT_DIR/langfuse/session_usage_hook.py"
 
 CONFIG_DIR=""   # resolved after arg parsing (see below)
 
@@ -62,7 +65,8 @@ while [ $# -gt 0 ]; do
 		--public-key) shift; PUBLIC_KEY="${1:-}" ;;
 		--secret-key) shift; SECRET_KEY="${1:-}" ;;
 		--config-dir) shift; CONFIG_DIR="${1:-}" ;;
-		-h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+		# 헤더 주석 블록만 출력한다(범위는 위 헤더 길이에 맞춘다).
+		-h|--help) sed -n '2,36p' "$0"; exit 0 ;;
 		*) die "unknown argument: $1 (see --help)" ;;
 	esac
 	shift
@@ -87,6 +91,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required (for settings.jso
 HOOKS_DIR="$CONFIG_DIR/hooks"
 DEST_HOOK="$HOOKS_DIR/langfuse_hook.py"
 DEST_DANGER_HOOK="$HOOKS_DIR/danger_hook.py"
+DEST_SESSION_HOOK="$HOOKS_DIR/session_usage_hook.py"
 SETTINGS="$CONFIG_DIR/settings.json"
 ENV_FILE="$CONFIG_DIR/amx-langfuse.env"
 # The command claude runs at Stop. `uv run --script` reads the inline
@@ -96,6 +101,13 @@ HOOK_CMD="uv run --script $DEST_HOOK"
 # plain python3 — no uv, no checksum (self-authored, not vendored). It fires on
 # PreToolUse with a "Bash" matcher.
 DANGER_HOOK_CMD="python3 $DEST_DANGER_HOOK"
+# The session cost-structure hook is also stdlib-only, so it runs under plain
+# python3 as well. It fires on Stop, alongside the langfuse tracer: settings.json
+# keeps one entry per exact command string, so both run on the same event. It is
+# installed unconditionally because it stays inert until AMX_SESSION_INGEST_URL and
+# AMX_SESSION_INGEST_TOKEN are set, and Stop fires once per session (unlike the
+# danger hook's PreToolUse, which sits on every Bash call and is therefore opt-in).
+SESSION_HOOK_CMD="python3 $DEST_SESSION_HOOK"
 
 # ---- settings.json merge/removal (idempotent, preserves other keys) ---------
 # python reads the settings file BY PATH (never via stdin — stdin carries the
@@ -186,6 +198,7 @@ PY
 if [ "$UNINSTALL" = 1 ]; then
 	[ -d "$CONFIG_DIR" ] || die "config dir not found: $CONFIG_DIR"
 	apply_settings uninstall Stop "" "$HOOK_CMD"
+	apply_settings uninstall Stop "" "$SESSION_HOOK_CMD"
 	# Always remove the danger PreToolUse entry too (regardless of the flag), so
 	# a single --uninstall fully reverses either install shape.
 	apply_settings uninstall PreToolUse Bash "$DANGER_HOOK_CMD"
@@ -194,7 +207,7 @@ if [ "$UNINSTALL" = 1 ]; then
 	else
 		info "no env file to remove ($ENV_FILE)"
 	fi
-	info "left hook scripts in place: $DEST_HOOK, $DEST_DANGER_HOOK (safe; inert without env/config)"
+	info "left hook scripts in place: $DEST_HOOK, $DEST_DANGER_HOOK, $DEST_SESSION_HOOK (safe; inert without env/config)"
 	info "uninstall complete"
 	exit 0
 fi
@@ -210,25 +223,32 @@ fi
 # hashing, so we do not depend on sha256sum(1) being present.
 SUMS_FILE="$SCRIPT_DIR/langfuse/SHA256SUMS"
 [ -f "$SUMS_FILE" ] || die "checksum file not found: $SUMS_FILE"
-python3 - "$SRC_HOOK" "$SUMS_FILE" <<'PY' || die "hook checksum verification failed — refusing to install"
+# Args: <file> <recorded-name>. Verifies one SHA256SUMS entry. python3 (already
+# required) does the hashing, so we do not depend on sha256sum(1) being present.
+verify_sum() {
+	python3 - "$1" "$SUMS_FILE" "$2" <<'SUMPY' || die "checksum verification failed for $2 - refusing to install"
 import hashlib, sys
-src, sums = sys.argv[1], sys.argv[2]
+src, sums, name = sys.argv[1], sys.argv[2], sys.argv[3]
 want = ""
 for line in open(sums):
     line = line.strip()
     if not line or line.startswith("#"):
         continue
-    h, _, name = line.partition("  ")
-    if name.strip() == "langfuse_hook.py":
+    h, _, entry = line.partition("  ")
+    if entry.strip() == name:
         want = h.strip().lower()
         break
 if not want:
-    sys.stderr.write("no langfuse_hook.py entry in SHA256SUMS\n"); sys.exit(1)
+    sys.stderr.write("no %s entry in SHA256SUMS\n" % name); sys.exit(1)
 got = hashlib.sha256(open(src, "rb").read()).hexdigest()
 if got != want:
-    sys.stderr.write("checksum mismatch: expected %s got %s\n" % (want, got)); sys.exit(1)
-PY
-info "verified hook checksum"
+    sys.stderr.write("checksum mismatch for %s: expected %s got %s\n" % (name, want, got)); sys.exit(1)
+SUMPY
+}
+verify_sum "$SRC_HOOK" langfuse_hook.py
+[ -f "$SRC_SESSION_HOOK" ] || die "session usage hook not found: $SRC_SESSION_HOOK"
+verify_sum "$SRC_SESSION_HOOK" session_usage_hook.py
+info "verified hook checksums"
 
 # 'uv' is mandatory: the Stop hook runs via `uv run --script`, which reads the
 # hook's inline dependency metadata and installs langfuse into an ephemeral env.
@@ -239,6 +259,13 @@ cp "$SRC_HOOK" "$DEST_HOOK" || die "cannot copy hook to $DEST_HOOK"
 info "installed hook: $DEST_HOOK"
 
 apply_settings install Stop "" "$HOOK_CMD"
+
+# ---- session cost-structure hook (always installed, inert without env) -------
+# Self-authored, stdlib-only. Reads only message.usage out of the session
+# transcript and posts model-keyed token aggregates; never prompt/response text.
+cp "$SRC_SESSION_HOOK" "$DEST_SESSION_HOOK" || die "cannot copy session hook to $DEST_SESSION_HOOK"
+info "installed session usage hook: $DEST_SESSION_HOOK"
+apply_settings install Stop "" "$SESSION_HOOK_CMD"
 
 # ---- danger-command detection hook (opt-in) ---------------------------------
 # Self-authored, stdlib-only; copied and wired into PreToolUse. It is inert
@@ -282,6 +309,15 @@ LANGFUSE_SECRET_KEY='$(sq "$SECRET_KEY")'
 # AMX_DANGER_INGEST_TOKEN='<must match AMS settings.danger_ingest_token>'
 # Optional extra regex patterns (one per line, file MUST be mode 0600):
 # CC_DANGER_PATTERNS_FILE=
+#
+# ---- Session cost structure (Stop session_usage_hook.py) ---------------------
+# Set BOTH to arm the session hook; leave either unset and the hook is a no-op.
+# It posts per-model token aggregates (1h/5m cache writes kept apart, thinking
+# tokens, service-tier and stop-reason counts) - never prompt or response text.
+# The token is SEPARATE from the danger one: this path only upserts diagnostic
+# rows, so a host may be armed for it without being able to open alerts.
+# AMX_SESSION_INGEST_URL='http://ams-host:8080/api/v1/ingest/session-usage'
+# AMX_SESSION_INGEST_TOKEN='<must match AMS settings.session_ingest_token>'
 EOF
 chmod 600 "$_tmp" || die "cannot chmod env file"
 mv "$_tmp" "$ENV_FILE" || die "cannot write $ENV_FILE"

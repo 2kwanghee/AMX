@@ -551,7 +551,7 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
   snapshot-retention·watermark-future)에 이어 `services.langfuse_metrics.sweep_langfuse_metrics`를
   같은 30초 틱에 sibling으로 붙인다. 전용 transaction-scope advisory lock **`0x414D580F07`(…07)**
   로 다중 인스턴스 중복 적재를 배제하고, 자체 try/except로 다른 스위퍼와 격리한다.
-- **배경 스위퍼·advisory lock 배정표(현행 전량)**: 위 "여섯 번째·일곱 번째" 서술은 추가 순서를 가리키는 역사적 표현이고, 지금 공유 틱 루프가 도는 스위퍼는 10종이다(락 키 접두 `0x414D580F`, 뒤 한 바이트로 구분). 웹훅 드레인 …08만 공유 루프가 아니라 독립 asyncio 태스크다(§5.6.2).
+- **배경 스위퍼·advisory lock 배정표(현행 전량)**: 위 "여섯 번째·일곱 번째" 서술은 추가 순서를 가리키는 역사적 표현이고, 지금 공유 틱 루프가 도는 스위퍼는 11종이다(락 키 접두 `0x414D580F`, 뒤 한 바이트로 구분). 웹훅 드레인 …08만 공유 루프가 아니라 독립 asyncio 태스크다(§5.6.2).
 
   | 락 | 스위퍼 | 하는 일 |
   |---|---|---|
@@ -566,6 +566,7 @@ Auth)를 주기 폴링해 `langfuse_usage_rollup`(PK `tenant_id, day, dimension,
   | …09 | `langfuse_alerts.sweep_langfuse_alerts` | Langfuse 임계값 경보 3종(§5.6.2) |
   | …0A | `inventory.sweep_assignment_retention` | 보존기간 지난 `detached` 배정 행 배치 삭제(`AMX_ASSIGNMENT_RETENTION_DAYS` 기본 90) |
   | …0B | `audit.sweep_audit_retention` | 감사 로그 배치 삭제(`AMX_AUDIT_RETENTION_DAYS`>0일 때만, §5.6.4) |
+  | …0C | `session_usage.sweep_session_usage_retention` | 보존기간 지난 `session_usage` 행 배치 삭제(`AMX_SESSION_USAGE_RETENTION_DAYS` 기본 90). 이 테이블 위에서 도는 적분이 없어 …05와 달리 정산 경계 가드가 없다 |
 - **폴링 주기 분리**: 30초 틱마다 재폴링하면 외부 API를 과하게 때리므로, 프로세스-로컬 monotonic
   게이트로 `AMX_LANGFUSE_POLL_SECONDS`(기본 300, 최소 60) 미만 간격의 틱은 즉시 return한다.
   인스턴스 간 조율은 …07 락이 담당하므로 게이트는 프로세스 로컬로 충분하다.
