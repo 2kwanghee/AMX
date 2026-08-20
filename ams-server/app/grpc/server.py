@@ -48,6 +48,7 @@ from app.services import (
     langfuse_alerts,
     langfuse_metrics,
     reconcile,
+    session_usage,
     usage_cost,
 )
 
@@ -1561,6 +1562,22 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("audit retention sweep iteration failed", exc_info=False)
+        # Session-usage retention: an eleventh sibling sweep purges session_usage
+        # rows older than AMX_SESSION_USAGE_RETENTION_DAYS. Own advisory lock (…0C)
+        # and isolated try/except keep it independent. Unlike the snapshot purge it
+        # needs no settlement guard — nothing integrates over that table.
+        try:
+            sessions_purged = await asyncio.to_thread(
+                _sweep_session_usage_retention_once, session_factory
+            )
+            if sessions_purged:
+                _logger.info(
+                    "session usage retention sweeper purged %d row(s)", sessions_purged
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("session usage retention sweep iteration failed", exc_info=False)
         # NOTE: 경보 웹훅 드레인은 이 공유 루프에 두지 않는다 — 불량 수신자로 인한 HTTP
         # 지연이 오프라인 탐지·명령 복구를 밀어내지 못하게, 전용 백그라운드 태스크
         # (_alert_webhook_drainer, 자체 주기)로 분리했다. 락 …08은 그대로 유지한다.
@@ -1683,6 +1700,14 @@ def _sweep_audit_retention_once(session_factory: sessionmaker[Session]) -> int:
     # AMX_AUDIT_RETENTION_DAYS > 0 (default keeps the trail forever).
     with session_factory() as db:
         return audit.sweep_audit_retention(db)
+
+
+def _sweep_session_usage_retention_once(session_factory: sessionmaker[Session]) -> int:
+    # session_usage.sweep_session_usage_retention takes its own advisory lock (…0C)
+    # and commits per batch. Purges aged-out session cost-structure rows; a no-op
+    # when AMX_SESSION_USAGE_RETENTION_DAYS <= 0.
+    with session_factory() as db:
+        return session_usage.sweep_session_usage_retention(db)
 
 
 def _sweep_langfuse_alerts_once(session_factory: sessionmaker[Session]) -> int:

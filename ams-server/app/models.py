@@ -636,6 +636,91 @@ class LangfuseUsageRollup(Base):
     )
 
 
+class SessionUsage(Base):
+    """Per-(tenant, session, model) cost-structure aggregate of a Claude Code session.
+
+    Filled by the Stop hook (``deploy/langfuse/session_usage_hook.py``) through
+    ``POST /api/v1/ingest/session-usage``, not by any sweep: the numbers live in the
+    local session transcript and never reach an API AMS could poll. The two cache
+    creation columns are the reason the table exists — 1h and 5m cache writes are
+    priced differently and the Langfuse Metrics API reports them already summed.
+
+    The primary key ``(tenant_id, session_id, model)`` carries the model because one
+    session mixes models (main model plus subagents), and is the idempotency anchor:
+    a repeat report of the same session replaces the totals in place.
+
+    ``account_id`` is nullable with no foreign key (``alerts.account_id`` convention):
+    the hook resolves it from the tsamx active-account email, which can be missing or
+    match no AMS account, and a session with no resolvable account is still a valid
+    observation. Retention is a plain 90-day age purge
+    (``session_usage.sweep_session_usage_retention``) — nothing integrates over this
+    table, so it needs no settlement guard.
+    """
+
+    __tablename__ = "session_usage"
+    __table_args__ = (
+        Index("ix_session_usage_tenant_ended", "tenant_id", "ended_at"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Claude Code session id (transcript filename stem).
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    # message.model as the transcript reports it ("unknown" when absent).
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    input_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    cache_read_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    # cache_creation.ephemeral_1h_input_tokens / ephemeral_5m_input_tokens.
+    cache_create_1h_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    cache_create_5m_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    # output_tokens_details.thinking_tokens — a subset of output_tokens, not an addend.
+    thinking_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    web_search_requests: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    web_fetch_requests: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    # Distinct assistant messages (deduplicated by provider message id).
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # True when the hook hit one of its read bounds and the aggregate is partial.
+    truncated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # {service_tier: messages} and {stop_reason: messages}. JSONB rather than columns
+    # because both value sets are provider-defined and may grow.
+    service_tier_counts: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    stop_reason_counts: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Alert(Base):
     """Operational alerts (design note §4, decision 3).
 

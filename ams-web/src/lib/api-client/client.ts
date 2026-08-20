@@ -22,6 +22,7 @@ import type {
   OauthStartRequest,
   OauthStartResponse,
   SelfUpdateStatus,
+  SessionUsage,
   Server,
   ServerCreate,
   ServerPage,
@@ -143,6 +144,10 @@ export const api = {
       'GET',
       `tenants/${t}/usage/langfuse?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
     ),
+
+  // 세션 실측 비용구조 — days는 1~90(서버가 범위를 검증한다).
+  getSessionUsage: (t: string, days: number) =>
+    bff<SessionUsage>('GET', `tenants/${t}/usage/sessions?days=${days}`),
 
   // Alerts (Track A backend; UI ready)
   listAlerts: (t: string, status?: string) =>

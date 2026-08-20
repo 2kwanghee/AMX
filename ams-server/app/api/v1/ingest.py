@@ -1,8 +1,13 @@
-"""무인 수신 엔드포인트 — 위험명령 통보(P5 경로 d).
+"""무인 수신 엔드포인트 — 위험명령 통보(P5 경로 d)와 세션 비용구조 수집.
 
-``/api/v1/ingest/danger-command`` 하나만 둔다. Claude Code PreToolUse 훅이 Bash
+``/api/v1/ingest/danger-command``: Claude Code PreToolUse 훅이 Bash
 명령의 위험 패턴을 감지했을 때 보내는 마스킹 통보를 받아 ``dangerous_command``
 경보로 open 한다(``services.danger_alerts``).
+
+``/api/v1/ingest/session-usage``: Claude Code Stop 훅이 세션 트랜스크립트의
+``message.usage``를 모델별로 집계해 보내는 비용 구조를 ``session_usage``에 멱등
+upsert 한다(``services.session_usage``). 1시간/5분 캐시 쓰기 분리가 이 경로의 존재
+이유다 — Langfuse Metrics API는 둘을 합쳐 보고해 구분이 사라진다.
 
 이 라우터는 다른 ``/api/v1`` 과 달리 **TenantScope도 admin bearer도 걸지 않는다** —
 호출자가 사람이 아니라 무인 에이전트라서다. 대신 정적 토큰(``X-AMX-Ingest-Token``)
@@ -25,18 +30,25 @@ from app import schemas
 from app.api.deps import DbSession
 from app.config import get_settings
 from app.core.errors import ApiError
-from app.services import danger_alerts
+from app.services import danger_alerts, session_usage as session_usage_svc
 
 _logger = logging.getLogger("ams.ingest")
 
 # 무자격으로도 도달 가능한 경로라, 본문을 읽기 전에 Content-Length로 큰 요청을 값싸게
 # 거른다. 정상 통보는 수백 바이트 수준이므로 64KB면 넉넉하다.
 _MAX_INGEST_BYTES = 64 * 1024
+# 세션 집계는 모델별 리스트라 danger 통보보다 크다. 모델 50개 x 항목이 들어가도
+# 남는 크기로 잡되, 무자격 경로이므로 상한 자체는 유지한다.
+_MAX_SESSION_INGEST_BYTES = 256 * 1024
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
 
-def _reject_oversized(content_length: str | None, actual_len: int | None = None) -> None:
+def _reject_oversized(
+    content_length: str | None,
+    actual_len: int | None = None,
+    limit: int = _MAX_INGEST_BYTES,
+) -> None:
     """Content-Length(또는 실제 바이트 수)가 상한을 넘으면 413. 본문 파싱보다 먼저 부른다."""
     for value in (content_length, actual_len):
         if value is None:
@@ -45,7 +57,7 @@ def _reject_oversized(content_length: str | None, actual_len: int | None = None)
             n = int(value)
         except (ValueError, TypeError):
             continue
-        if n > _MAX_INGEST_BYTES:
+        if n > limit:
             raise ApiError(413, "Payload Too Large", "ingest.too_large")
 
 
@@ -94,3 +106,53 @@ async def ingest_danger_command(
     danger_alerts.record_danger_command(db, tenant_id, body)
     db.commit()
     return schemas.DangerCommandIngestAck(accepted=True)
+
+
+@router.post("/session-usage", response_model=schemas.SessionUsageIngestAck)
+async def ingest_session_usage(
+    request: Request,
+    db: DbSession,
+    x_amx_ingest_token: Annotated[str | None, Header()] = None,
+) -> schemas.SessionUsageIngestAck:
+    """세션 비용구조 1건(모델별 집계)을 받아 ``session_usage``에 upsert 한다.
+
+    형태는 위 danger 핸들러와 같다: 본문 파싱 전 Content-Length 선검사, 정적 토큰
+    상수시간 비교, 미설정 시 404, 전역 레이트 제한, 수동 본문 검증. **토큰은 danger와
+    공유하지 않는다**(config.session_ingest_token) — 진단 집계만 보내는 호스트가 경보를
+    열 수 있어야 할 이유가 없다.
+
+    상한은 danger보다 크다: 페이로드가 모델별 집계 리스트라 수백 바이트가 아니라 수 KB
+    수준이 될 수 있다(모델 50개 상한 x 항목).
+    """
+    _reject_oversized(request.headers.get("content-length"), None, _MAX_SESSION_INGEST_BYTES)
+
+    settings = get_settings()
+    # 토큰·귀속 테넌트가 없으면 엔드포인트 비활성(경로가 없는 것처럼 404).
+    if not settings.session_ingest_enabled:
+        raise ApiError(404, "Not Found", "ingest.disabled")
+    supplied = (x_amx_ingest_token or "").encode("utf-8")
+    expected = (settings.session_ingest_token or "").encode("utf-8")
+    if not secrets.compare_digest(supplied, expected):
+        raise ApiError(401, "Unauthorized", "ingest.invalid_token", "Invalid ingest token.")
+    try:
+        tenant_id = uuid.UUID(settings.session_tenant)
+    except (ValueError, TypeError):
+        _logger.warning("session ingest: attribution tenant is not a valid UUID; disabled")
+        raise ApiError(404, "Not Found", "ingest.disabled")
+    if not session_usage_svc.allow_request(settings.session_rate_limit_per_min):
+        _logger.warning(
+            "session ingest rate limit exceeded (limit=%d/min); dropping report",
+            settings.session_rate_limit_per_min,
+        )
+        raise ApiError(429, "Too Many Requests", "ingest.rate_limited")
+
+    raw = await request.body()
+    _reject_oversized(None, len(raw), _MAX_SESSION_INGEST_BYTES)
+    try:
+        body = schemas.SessionUsageIngest.model_validate_json(raw)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+    rows, resolved = session_usage_svc.record_session_usage(db, tenant_id, body)
+    db.commit()
+    return schemas.SessionUsageIngestAck(accepted=True, rows=rows, account_resolved=resolved)

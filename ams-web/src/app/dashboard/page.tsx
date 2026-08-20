@@ -19,6 +19,7 @@ import { ServersPanel } from '@/components/ServersPanel';
 import { SetupGuidePanel } from '@/components/SetupGuidePanel';
 import { UsageCostPanel } from '@/components/UsageCostPanel';
 import { LangfuseUsagePanel } from '@/components/LangfuseUsagePanel';
+import { SessionUsagePanel } from '@/components/SessionUsagePanel';
 import { AuditLogPanel } from '@/components/AuditLogPanel';
 import { TopologyView } from '@/components/topology/TopologyView';
 import {
@@ -163,6 +164,7 @@ export default function Dashboard() {
           <>
             <UsageCostPanel tenantId={active} onGoAccounts={() => setTab('accounts')} />
             <LangfuseUsagePanel tenantId={active} />
+            <SessionUsagePanel tenantId={active} />
           </>
         )}
         {active && tab === 'audit' && <AuditLogPanel key={active} tenantId={active} />}

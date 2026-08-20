@@ -1,4 +1,4 @@
-"""Usage-cost query endpoint — usage-cost PR3.
+"""Usage-cost / session-usage query endpoints.
 
 One read-only endpoint over ``services.usage_cost.compute_month_cost``. The
 service answers account-first (each account's price spread across the servers
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
 
@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query
 
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, TenantScope
-from app.services import usage_cost
+from app.services import session_usage as session_usage_svc, usage_cost
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["usage"], dependencies=[TenantScope])
 
@@ -35,6 +35,11 @@ _MONTH_PATTERN = r"^[1-9][0-9]{3}-(0[1-9]|1[0-2])$"
 MonthQuery = Annotated[str | None, Query(pattern=_MONTH_PATTERN)]
 
 _PCT_Q = Decimal("0.01")
+
+# 세션 실측 조회의 기본 창(일)과 행 상한. 세션은 하루 수십 건 수준이라 최근 7일이
+# 기본이고, 상한은 응답 크기를 묶기 위한 것이다(초과분은 최근순으로 잘린다).
+_SESSION_DEFAULT_DAYS = 7
+_SESSION_MAX_ROWS = 500
 
 
 def _pct(numerator: Decimal, denominator: Decimal) -> Decimal:
@@ -130,4 +135,47 @@ def get_usage_cost(
             )
             for s in result.subtotals
         ],
+    )
+
+
+@router.get("/usage/sessions", response_model=schemas.SessionUsageResponse)
+def get_session_usage(
+    tenant_id: uuid.UUID,
+    db: DbSession,
+    principal: AdminPrincipal,
+    days: Annotated[int, Query(ge=1, le=90)] = _SESSION_DEFAULT_DAYS,
+    limit: Annotated[int, Query(ge=1, le=_SESSION_MAX_ROWS)] = 200,
+):
+    """세션 실측 비용구조 — 최근 ``days``일의 (세션, 모델) 행을 최근순으로.
+
+    Stop 훅(``deploy/langfuse/session_usage_hook.py``)이 채우는 ``session_usage``의
+    읽기 전용 창이다. 훅을 설치하지 않은 테넌트는 빈 200을 받는다("아직 수집 없음"이
+    오류가 아니라 정상 상태다). 창 기준은 세션의 마지막 assistant 레코드 시각이다.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = session_usage_svc.read_session_usage(db, tenant_id, since=since, limit=limit)
+    return schemas.SessionUsageResponse(
+        rows=[
+            schemas.SessionUsageRow(
+                session_id=r.session_id,
+                model=r.model,
+                account_email=email,
+                input_tokens=r.input_tokens,
+                output_tokens=r.output_tokens,
+                cache_read_tokens=r.cache_read_tokens,
+                cache_create_1h_tokens=r.cache_create_1h_tokens,
+                cache_create_5m_tokens=r.cache_create_5m_tokens,
+                thinking_tokens=r.thinking_tokens,
+                web_search_requests=r.web_search_requests,
+                web_fetch_requests=r.web_fetch_requests,
+                message_count=r.message_count,
+                truncated=r.truncated,
+                service_tier_counts=r.service_tier_counts or {},
+                stop_reason_counts=r.stop_reason_counts or {},
+                started_at=r.started_at,
+                ended_at=r.ended_at,
+            )
+            for r, email in rows
+        ],
+        last_reported_at=session_usage_svc.last_reported_at(db, tenant_id),
     )
