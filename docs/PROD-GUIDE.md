@@ -603,6 +603,34 @@ bash deploy/fullstack-run.sh restart server --lan
   통보는 429로 떨어뜨리고 로그만 남긴다. 프로세스 로컬 카운터라 다중 인스턴스에서는
   인스턴스당 상한이다. 본문은 읽기 전에 Content-Length 64KB로 걸러(초과 413) 값싸게 막는다.
 
+### 9-6. 세션 비용 구조 수집 (선택)
+
+러너의 세션 비용 훅(§9-3 참조, 별도 문서는 DEPLOYMENT-RUNNER.md)이 보내는 모델별
+토큰 집계를 받는 창구다. 훅이 세션 종료 시 `POST /api/v1/ingest/session-usage`로
+보고하면 `session_usage` 테이블에 멱등 upsert 되고, 콘솔 사용량 화면의 세션 패널에
+노출된다. Langfuse `usageByType`이 합쳐 버리는 1시간/5분 캐시 쓰기를 분리해 저장하는
+것이 이 경로의 존재 이유다.
+
+```sh
+cat >> ~/AMX/.amx-dev/dev.env <<'ENV'
+AMX_SESSION_INGEST_TOKEN=<32바이트+ 무작위 토큰, 러너 훅과 동일 값>
+AMX_SESSION_TENANT_ID=<행을 매달 테넌트 UUID; 생략 시 AMX_LANGFUSE_TENANT_ID 사용>
+ENV
+bash deploy/fullstack-run.sh restart server --lan
+```
+
+- 인증 형태는 §9-5와 같다: 정적 토큰(`X-AMX-Ingest-Token`) 하나로 막고, **토큰과 귀속
+  테넌트가 둘 다 있어야** 켜진다. 하나라도 없으면 404, 토큰 불일치는 401이다. 다만
+  토큰은 danger 것과 **별개로 둔다** — 이 경로는 진단 행 upsert만 하므로, 경보를 올릴
+  권한 없이 비용 보고만 하는 호스트를 만들 수 있다.
+- 저장되는 건 모델별 숫자 집계와 식별자(세션 id·계정 이메일·모델명)뿐이고 프롬프트·응답
+  원문은 훅 단계에서부터 실리지 않는다.
+- 폭주 방어: `AMX_SESSION_RATE_LIMIT_PER_MIN`(기본 60) 초과는 429, 본문은 파싱 전에
+  Content-Length 256KB로 걸러 초과분을 413으로 떨어뜨린다. danger와 마찬가지로
+  프로세스 로컬 카운터다.
+- 보존기간: `AMX_SESSION_USAGE_RETENTION_DAYS`(기본 90)를 지난 행은 배경 스윕이 배치로
+  지운다. 0 이하로 두면 스윕이 꺼져 무기한 보존된다.
+
 ---
 
 ## 10. 문제 해결 표

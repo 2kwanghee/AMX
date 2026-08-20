@@ -341,6 +341,27 @@ AMX_DANGER_INGEST_TOKEN='<AMS의 danger_ingest_token과 동일>'
 끄려면 `--uninstall`을 돌린다. 플래그 없이 돌려도 Stop 훅과 danger 훅 항목을 함께
 걷어낸다.
 
+### 세션 비용 구조 훅 (자동 설치, 기본 무동작)
+`install-langfuse-hook.sh`는 플래그 없이도 `session_usage_hook.py`를 훅 디렉터리에
+복사하고 `settings.json`의 Stop에 등록한다. 세션이 끝날 때 한 번 돌면서 트랜스크립트의
+토큰 사용량을 모델별로 집계해 AMS로 POST 하는 훅이다. Langfuse가 합쳐 버리는 1시간/5분
+캐시 쓰기를 분리해 남기는 것이 존재 이유고, 프롬프트·응답 원문은 어떤 필드에도 싣지
+않는다(`message.content`는 읽지도 않는다). danger 훅과 같은 불변식을 따른다 — 항상
+`exit 0`, 통보 HTTP는 하드 2초 데드라인, 실패는 상태 파일에 마지막 1줄만 남기고 삼킨다.
+
+설치만으로는 아무 일도 하지 않는다. `amx-langfuse.env`에 두 값을 채워야 무장된다.
+```sh
+AMX_SESSION_INGEST_URL='http://<ams-host>:8080/api/v1/ingest/session-usage'
+AMX_SESSION_INGEST_TOKEN='<AMS의 AMX_SESSION_INGEST_TOKEN과 동일>'
+```
+토큰은 danger 훅 것과 별개다. 이 경로는 진단 행 upsert만 하므로, 경보를 올릴 권한 없이
+이 훅만 무장한 호스트를 둘 수 있다. 계정 귀속은 `LANGFUSE_USER_ID`가 있으면 그 값을,
+없으면 `tsamx status --json`을 2초 타임아웃으로 조회해 활성 계정 이메일을 쓴다.
+
+주의: 설치 스크립트를 다시 돌리면 `amx-langfuse.env`를 재생성하면서
+`AMX_DANGER_*`/`AMX_SESSION_*` 줄이 주석 상태로 돌아간다. 기존 파일은 `.bak`으로
+남으니 거기서 값을 복원해 다시 채운다. `--uninstall`은 이 Stop 항목도 함께 걷어낸다.
+
 ### 함대(fleet) 일괄 배포
 호스트가 몇 대 넘어가면 서버마다 손으로 설치 명령을 치는 방식은 오래 못 간다. 신규
 에이전트는 설치 때 자동으로 켜지게 하고, 이미 떠 있는 호스트는 목록 한 장으로 한꺼번에
