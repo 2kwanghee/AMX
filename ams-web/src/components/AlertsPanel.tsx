@@ -2,6 +2,7 @@
 
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
+import { dangerText } from '@/lib/danger-text';
 import type { AccountPage, AlertPage, ServerPage } from '@/lib/api-client/types';
 import { Badge, LiveDot, TimeCell, krLabel, useAction, useMarkOnData } from './common';
 
@@ -138,7 +139,9 @@ export function AlertsPanel({ tenantId }: { tenantId: string }) {
                   </td>
                   <td className="muted">
                     {(() => {
-                      const kr = KR_ALERT_REASON[a.kind];
+                      const kr =
+                        (a.kind === 'dangerous_command' && dangerText(a.detail)) ||
+                        KR_ALERT_REASON[a.kind];
                       const raw = detailText(a.detail);
                       // 한글 문구는 다음 행동까지 담아 길다. 말줄임하면 정작 조치가
                       // 잘리므로 이 경우에만 줄바꿈을 허용하고, 영문 원문은 툴팁에 남긴다.
