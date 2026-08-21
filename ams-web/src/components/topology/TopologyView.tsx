@@ -132,9 +132,9 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     refreshInterval: 7000,
     onSuccess: () => markDataArrived(),
   });
-  // 계정 풀 개요 — PoolPanel과 SWR 키·주기를 공유해 캐시를 재사용한다. 실패·로딩
-  // 시엔 레인을 그리지 않아 기존 화면이 그대로 유지된다.
-  const { data: poolData, error: poolError } = useSWR<PoolOverview>(
+  // 계정 풀 개요 — PoolPanel과 SWR 키·주기를 공유해 캐시를 재사용한다. 첫 로딩
+  // 전에는 레인을 그리지 않고, 이후 폴링 실패 시엔 마지막 데이터로 유지한다.
+  const { data: poolData } = useSWR<PoolOverview>(
     ['pool', tenantId],
     () => api.getPoolOverview(tenantId),
     { refreshInterval: 30000 },
@@ -538,9 +538,10 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     setConnect({ accountId, serverId });
   }
 
-  // 레인 데이터 — 개요가 로드됐고 오류가 아닐 때만, 그리고 자유 배치에서만 그린다.
+  // 레인 데이터 — 개요가 한 번이라도 로드됐고 자유 배치일 때 그린다. 이후 폴링이
+  // 일시 실패해도 SWR이 쥔 마지막 데이터로 유지해, 30초마다 레인이 깜빡이지 않는다.
   const poolLanes = poolData ? groupAccountsByLane(poolData.accounts) : null;
-  const showLanes = freeMode && poolLanes !== null && !poolError;
+  const showLanes = freeMode && poolLanes !== null;
   const poolKey = poolLanes
     ? poolLanes.cooling.map((a) => a.accountId).join(',') + '#' + poolLanes.ready.map((a) => a.accountId).join(',')
     : '';
