@@ -225,7 +225,7 @@ async function resolver({ request }: { request: Request }) {
   }
   if (path === 'tenants/ten-1/pool/chains' && m === 'GET') {
     return HttpResponse.json([
-      { id: 'chn-1', serverId: 'srv-1', kind: 'swap', step: 'switch', startedAt: iso(), updatedAt: iso(), actor: 'pool-controller' },
+      { id: 'chn-1', serverId: 'srv-1', kind: 'swap', step: 'switch', startedAt: iso(), stepStartedAt: new Date(Date.now() - 5 * 60000).toISOString(), updatedAt: iso(), actor: 'pool-controller' },
       { id: 'chn-2', serverId: 'srv-1', kind: 'prefetch', step: 'failed', error: '전달 시간 초과', startedAt: iso(), updatedAt: iso(), acked_at: null, actor: 'pool-controller' },
     ]);
   }

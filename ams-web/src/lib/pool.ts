@@ -155,6 +155,18 @@ export function coolingRemainingMs(coolingUntil: string | null | undefined, now:
   return Math.max(0, t - now);
 }
 
+// 분 단위 경과 시간(체인 단계가 얼마나 오래 걸렸는지). 1분 미만은 "방금".
+export function fmtElapsed(ms: number): string {
+  if (ms < 60000) return '방금';
+  const totalMin = Math.floor(ms / 60000);
+  const days = Math.floor(totalMin / 1440);
+  const hours = Math.floor((totalMin % 1440) / 60);
+  const mins = totalMin % 60;
+  if (days > 0) return `${days}일 ${hours}시간`;
+  if (hours > 0) return `${hours}시간 ${mins}분`;
+  return `${mins}분`;
+}
+
 // 분 단위로 끊어 읽는 남은 시간. 0이면 복귀 임박 문구. 1분 미만은 "1분 이내".
 export function fmtRemaining(ms: number): string {
   if (ms <= 0) return '복귀 대기';

@@ -570,6 +570,9 @@ export interface Chain {
   step: ChainStep;
   error?: string | null;
   startedAt: string;
+  // 지금 단계가 시작된 시각. updatedAt은 같은 단계의 재발행에도 움직이므로
+  // 단계 경과 시간은 이 값으로 잰다. 서버가 안 실으면 null.
+  stepStartedAt?: string | null;
   updatedAt: string;
   // 실패한 체인을 운영자가 확인(:ack)한 시각. 확인 전이면 null.
   ackedAt?: string | null;

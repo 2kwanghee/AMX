@@ -20,7 +20,6 @@ import {
   Modal,
   ProviderTag,
   SwitchModePill,
-  TimeCell,
   relTime,
   useAction,
   useMarkOnData,
@@ -30,6 +29,7 @@ import {
   allowedPoolActions,
   chainStepLabel,
   coolingRemainingMs,
+  fmtElapsed,
   fmtRemaining,
   groupAccountsByLane,
   ineligibleReasonLabel,
@@ -399,6 +399,7 @@ function ChainList({
   onAcked: () => void;
 }) {
   const act = useAction();
+  const now = useNow(60000);
   const active = chains.filter((c) => isChainActive(c.step));
   // 실패했고 아직 확인하지 않은 체인만 확인 대상으로 남긴다.
   const failed = chains.filter((c) => c.step === 'failed' && !c.ackedAt);
@@ -419,7 +420,7 @@ function ChainList({
               </div>
               {c.error && <div className="err">{c.error}</div>}
             </div>
-            <TimeCell iso={c.updatedAt} />
+            <span className="pool-chain-step">단계 {fmtElapsed(now - new Date(c.stepStartedAt ?? c.startedAt).getTime())} 경과</span>
           </div>
         ))}
         {failed.map((c) => (

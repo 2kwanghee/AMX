@@ -4,6 +4,7 @@ import {
   allowedPoolActions,
   chainStepLabel,
   coolingRemainingMs,
+  fmtElapsed,
   fmtRemaining,
   groupAccountsByLane,
   isChainActive,
@@ -102,6 +103,17 @@ describe('상태별 허용 동작', () => {
   it('대여중과 회수중은 보류만 허용한다', () => {
     expect(allowedPoolActions('leased')).toEqual(['hold']);
     expect(allowedPoolActions('recalling')).toEqual(['hold']);
+  });
+});
+
+describe('단계 경과 시간', () => {
+  it('1분 미만은 방금, 그 이상은 분·시간으로 끊는다', () => {
+    expect(fmtElapsed(0)).toBe('방금');
+    expect(fmtElapsed(30 * 1000)).toBe('방금');
+    expect(fmtElapsed(-1000)).toBe('방금');
+    expect(fmtElapsed(5 * 60000)).toBe('5분');
+    expect(fmtElapsed((2 * 60 + 15) * 60000)).toBe('2시간 15분');
+    expect(fmtElapsed(25 * 60 * 60000)).toBe('1일 1시간');
   });
 });
 
