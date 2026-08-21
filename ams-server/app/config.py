@@ -157,6 +157,32 @@ class Settings:
     # 하위 소비자가 없으므로 audit처럼 opt-in(0=영구)으로 두지 않고 기본 90일로
     # 켜 둔다. 0 이하면 purge 비활성.
     session_usage_retention_days: int = 90
+    # 계정 풀 P1. 창 하나라도 이 % 에 닿으면 `account_window_high` 경고를 연다.
+    # 서버 범위 `all_exhausted`(전원 pct>=95)가 이미 막힌 뒤에야 울리는 것과 달리,
+    # 이건 아직 교체를 준비할 시간이 남아 있을 때 울리라고 기본값을 낮게 둔다.
+    pool_window_high_pct: float = 80.0
+    # 마지막 관측이 이 분 수보다 오래됐으면 "관측 없음"으로 본다. 충전소 복귀는
+    # 시각(cooling_until)과 관측(pct<=readyReturnPct)을 함께 요구하는데, 에이전트가
+    # 죽어 관측이 영영 안 오면 계정이 충전소에 갇힌다 — 그 유예 창이다.
+    pool_observation_grace_minutes: int = 15
+    # 체인 한 단계(deliver/switch/recall)가 이 분 수 안에 수렴하지 않으면 실패로
+    # 접는다. 에이전트가 오프라인이면 명령은 큐에 남아 언젠가 전달되는데, 그 사이
+    # 체인이 서버를 계속 점유하면 다음 교체가 영영 시작되지 않는다.
+    # 창 관측이 이 분 수보다 오래됐으면 그 pct 는 미상으로 본다. 낡은 관측으로
+    # 교체를 트리거하면 이미 리셋된 계정을 거두거나, 반대로 소진된 계정을 계속
+    # 물린 채로 둔다. 모른다고 말하는 쪽이 틀린 값을 믿는 쪽보다 싸다.
+    pool_window_stale_minutes: int = 30
+    # pool_events 보존 창(일). 자동 변경 감사라 정산 경계 가드가 필요 없고, 나이만
+    # 보고 지운다. 0 이하면 purge 비활성(영구 보존).
+    pool_event_retention_days: int = 90
+    pool_chain_step_timeout_minutes: int = 10
+    # 체인 하나의 절대 수명. 단계 타임아웃은 "한 단계가 멈췄다"를 잡지만, 단계 사이를
+    # 느리게 오가며 계속 살아 있는 체인은 잡지 못한다. 그런 체인은 그 서버를 계속
+    # 점유하므로 총 시간으로도 상한을 둔다.
+    pool_chain_max_minutes: int = 60
+    # 한 테넌트에서 컨트롤러가 동시에 돌릴 수 있는 자동 체인 수. 관측이 한꺼번에
+    # 틀렸을 때 피해 범위를 묶는 상한이다(운영자가 여는 체인은 세지 않는다).
+    pool_max_concurrent_chains: int = 3
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -356,6 +382,23 @@ def load_settings() -> Settings:
         ),
         session_usage_retention_days=int(
             os.environ.get("AMX_SESSION_USAGE_RETENTION_DAYS", "90")
+        ),
+        pool_window_high_pct=float(os.environ.get("AMX_POOL_WINDOW_HIGH_PCT", "80")),
+        pool_observation_grace_minutes=int(
+            os.environ.get("AMX_POOL_OBSERVATION_GRACE_MINUTES", "15")
+        ),
+        pool_window_stale_minutes=int(
+            os.environ.get("AMX_POOL_WINDOW_STALE_MINUTES", "30")
+        ),
+        pool_event_retention_days=int(
+            os.environ.get("AMX_POOL_EVENT_RETENTION_DAYS", "90")
+        ),
+        pool_chain_step_timeout_minutes=int(
+            os.environ.get("AMX_POOL_CHAIN_STEP_TIMEOUT_MINUTES", "10")
+        ),
+        pool_chain_max_minutes=int(os.environ.get("AMX_POOL_CHAIN_MAX_MINUTES", "60")),
+        pool_max_concurrent_chains=int(
+            os.environ.get("AMX_POOL_MAX_CONCURRENT_CHAINS", "3")
         ),
     )
 

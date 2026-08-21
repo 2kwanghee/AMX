@@ -47,12 +47,14 @@ _ACTIVE_STATUSES = ("open", "acked")
 # Every other kind is server-scoped (all_exhausted, server_offline,
 # self_update_failed) or system-scoped (server_id NULL) and never names an
 # account, so none of them belong to an account's detach.
+#   account_window_high  -> app/services/pool.py (계정 창 pct >= 임계, P1 관측)
 ACCOUNT_SCOPED_KINDS = (
     "drift",
     "quarantine",
     "recall_failed",
     "command_send_failed",
     "credential_unusable",
+    "account_window_high",
 )
 
 # G27. The usage-rollup watermark is a single global cursor, but a forward

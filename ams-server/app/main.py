@@ -22,6 +22,7 @@ from app.api.v1 import (
     billing,
     ingest,
     langfuse,
+    pool,
     servers,
     tenants,
     usage,
@@ -57,6 +58,8 @@ def create_app() -> FastAPI:
     app.include_router(billing.router, prefix=API_PREFIX)
     app.include_router(usage.router, prefix=API_PREFIX)
     app.include_router(langfuse.router, prefix=API_PREFIX)
+    # 계정 풀 P1(관측만): 조회·정책·수동 개입만이고 명령은 내지 않는다.
+    app.include_router(pool.router, prefix=API_PREFIX)
     # Token-gated, no admin bearer and no TenantScope: an unattended agent hook
     # posts here (app/api/v1/ingest.py). Disabled (404) unless a token is set.
     app.include_router(ingest.router, prefix=API_PREFIX)

@@ -218,6 +218,29 @@ const KR_API_ERROR: Record<string, string> = {
   'assignment.deliver_immediately_unsupported':
     'deliverImmediately는 지원하지 않습니다. 할당을 먼저 만들고 전달을 따로 실행하세요. 새 할당은 대기 상태로 남습니다.',
 
+  'pool.state_conflict':
+    '지금 상태에서는 적용할 수 없는 동작입니다. 대여 중인 계정은 먼저 회수하고, 고정 해제는 고정된 계정에만 씁니다.',
+  'pool.recommendation_stale':
+    '그 권고는 이미 실행됐거나 조건이 해소됐습니다. 풀 화면을 새로 읽고 지금 남아 있는 권고로 다시 실행하세요.',
+  'pool.chain_active':
+    '이 서버에서 계정 풀 교체가 진행 중입니다. 전달·회수·즉시 전환을 포함해 이 서버의 할당 조작은 체인이 끝난 뒤에 하세요. 풀 화면에서 진행 상황을 볼 수 있습니다.',
+  'pool.controller_busy':
+    '풀 컨트롤러가 지금 이 테넌트를 처리 중입니다. 몇 초 뒤에 다시 실행하세요.',
+  'pool.target_reserved':
+    '그 계정은 다른 서버의 교체가 이미 대상으로 잡고 있습니다. 한 계정은 서버 하나에만 붙으므로, 그 체인이 끝난 뒤에 다시 실행하세요.',
+  'pool.server_in_flight':
+    '이 서버에 전달·회수가 진행 중인 할당이 있습니다. 그 할당이 활성 또는 분리로 수렴한 뒤에 다시 실행하세요.',
+  'pool.recommendation_invalid':
+    '권고에 필요한 계정 정보가 비어 있습니다. 풀 화면을 새로 읽고, 같은 권고가 다시 뜨면 서버 담당자에게 알리세요.',
+  'pool.swap_target_not_installed':
+    '교체 대상 할당이 아직 전달 중입니다. 전달이 끝나 활성이 된 뒤에 다시 실행하세요.',
+  'pool.swap_target_elsewhere':
+    '교체 대상 계정이 다른 서버에 할당돼 있습니다. 그 할당을 먼저 회수한 뒤 다시 실행하세요.',
+  'pool.recall_source_missing':
+    '회수할 계정이 이 서버에 할당돼 있지 않습니다. 풀 화면을 새로 읽으세요.',
+  'pool.chain_not_failed':
+    '확인 처리는 실패한 체인에만 씁니다. 진행 중인 체인은 끝나기를 기다리세요.',
+
   'account.assigned':
     '이 계정은 아직 서버에 연결돼 있습니다. 할당을 회수하고 삭제한 뒤 계정을 지우세요.',
   'account.duplicate_email':

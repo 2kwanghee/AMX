@@ -12,7 +12,7 @@ from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantS
 from app.config import get_settings
 from app.core.errors import not_found
 from app.models import AgentCommand
-from app.services import commands, inventory
+from app.services import commands, inventory, pool
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["servers"], dependencies=[TenantScope])
 
@@ -21,6 +21,9 @@ def _to_wire(db, server) -> schemas.Server:
     wire = schemas.Server.model_validate(server)
     wire.enrolled = server.server_cred_hash is not None
     wire.assigned_account_count = inventory.assigned_account_count(db, server.id)
+    # 저장은 부분 dict 라도 응답은 기본값이 채워진 완전한 정책이다 — 콘솔이 "미설정"을
+    # 따로 다루지 않도록(app/services/pool.py resolve_policy).
+    wire.pool_policy = schemas.PoolPolicy(**pool.resolve_policy(server))
     return wire
 
 

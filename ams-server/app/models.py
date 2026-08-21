@@ -83,7 +83,38 @@ ALERT_KINDS = (
     # §5.7 토큰 재료 가드가 로그아웃 껍데기를 드롭할 때 에이전트가 올리는 1차 사고
     # 신호(계정 범위). 해소는 같은 계정의 cred_update가 실제로 저장되는 시점.
     "credential_unusable",
+    # 계정 풀 P1: 한 계정의 어느 창이든 pct가 AMX_POOL_WINDOW_HIGH_PCT(기본 80)에
+    # 닿았을 때 여는 경고(계정 범위). all_exhausted가 서버 전체가 막힌 뒤에야
+    # 울리는 것과 달리, 이건 교체를 준비할 시간이 남아 있을 때 울린다.
+    "account_window_high",
+    # 계정 풀 P2: 체인 한 단계가 제한 시간 안에 수렴하지 못했을 때 여는 경고(서버
+    # 범위). 컨트롤러는 롤백 명령을 자동으로 내지 않으므로 — 무엇을 되돌릴지는
+    # 사람이 판단해야 한다 — 이 경보가 유일한 인계 지점이다.
+    "pool_chain_failed",
 )
+# 계정 풀 순환의 위치. accounts.status(재고 상태)와 축이 다르다 — 격리된
+# 계정이면서 충전 중일 수 있으므로 한 컬럼에 합치지 않는다.
+POOL_STATES = ("ready", "leased", "recalling", "cooling", "pinned", "held")
+# 스윕이 계산하는 상태와, 운영자만 설정하는 상태의 구분. 후자는 스윕이 덮어쓰지 않는다.
+POOL_OPERATOR_STATES = ("pinned", "held")
+POOL_RECOMMENDATION_KINDS = ("prefetch", "swap", "recall_idle", "lease")
+POOL_CHAIN_STEPS = ("deliver", "switch", "recall", "done", "failed")
+POOL_EVENT_KINDS = (
+    "state_changed",
+    "recommendation_created",
+    # 조건이 해소되거나 다른 조건으로 바뀌어 권고가 사라질 때. 운영자가 본 버튼이
+    # 왜 없어졌는지는 이 줄 말고는 답할 곳이 없다.
+    "recommendation_dropped",
+    "chain_started",
+    "chain_step",
+    "chain_done",
+    "chain_failed",
+    "policy_changed",
+    "automation_paused",
+    "automation_resumed",
+)
+POOL_CONTROLLER_ACTOR = "pool-controller"
+
 ALERT_SEVERITIES = ("critical", "warning")
 ALERT_STATUSES = ("open", "acked", "resolved")
 ADMIN_ROLES = ("global-admin", "tenant-admin")
@@ -103,6 +134,11 @@ class Tenant(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    # P3 자동화 킬 스위치(테넌트 단위). P1 은 명령을 내지 않으므로 이 값이 True 여도
+    # 관측·상태 계산은 계속 돌고, 권고 생성만 멈춘다.
+    pool_automation_paused: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -273,6 +309,24 @@ class Account(Base):
         DateTime(timezone=True), nullable=True
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="available")
+    # 계정 풀 순환의 위치(POOL_STATES). `status` 와 독립이다 — 30초 스윕이 배정·창
+    # 관측으로부터 계산하되, pinned/held 는 운영자만 설정하고 스윕이 덮지 않는다.
+    pool_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="ready", server_default=text("'ready'")
+    )
+    # cooling 의 만료 시각 = 소진된 창들의 resets_at 최댓값, 그리고 그 창의 id.
+    cooling_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cooling_window_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pool_state_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 마지막 대여가 끝난 시각. 후보 정렬의 3순위(공평 순환) 키이고, NULL 은 "한 번도
+    # 대여된 적 없음"이라 가장 오래된 것으로 취급한다.
+    last_lease_ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # O9 credential re-sync monotonicity (§5.7). The agent's local observation
     # time of the last accepted refresh. An upstream CredentialUpdate only wins
     # when its observed_at is strictly newer (or this is NULL), so a delayed or
@@ -340,6 +394,13 @@ class Server(Base):
     disk_pct: Mapped[float | None] = mapped_column(nullable=True)
     metrics_reported_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # 계정 풀 슬롯 정책(schemas.PoolPolicy 의 snake_case 형태). 빈 ``{}`` 은
+    # "mode=manual + 나머지 기본값" 으로 읽히므로(services.pool.resolve_policy) 기존
+    # 서버의 동작이 바뀌지 않는다. 부분 저장이 가능해 컬럼이 아니라 JSONB 다 —
+    # 필드가 늘 때마다 마이그레이션을 돌리지 않기 위해서이기도 하다.
+    pool_policy: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -939,5 +1000,202 @@ class BillingCursor(Base):
         DateTime(timezone=True), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AccountUsageWindow(Base):
+    """한 계정의 한 창(five_hour / seven_day / …)에 대한 **최신** 관측 한 줄.
+
+    지금까지 이 값은 ``usage_snapshots.payload`` JSONB 안에만 있었고, 그 원장은
+    5분마다 서버별로 한 줄씩 쌓이는 시계열이다. "지금 이 계정의 7일 창이 몇 %인가"를
+    거기서 답하려면 매번 최신 스냅샷을 서버별로 골라 JSONB를 파헤쳐야 하는데, 30초
+    스윕이 테넌트마다 그럴 수는 없다. 그래서 여기는 이력을 쌓지 않는다 — PK
+    ``(tenant_id, account_id, window_id)``가 곧 "최신값만"이라는 규약이고, 이력이
+    필요하면 원장이 그대로 갖고 있다.
+
+    ``server_id``는 이 관측을 올린 서버다. 계정이 옮겨 다니면 함께 갱신되므로 "이 값이
+    어디서 왔나"는 항상 최신 한 곳을 가리킨다.
+    """
+
+    __tablename__ = "account_usage_windows"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["account_id", "tenant_id"],
+            ["accounts.id", "accounts.tenant_id"],
+            name="fk_account_usage_windows_account_tenant",
+            ondelete="CASCADE",
+        ),
+        Index("ix_account_usage_windows_resets_at", "resets_at"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    window_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    # NULL 이면 "모른다"다. proto3 이 0.0 을 빼므로 **누락**은 0.0 이지만, 값이
+    # 있는데 못 읽은 경우까지 0.0 으로 접으면 그 계정이 후보 정렬 최상위로 올라간다
+    # (0% = 여유 가득). 미상은 미상으로 적고 판단에서 뺀다(마이그레이션 0030).
+    pct: Mapped[float | None] = mapped_column(nullable=True, server_default=text("0"))
+    # NULL이면 공급자가 리셋 시각을 주지 않은 것. 그런 창은 쿨다운 만료를 계산할 수
+    # 없으므로 cooling 판정에서 아예 제외한다(시각을 지어내지 않는다).
+    resets_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    usage_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    server_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+
+
+class PoolRecommendation(Base):
+    """컨트롤러가 만든 교체 권고 한 건 — P1은 만들기만 하고 실행하지 않는다.
+
+    권고는 상태가 아니라 **현재 조건의 투영**이다. 조건이 살아 있는 동안만 존재하고
+    해소되면 스윕이 지운다. 그래서 같은 ``(server, kind, from, to)``로 두 줄이 생기면
+    안 되고(식 유니크 인덱스 ``uq_pool_recommendations_dedupe``), 살아남은 행의
+    ``created_at``은 "이 조건이 언제부터 참이었나"를 뜻한다.
+    """
+
+    __tablename__ = "pool_recommendations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["server_id", "tenant_id"],
+            ["servers.id", "servers.tenant_id"],
+            name="fk_pool_recommendations_server_tenant",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "kind IN ('prefetch','swap','recall_idle','lease')",
+            name="ck_pool_recommendations_kind",
+        ),
+        Index("ix_pool_recommendations_tenant", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    server_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    from_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    to_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger_pct: Mapped[float | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PoolChain(Base):
+    """deliver → switch → recall 체인 한 건(P2). P1에서는 아무도 쓰지 않는다.
+
+    ``recommendation_id``에 FK를 걸지 않는 이유: 권고 행은 조건이 해소되면 사라지는데,
+    체인은 자신이 어느 권고에서 출발했는지를 **기록**으로 남겨야 하므로 참조 무결성이
+    오히려 방해가 된다(``alerts.account_id``와 같은 판단).
+    """
+
+    __tablename__ = "pool_chains"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["server_id", "tenant_id"],
+            ["servers.id", "servers.tenant_id"],
+            name="fk_pool_chains_server_tenant",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "step IN ('deliver','switch','recall','done','failed')",
+            name="ck_pool_chains_step",
+        ),
+        CheckConstraint(
+            "kind IN ('prefetch','swap','recall_idle','lease')",
+            name="ck_pool_chains_kind",
+        ),
+        Index("ix_pool_chains_tenant_step", "tenant_id", "step"),
+        Index("ix_pool_chains_server_step", "server_id", "step"),
+        # 서버당 활성 체인은 하나. 조회 후 판단만으로는 조회와 삽입 사이의 경합을
+        # 막지 못한다 — advisory lock 은 협조적이고 이 인덱스는 그렇지 않다.
+        Index(
+            "uq_pool_chains_active_server",
+            "server_id",
+            unique=True,
+            postgresql_where=text("step NOT IN ('done','failed')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    server_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    recommendation_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    from_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    to_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    # 체인의 종류. from/to 조합으로는 prefetch 와 swap 이 구분되지 않는다 — 둘 다
+    # 양쪽을 채우지만 prefetch 는 deliver 에서 끝나고 swap 은 전환·회수까지 간다.
+    kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="swap", server_default=text("'swap'")
+    )
+    step: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="deliver", server_default=text("'deliver'")
+    )
+    # switch 단계에서 발행한 switch_now 의 command_id. 비-state 명령이라 배정에
+    # 흔적이 남지 않으므로, 이게 없으면 스윕이 매 틱 같은 전환을 다시 낸다.
+    command_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 실패한 체인을 운영자가 확인한 시각. 확인 전까지 이 서버의 자동 실행은 멈춘다.
+    acked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # 지금 단계가 시작된 때. 단계 타임아웃의 기준이며 단계가 실제로 바뀔 때만
+    # 움직인다 — updated_at 은 같은 단계 안의 재발행에도 움직이므로 기준이 될 수
+    # 없다(그러면 재발행이 시계를 되감아 그 단계가 영영 만료되지 않는다).
+    step_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class PoolEvent(Base):
+    """풀 컨트롤러의 자동 변경 감사 행 — 스윕은 REST를 타지 않는다.
+
+    ``app.api.audit`` 미들웨어는 HTTP 요청만 기록하므로, 30초 스윕이 계정 상태를
+    바꾸거나 권고를 만드는 일은 어디에도 남지 않는다. 그 공백을 메우는 테이블이고,
+    ``actor``는 스윕이면 ``POOL_CONTROLLER_ACTOR``, 사람이 REST로 pin/hold를 눌렀으면
+    그 관리자의 이메일이다. ``detail``에 판단 근거(어느 창, 몇 %, 어느 임계)를 담아
+    나중에 "왜 저 계정이 충전소로 갔나"를 되짚을 수 있게 한다.
+    """
+
+    __tablename__ = "pool_events"
+    __table_args__ = (
+        Index("ix_pool_events_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    # 계정/서버 모두 FK 없음: 이벤트는 자기가 이름 붙인 대상보다 오래 살아야 한다.
+    account_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    server_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    detail: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

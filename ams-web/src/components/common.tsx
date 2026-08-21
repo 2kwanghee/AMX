@@ -47,6 +47,8 @@ const KR_LABEL: Record<string, string> = {
   alert_webhook_dropped: '경보 웹훅 유실',
   dangerous_command: '위험 명령 탐지',
   credential_unusable: '자격증명 사용 불가',
+  account_window_high: '계정 사용률 임박',
+  pool_chain_failed: '풀 교체 실패',
 };
 
 export function krLabel(value?: string): string {

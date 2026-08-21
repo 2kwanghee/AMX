@@ -285,7 +285,9 @@ export type AlertKind =
   | 'langfuse_latency'
   | 'alert_webhook_dropped'
   | 'dangerous_command'
-  | 'credential_unusable';
+  | 'credential_unusable'
+  | 'account_window_high'
+  | 'pool_chain_failed';
 export type AlertSeverity = 'critical' | 'warning';
 export type AlertStatus = 'open' | 'acked' | 'resolved';
 

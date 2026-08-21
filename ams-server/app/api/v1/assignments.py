@@ -14,7 +14,7 @@ from fastapi import APIRouter, Query, Response, status
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.core.errors import ApiError, bad_request
-from app.services import commands, inventory
+from app.services import commands, inventory, pool
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["assignments"], dependencies=[TenantScope])
 
@@ -105,6 +105,8 @@ def delete_assignment(
     response_model=schemas.Assignment,
 )
 def deliver_assignment(tenant_id: uuid.UUID, assignment_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
+    assignment = inventory.get_assignment(db, tenant_id, assignment_id)
+    pool.guard_manual_assignment_action(db, assignment, action="전달")
     return schemas.Assignment.model_validate(
         commands.request_deliver(db, tenant_id, assignment_id)
     )
@@ -130,6 +132,8 @@ def recall_assignment(
         raise ApiError(
             403, "Forbidden", "auth.forbidden", "force recall requires a global-admin."
         )
+    assignment = inventory.get_assignment(db, tenant_id, assignment_id)
+    pool.guard_manual_assignment_action(db, assignment, action="회수", force=force)
     return schemas.Assignment.model_validate(
         commands.request_recall(db, tenant_id, assignment_id, force=force)
     )
@@ -182,6 +186,8 @@ def switch_now(
     body: schemas.SwitchNowRequest | None = None,
 ):
     strategy = body.strategy if body is not None else None
+    assignment = inventory.get_assignment(db, tenant_id, assignment_id)
+    pool.guard_manual_assignment_action(db, assignment, action="즉시 전환")
     return schemas.Assignment.model_validate(
         commands.request_switch_now(db, tenant_id, assignment_id, strategy=strategy)
     )

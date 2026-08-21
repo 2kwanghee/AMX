@@ -35,6 +35,23 @@ SwitchStrategy = Literal["best", "next_available"]
 AssignmentState = Literal[
     "pending", "delivering", "active", "inactive", "quarantined", "recalling", "detached"
 ]
+# 계정 풀(기획서 §2.1). accounts.status 와 축이 다르다 — 이건 배급 순환의 위치다.
+PoolState = Literal["ready", "leased", "recalling", "cooling", "pinned", "held"]
+PoolMode = Literal["manual", "auto"]
+PoolRecommendationKind = Literal["prefetch", "swap", "recall_idle", "lease"]
+PoolChainStep = Literal["deliver", "switch", "recall", "done", "failed"]
+PoolEventKind = Literal[
+    "state_changed",
+    "recommendation_created",
+    "recommendation_dropped",
+    "chain_started",
+    "chain_step",
+    "chain_done",
+    "chain_failed",
+    "policy_changed",
+    "automation_paused",
+    "automation_resumed",
+]
 
 
 class Wire(BaseModel):
@@ -129,6 +146,13 @@ class Account(Wire):
     scopes: list[str] | None = None
     credential_expires_at: datetime | None = None
     last_switched_at: datetime | None = None
+    # 계정 풀 순환의 위치(기획서 §2.1). `status` 와 독립이며, pin/hold 응답이 이 값을
+    # 돌려주므로 계약의 pool 액션들이 별도 스키마 없이 Account 로 답할 수 있다.
+    pool_state: PoolState = "ready"
+    cooling_until: datetime | None = None
+    cooling_window_id: str | None = None
+    pool_state_changed_at: datetime | None = None
+    last_lease_ended_at: datetime | None = None
     created_at: datetime
 
 
@@ -202,12 +226,146 @@ class Server(Wire):
     disk_pct: float | None = None
     metrics_reported_at: datetime | None = None
     assigned_account_count: int | None = None
+    # 계정 풀 슬롯 정책. 저장은 부분 dict 라도 응답은 항상 기본값이 채워진 완전한
+    # 형태다(services.pool.resolve_policy) — 콘솔이 "미설정"을 따로 다룰 필요가 없다.
+    pool_policy: PoolPolicy | None = None
     created_at: datetime
 
 
 class ServerPage(Wire):
     items: list[Server]
     page_info: PageInfo | None = None
+
+
+# -- 계정 풀 (기획서 §2) ------------------------------------------------------
+class PoolPolicy(Wire):
+    """서버 한 대의 슬롯 정책. 기본값이 곧 "정책 미설정" 의 의미다.
+
+    ``mode=manual`` 이 기본이라 마이그레이션만으로는 어떤 서버도 자동화에 들어오지
+    않는다 — "서버당 1계정 귀속"은 manual 또는 ``auto + target_leases=1`` 로 그대로
+    표현되므로 별도 기능이 아니다.
+    """
+
+    mode: PoolMode = "manual"
+    target_leases: int = Field(default=1, ge=1, le=5)
+    swap_at_pct: int = Field(default=85, ge=0, le=100)
+    prefetch_at_pct: int = Field(default=70, ge=0, le=100)
+    min_lease_minutes: int = Field(default=30, ge=0, le=1440)
+    ready_return_pct: int = Field(default=20, ge=0, le=100)
+
+
+class PoolPolicyUpdate(Wire):
+    """PATCH 본문 — 준 필드만 저장하고 나머지는 그대로 둔다(ServerUpdate 와 같은 규약)."""
+
+    mode: PoolMode | None = None
+    target_leases: int | None = Field(default=None, ge=1, le=5)
+    swap_at_pct: int | None = Field(default=None, ge=0, le=100)
+    prefetch_at_pct: int | None = Field(default=None, ge=0, le=100)
+    min_lease_minutes: int | None = Field(default=None, ge=0, le=1440)
+    ready_return_pct: int | None = Field(default=None, ge=0, le=100)
+
+
+class WindowState(Wire):
+    window_id: str
+    # 계약은 pct 를 number 로 적었지만 NULL 이 필요하다: 값을 못 읽은 창을 0.0 으로
+    # 보내면 콘솔이 "여유 100%"를 그린다. 미상은 미상으로 보낸다(마이그레이션 0030).
+    pct: float | None = None
+    resets_at: datetime | None = None
+    usage_fetched_at: datetime | None = None
+    reported_at: datetime
+    server_id: uuid.UUID
+
+
+class PoolAccount(Wire):
+    account_id: uuid.UUID
+    email: str
+    provider: Provider = "claude"
+    pool_state: PoolState
+    cooling_until: datetime | None = None
+    cooling_window_id: str | None = None
+    leased_server_id: uuid.UUID | None = None
+    lease_started_at: datetime | None = None
+    last_lease_ended_at: datetime | None = None
+    windows: list[WindowState] = Field(default_factory=list)
+    pool_state_changed_at: datetime | None = None
+    # 계약 밖 추가분. 이 계정을 컨트롤러가 다룰 수 있는가와, 못 다룬다면 그 이유.
+    # 콘솔이 "왜 이 계정은 한 번도 안 뽑히지"에 화면에서 답할 수 있어야 한다 —
+    # 서버의 후보 필터와 같은 함수(services.pool.ineligible_reason)가 낸 값이다.
+    auto_eligible: bool = True
+    ineligible_reason: str | None = None
+
+
+class PoolServer(Wire):
+    server_id: uuid.UUID
+    name: str
+    status: ServerStatus
+    pool_policy: PoolPolicy
+    leased_account_ids: list[uuid.UUID] = Field(default_factory=list)
+    active_account_id: uuid.UUID | None = None
+    # 전달이 진행 중인 배정이 하나라도 있으면 True — 이 서버에는 권고가 생기지 않는다.
+    in_flight: bool = False
+    max_pct: float | None = None
+
+
+class PoolRecommendation(Wire):
+    id: uuid.UUID
+    server_id: uuid.UUID
+    kind: PoolRecommendationKind
+    from_account_id: uuid.UUID | None = None
+    to_account_id: uuid.UUID | None = None
+    reason: str
+    created_at: datetime
+    trigger_pct: float | None = None
+
+
+class PoolChain(Wire):
+    id: uuid.UUID
+    server_id: uuid.UUID
+    recommendation_id: uuid.UUID | None = None
+    from_account_id: uuid.UUID | None = None
+    to_account_id: uuid.UUID | None = None
+    # 계약(pool-api-contract.md)에 없던 필드. 체인 종류는 from/to 로 되돌릴 수 없고
+    # (prefetch 와 swap 이 같은 모양이다) 콘솔이 "무엇이 일어나는 중인지"를 쓰려면
+    # 필요하다. 추가 필드라 기존 소비자를 깨지 않는다.
+    kind: PoolRecommendationKind = "swap"
+    step: PoolChainStep
+    error: str | None = None
+    started_at: datetime
+    # 지금 단계가 시작된 때 — 단계 타임아웃까지 얼마나 남았는지를 콘솔이 그리려면
+    # updated_at 으로는 안 된다(같은 단계의 재발행에도 움직인다). 계약 밖 추가분.
+    step_started_at: datetime | None = None
+    updated_at: datetime
+    # 실패한 체인을 운영자가 확인한 시각(:ack). 이것도 계약 밖 추가분이다.
+    acked_at: datetime | None = None
+    actor: str
+
+
+class PoolAutomationState(Wire):
+    """``POST /pool:pause`` / ``:resume`` 의 응답. 계약이 정한 그대로 한 필드다."""
+
+    automation_paused: bool = False
+
+
+class PoolEvent(Wire):
+    id: uuid.UUID
+    kind: PoolEventKind
+    account_id: uuid.UUID | None = None
+    server_id: uuid.UUID | None = None
+    detail: dict = Field(default_factory=dict)
+    created_at: datetime
+    actor: str
+
+
+class PoolOverview(Wire):
+    automation_paused: bool = False
+    accounts: list[PoolAccount] = Field(default_factory=list)
+    servers: list[PoolServer] = Field(default_factory=list)
+    recommendations: list[PoolRecommendation] = Field(default_factory=list)
+
+
+# `Server.pool_policy` 는 여기보다 위에서 선언되므로(파일 순서상 PoolPolicy 가 뒤),
+# 전방 참조를 지금 해소한다. 늦은 rebuild 에 기대면 첫 응답에서 터진다.
+Server.model_rebuild()
 
 
 class EnrollTokenRequest(Wire):
@@ -323,6 +481,8 @@ AlertKind = Literal[
     "alert_webhook_dropped",
     "dangerous_command",
     "credential_unusable",
+    "account_window_high",
+    "pool_chain_failed",
 ]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]
