@@ -157,6 +157,16 @@ export function PoolPanel({ tenantId }: { tenantId: string }) {
   // 첫 마운트(이전 없음)는 건너뛴다. 이동 기록은 POLL 길이 뒤에 지운다.
   const prevStateRef = useRef<Map<string, PoolState> | null>(null);
   const [moves, setMoves] = useState<Map<string, CardMove>>(new Map());
+  // 삭제 타이머는 다음 폴링이 와도 살아 있어야 꼬리표가 제때 떨어진다. 효과
+  // 정리에서 지우지 않고 모아 두었다가 언마운트 때만 일괄 해제한다.
+  const moveTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  useEffect(() => {
+    const timers = moveTimersRef.current;
+    return () => {
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+    };
+  }, []);
   useEffect(() => {
     if (data === undefined) return;
     const cur = data.accounts;
@@ -172,13 +182,14 @@ export function PoolPanel({ tenantId }: { tenantId: string }) {
     if (moved.length === 0) return;
     setMoves((m) => new Map([...m, ...moved]));
     const t = setTimeout(() => {
+      moveTimersRef.current.delete(t);
       setMoves((m) => {
         const next = new Map(m);
         for (const [id] of moved) if (next.get(id)?.at === at) next.delete(id);
         return next;
       });
     }, POLL);
-    return () => clearTimeout(t);
+    moveTimersRef.current.add(t);
   }, [data]);
 
   // 계정별 최신 state_changed 이벤트의 사유(있으면 꼬리표에 덧붙인다).
