@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
   allowedPoolActions,
   chainStepLabel,
+  coolingProgress,
   coolingRemainingMs,
+  diffChanged,
   fmtElapsed,
   fmtRemaining,
+  fmtRemainingPrecise,
   groupAccountsByLane,
   isChainActive,
   isChainStep,
@@ -14,6 +17,7 @@ import {
   poolCounts,
   poolEventKindLabel,
   poolStateLabel,
+  recommendationBasis,
   recommendationKindLabel,
   ineligibleReasonLabel,
   windowLabel,
@@ -139,6 +143,65 @@ describe('충전소 남은 시간', () => {
     expect(fmtRemaining(45 * 60000)).toBe('45분');
     expect(fmtRemaining((2 * 60 + 15) * 60000)).toBe('2시간 15분');
     expect(fmtRemaining((25 * 60) * 60000)).toBe('1일 1시간');
+  });
+
+  it('10분 미만은 mm:ss, 이상은 분 단위, 0 이하는 복귀 대기', () => {
+    expect(fmtRemainingPrecise(0)).toBe('복귀 대기');
+    expect(fmtRemainingPrecise(-5)).toBe('복귀 대기');
+    expect(fmtRemainingPrecise((3 * 60 + 9) * 1000)).toBe('03:09');
+    expect(fmtRemainingPrecise(10 * 60000 - 1000)).toBe('09:59');
+    expect(fmtRemainingPrecise(10 * 60000)).toBe('10분');
+    expect(fmtRemainingPrecise((1 * 3600 + 12 * 60) * 1000)).toBe('1시간 12분');
+  });
+});
+
+describe('충전 진행률', () => {
+  const start = '2026-08-22T00:00:00Z';
+  const end = '2026-08-22T01:00:00Z';
+  const t = (iso: string) => new Date(iso).getTime();
+
+  it('시각이 하나라도 없으면 null', () => {
+    expect(coolingProgress({ poolStateChangedAt: null, coolingUntil: end }, t(start))).toBeNull();
+    expect(coolingProgress({ poolStateChangedAt: start, coolingUntil: undefined }, t(start))).toBeNull();
+  });
+  it('파싱 실패(NaN)면 null', () => {
+    expect(coolingProgress({ poolStateChangedAt: 'bad', coolingUntil: end }, t(start))).toBeNull();
+  });
+  it('완료가 시작보다 앞이거나 같으면 null', () => {
+    expect(coolingProgress({ poolStateChangedAt: end, coolingUntil: start }, t(end))).toBeNull();
+    expect(coolingProgress({ poolStateChangedAt: start, coolingUntil: start }, t(start))).toBeNull();
+  });
+  it('구간 안에서는 비율, 지나면 1, 이전이면 0', () => {
+    expect(coolingProgress({ poolStateChangedAt: start, coolingUntil: end }, t('2026-08-22T00:30:00Z'))).toBeCloseTo(0.5);
+    expect(coolingProgress({ poolStateChangedAt: start, coolingUntil: end }, t('2026-08-22T02:00:00Z'))).toBe(1);
+    expect(coolingProgress({ poolStateChangedAt: start, coolingUntil: end }, t('2026-08-21T00:00:00Z'))).toBe(0);
+  });
+});
+
+describe('권고 판정 근거', () => {
+  const policy = { swapAtPct: 85, prefetchAtPct: 70, targetLeases: 2 };
+  it('교체·미리 전달은 임계 대 현재값', () => {
+    expect(recommendationBasis({ kind: 'swap', triggerPct: 91.4 }, policy, 1)).toBe('교체 임계 85% 이상 · 현재 91%');
+    expect(recommendationBasis({ kind: 'prefetch', triggerPct: 72 }, policy, 1)).toBe('미리 전달 임계 70% 이상 · 현재 72%');
+  });
+  it('배정·초과 회수는 목표 대여 대 현재 대여를 기준으로만 적는다', () => {
+    expect(recommendationBasis({ kind: 'lease', triggerPct: null }, policy, 1)).toBe('기준 목표 대여 2 · 현재 대여 1');
+    expect(recommendationBasis({ kind: 'recall_idle' }, policy, 3)).toBe('기준 목표 대여 2 · 현재 대여 3');
+  });
+  it('정책이 없으면 현재값만', () => {
+    expect(recommendationBasis({ kind: 'swap', triggerPct: 90 }, undefined, 0)).toBe('현재 90%');
+    expect(recommendationBasis({ kind: 'swap' }, undefined, 0)).toBe('현재값 없음');
+  });
+});
+
+describe('id 집합 차이', () => {
+  it('동일 집합은 빈 결과', () => {
+    expect(diffChanged(['a', 'b'], ['b', 'a'])).toEqual({ added: [], removed: [] });
+  });
+  it('추가와 삭제를 나눈다', () => {
+    expect(diffChanged(['a'], ['a', 'b'])).toEqual({ added: ['b'], removed: [] });
+    expect(diffChanged(['a', 'b'], ['b'])).toEqual({ added: [], removed: ['a'] });
+    expect(diffChanged(new Set(['a']), new Set(['c']))).toEqual({ added: ['c'], removed: ['a'] });
   });
 });
 

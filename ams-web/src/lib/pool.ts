@@ -5,7 +5,9 @@ import type {
   IneligibleReason,
   PoolAccount,
   PoolEventKind,
+  PoolPolicy,
   PoolState,
+  Recommendation,
   RecommendationKind,
 } from './api-client/types';
 import type { PoolAccountVerb } from './api-client/client';
@@ -178,6 +180,70 @@ export function fmtRemaining(ms: number): string {
   if (days > 0) return `${days}일 ${hours}시간`;
   if (hours > 0) return `${hours}시간 ${mins}분`;
   return `${mins}분`;
+}
+
+// 충전소 카운트다운. 10분 이상은 분 단위(fmtRemaining), 10분 미만은 시계식
+// "mm:ss". 0 이하는 복귀 대기(서버가 아직 배급처로 옮기지 않은 구간).
+export function fmtRemainingPrecise(ms: number): string {
+  if (ms <= 0) return '복귀 대기';
+  if (ms >= 10 * 60000) return fmtRemaining(ms);
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(m)}:${pad(s)}`;
+}
+
+// 충전 진행률 0~1. 시작(poolStateChangedAt)과 완료(coolingUntil) 시각이 둘 다
+// 있고 파싱되며 완료가 시작보다 뒤일 때만 값을 내고, 아니면 null(게이지 숨김).
+// now가 완료를 지나면 1로 고정된다.
+export function coolingProgress(
+  a: Pick<PoolAccount, 'poolStateChangedAt' | 'coolingUntil'>,
+  now: number,
+): number | null {
+  if (!a.poolStateChangedAt || !a.coolingUntil) return null;
+  const start = new Date(a.poolStateChangedAt).getTime();
+  const end = new Date(a.coolingUntil).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  return Math.min(1, Math.max(0, (now - start) / (end - start)));
+}
+
+// 권고 판정 근거 한 줄. swap/prefetch는 서버 정책 임계와 triggerPct를 그대로
+// 조합한다. lease/recall_idle은 서버가 근거를 내려주지 않아 목표 대여 수와
+// 현재 대여 수를 "기준"으로만 적고 단정하지 않는다.
+export function recommendationBasis(
+  r: Pick<Recommendation, 'kind' | 'triggerPct'>,
+  policy: Pick<PoolPolicy, 'swapAtPct' | 'prefetchAtPct' | 'targetLeases'> | undefined,
+  leasedCount: number,
+): string {
+  const cur = r.triggerPct == null ? '현재값 없음' : `현재 ${Math.round(r.triggerPct)}%`;
+  if (!policy) return cur;
+  switch (r.kind) {
+    case 'swap':
+      return `교체 임계 ${policy.swapAtPct}% 이상 · ${cur}`;
+    case 'prefetch':
+      return `미리 전달 임계 ${policy.prefetchAtPct}% 이상 · ${cur}`;
+    case 'lease':
+      return `기준 목표 대여 ${policy.targetLeases} · 현재 대여 ${leasedCount}`;
+    case 'recall_idle':
+      return `기준 목표 대여 ${policy.targetLeases} · 현재 대여 ${leasedCount}`;
+    default:
+      return cur;
+  }
+}
+
+// 두 id 집합의 차이. 폴링 전후를 비교해 새로 생긴 항목에만 강조를 붙인다.
+export function diffChanged(
+  prev: Iterable<string>,
+  next: Iterable<string>,
+): { added: string[]; removed: string[] } {
+  const p = new Set(prev);
+  const n = new Set(next);
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const id of n) if (!p.has(id)) added.push(id);
+  for (const id of p) if (!n.has(id)) removed.push(id);
+  return { added, removed };
 }
 
 // -- 창 사용률 조회 ----------------------------------------------------------
