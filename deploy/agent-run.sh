@@ -6,6 +6,8 @@
 #
 # 사용법:
 #   deploy/agent-run.sh <up|down|status|logs> [플래그]
+#   `up` 을 플래그 없이 부르면 agent-setup.sh install 이 기록한 .amx-agent/setup.env
+#   의 설치 인자(--token 제외)를 자동으로 복원해 재기동한다.
 #
 # 필수(플래그 또는 환경변수):
 #   --ams HOST:PORT        PC의 gRPC 주소            (env AMX_AMS_ADDR)
@@ -66,6 +68,28 @@ CLIENT_CERT="${AMX_AMS_TLS_CLIENT_CERT:-}"
 CLIENT_KEY="${AMX_AMS_TLS_CLIENT_KEY:-}"
 
 ACTION="${1:-}"; shift || true
+
+# up 을 플래그 없이 부르면 agent-setup.sh install 이 남긴 .amx-agent/setup.env 의
+# 설치 인자를 그대로 다시 쓴다(재기동용). 플래그를 하나라도 주면 파일은 무시한다.
+# --token 은 1회용이라 복원하지 않는다(재접속은 저장된 자격증명을 쓴다).
+SETUP_ENV="$DEV_DIR/setup.env"
+if [ "$ACTION" = up ] && [ $# -eq 0 ] && [ -f "$SETUP_ENV" ]; then
+  AMX_SETUP_ARGS=""; AMX_SETUP_CONFIG_DIR=""; AMX_SETUP_TSAMX_BIN=""
+  # shellcheck disable=SC1090
+  . "$SETUP_ENV"
+  # shellcheck disable=SC2206
+  restored=(); skip=0
+  for w in $AMX_SETUP_ARGS; do
+    [ $skip = 1 ] && { skip=0; continue; }
+    [ "$w" = --token ] && { skip=1; continue; }
+    restored+=("$w")
+  done
+  set -- "${restored[@]}"
+  [ -n "$AMX_SETUP_CONFIG_DIR" ] && set -- --config-dir "$AMX_SETUP_CONFIG_DIR" "$@"
+  [ -n "$AMX_SETUP_TSAMX_BIN" ]  && set -- --tsamx-bin "$AMX_SETUP_TSAMX_BIN" "$@"
+  ok "설치 설정 복원: $SETUP_ENV"
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --ams)         AMS_ADDR="$2"; shift 2 ;;

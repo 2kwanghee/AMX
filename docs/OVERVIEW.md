@@ -140,7 +140,7 @@ AMX/
 
 ## 5. 사용 방법
 
-> **한 번에 켜기:** `bash deploy/fullstack-run.sh up all --insecure-grpc` — DB·서버(REST+gRPC)·웹을 한 번에 띄웁니다.
+> **한 번에 켜기:** `bash deploy/fullstack-run.sh up all --insecure-grpc --lan` — DB·서버(REST+gRPC)·웹을 한 번에 띄웁니다. 플래그는 기억되므로 다음부터는 `up`만 치면 됩니다.
 > 처음부터 끝까지(노트북 에이전트 연결·실계정 왕복 포함) 따라 하는 절차는 **`docs/DEV-TEST-GUIDE.md`** 에 있습니다.
 >
 > **주의:** 관리자 화면(ams-web)은 개발 모드(`next dev`)로 뜨지 않습니다 — 보안정책(CSP)이 `next dev`가 요구하는
