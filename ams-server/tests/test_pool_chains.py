@@ -16,9 +16,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models import (
     Account,
+    AccountUsageWindow,
     AgentCommand,
     Alert,
     Assignment,
@@ -106,6 +108,65 @@ def _ingest(tenant_id, server_id, email, *, five, seven) -> None:
             reported_at=_now(),
         )
         db.commit()
+
+
+def _observe(tenant_id, server_id, email, *, five, seven, reported_at=None) -> int:
+    """이 파일의 ``_ingest`` 와 같은 시그니처를 갖는 얇은 껍데기."""
+    return _observe_payload(
+        tenant_id, server_id, _report(email, five=five, seven=seven), reported_at
+    )
+
+
+def _observe_payload(tenant_id, server_id, payload, reported_at=None) -> int:
+    """창 관측을 그 계정의 **마지막으로 알려진 값**으로 직접 적어 둔다.
+
+    ``ingest_usage_report`` 는 이제 보고한 서버가 라이브 배정을 들고 있는 계정의
+    창만 받는다(에이전트는 자기가 들고 있는 계정만 보고하고, 그 사실만이 서버
+    쪽에서 검증된다). 그런데 배급처에서 대기 중인 계정에는 배정이 없다 — 실제
+    운영에서 그 계정의 창 값은 **대여 중이던 시절에** 기록된 것이 남아 있는
+    것이고, 이 헬퍼가 만드는 상태가 바로 그 상태다.
+    """
+    stamp = reported_at or _now()
+    rows = 0
+    with _db() as db:
+        known = set(db.scalars(select(Account.id).where(Account.tenant_id == tenant_id)).all())
+        index = {
+            a.email.strip().lower(): a.id
+            for a in db.scalars(select(Account).where(Account.tenant_id == tenant_id)).all()
+            if a.email
+        }
+        for acc in payload.get("accounts", []):
+            account_id = pool._resolve_account_id(acc, email_index=index, known=known)
+            if account_id is None:
+                continue
+            for w in pool._window_rows(acc):
+                stmt = pg_insert(AccountUsageWindow).values(
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    window_id=w["window_id"],
+                    pct=w["pct"],
+                    resets_at=w["resets_at"],
+                    window_minutes=w["window_minutes"],
+                    usage_fetched_at=pool._ts(acc.get("usage_fetched_at")),
+                    reported_at=stamp,
+                    server_id=server_id,
+                )
+                db.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["tenant_id", "account_id", "window_id"],
+                        set_={
+                            "pct": stmt.excluded.pct,
+                            "resets_at": stmt.excluded.resets_at,
+                            "reported_at": stmt.excluded.reported_at,
+                            "server_id": stmt.excluded.server_id,
+                        },
+                    )
+                )
+                rows += 1
+        db.commit()
+    return rows
+
+
 
 
 def _build(tenant_id) -> list[PoolRecommendation]:
@@ -234,7 +295,7 @@ def test_lease_chain_delivers_then_switches(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", AUTO)
     account_id = _account(tenant_id, "lease@x.example.com")
-    _ingest(tenant_id, server_id, "lease@x.example.com", five=5, seven=5)
+    _observe(tenant_id, server_id, "lease@x.example.com", five=5, seven=5)
 
     recs = _build(tenant_id)
     assert [r.kind for r in recs] == ["lease"]
@@ -275,8 +336,8 @@ def test_prefetch_chain_stops_after_delivery(app_env):
     warm_id = _account(tenant_id, "warm@x.example.com")
     spare_id = _account(tenant_id, "spare@x.example.com")
     _assign(tenant_id, warm_id, server_id, "active")
-    _ingest(tenant_id, server_id, "warm@x.example.com", five=75, seven=10)
-    _ingest(tenant_id, server_id, "spare@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_id, "warm@x.example.com", five=75, seven=10)
+    _observe(tenant_id, server_id, "spare@x.example.com", five=1, seven=1)
 
     recs = _build(tenant_id)
     assert [r.kind for r in recs] == ["prefetch"]
@@ -300,8 +361,8 @@ def test_swap_chain_switches_then_recalls(app_env):
     cool_id = _account(tenant_id, "cool@x.example.com")
     hot_assignment = _assign(tenant_id, hot_id, server_id, "active")
     _assign(tenant_id, cool_id, server_id, "active")
-    _ingest(tenant_id, server_id, "hot@x.example.com", five=93, seven=40)
-    _ingest(tenant_id, server_id, "cool@x.example.com", five=5, seven=5)
+    _observe(tenant_id, server_id, "hot@x.example.com", five=93, seven=40)
+    _observe(tenant_id, server_id, "cool@x.example.com", five=5, seven=5)
 
     recs = _build(tenant_id)
     assert [r.kind for r in recs] == ["swap"]
@@ -339,8 +400,8 @@ def test_recall_idle_chain(app_env):
     drop_id = _account(tenant_id, "drop@x.example.com")
     _assign(tenant_id, keep_id, server_id, "active")
     drop_assignment = _assign(tenant_id, drop_id, server_id, "active")
-    _ingest(tenant_id, server_id, "keep@x.example.com", five=5, seven=5)
-    _ingest(tenant_id, server_id, "drop@x.example.com", five=30, seven=10)
+    _observe(tenant_id, server_id, "keep@x.example.com", five=5, seven=5)
+    _observe(tenant_id, server_id, "drop@x.example.com", five=30, seven=10)
 
     recs = _build(tenant_id)
     assert [r.kind for r in recs] == ["recall_idle"]
@@ -360,7 +421,7 @@ def test_step_timeout_fails_chain_and_opens_alert(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", AUTO)
     account_id = _account(tenant_id, "slow@x.example.com")
-    _ingest(tenant_id, server_id, "slow@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_id, "slow@x.example.com", five=1, seven=1)
 
     chain = _start(_build(tenant_id)[0].id)
     assert chain.step == "deliver"
@@ -385,16 +446,25 @@ def test_step_timeout_fails_chain_and_opens_alert(app_env):
     assert alert.detail["chain_id"] == str(chain.id)
     assert len(_events(tenant_id, "chain_failed")) == 1
 
-    # 롤백 명령은 자동으로 나가지 않는다 — 되돌릴지는 사람이 정한다.
+    # 롤백 "명령"은 자동으로 나가지 않는다 — 이미 반영된 것을 되돌릴지는 사람이 정한다.
     assert _commands(tenant_id, "recall") == []
-    assert _assignment_of(tenant_id, account_id) is not None
+    # 그러나 아직 도착하지 않은 자기 명령은 접는다. 큐에 남겨 두면 몇 시간 뒤
+    # 에이전트가 돌아왔을 때 아무도 기다리지 않는 계획이 뒤늦게 실행된다.
+    delivers = _commands(tenant_id, "deliver")
+    assert [c.status for c in delivers] == ["failed"]
+    assert "pool chain aborted" in delivers[0].detail
+    # 그 명령이 만든 배정도 되돌린다 — pending 인 채로 남으면 그 서버는 영구히
+    # in-flight 로 보여 자동화가 영영 아무것도 못 한다.
+    assert _assignment_of(tenant_id, account_id) is None
+    with _db() as db:
+        assert db.get(Account, account_id).status == "available"
 
 
 def test_failed_chain_blocks_auto_until_acked(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", AUTO)
     account_id = _account(tenant_id, "blocked@x.example.com")
-    _ingest(tenant_id, server_id, "blocked@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_id, "blocked@x.example.com", five=1, seven=1)
 
     chain = _start(_build(tenant_id)[0].id)
     _advance(now=_now() + timedelta(minutes=11))
@@ -416,9 +486,8 @@ def test_failed_chain_blocks_auto_until_acked(app_env):
         )
     assert alert.status == "resolved"
 
-    # 확인 뒤에는 다시 열린다. (앞 체인이 만든 배정은 계정을 물고 있으므로 다른
-    # 계정으로 착수한다.)
-    _set_assignment_state(_assignment_of(tenant_id, account_id).id, "detached")
+    # 확인 뒤에는 다시 열린다. 앞 체인이 만든 배정은 실패와 함께 이미 정리됐다.
+    assert _assignment_of(tenant_id, account_id) is None
     assert _auto() == 1
     with _db() as db:
         started = db.scalars(
@@ -437,7 +506,7 @@ def test_one_chain_per_server(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", AUTO)
     first_id = _account(tenant_id, "first@x.example.com")
-    _ingest(tenant_id, server_id, "first@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_id, "first@x.example.com", five=1, seven=1)
 
     # 후보가 하나뿐일 때 권고를 뽑아야 어느 계정이 뽑혔는지가 결정적이다.
     _start(_build(tenant_id)[0].id)
@@ -462,7 +531,7 @@ def test_active_chain_suppresses_new_recommendations(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", AUTO)
     _account(tenant_id, "busy@x.example.com")
-    _ingest(tenant_id, server_id, "busy@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_id, "busy@x.example.com", five=1, seven=1)
 
     _start(_build(tenant_id)[0].id)
     # 체인이 도는 동안은 "지금이라면 이렇게 하겠다"를 새로 그리지 않는다.
@@ -481,13 +550,18 @@ def test_manual_server_is_never_auto_started(app_env):
 
 def test_pause_blocks_new_chains_but_lets_running_ones_finish(app_env):
     tenant_id = _tenant()
-    running_server = _server(tenant_id, "running", AUTO)
-    idle_server = _server(tenant_id, "idle", AUTO)
+    server_a = _server(tenant_id, "a", AUTO)
+    server_b = _server(tenant_id, "b", AUTO)
     running_id = _account(tenant_id, "running@x.example.com")
-    _ingest(tenant_id, running_server, "running@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_a, "running@x.example.com", five=1, seven=1)
 
-    recs = {r.server_id: r for r in _build(tenant_id)}
-    chain = _start(recs[running_server].id)
+    # 계정이 하나뿐이므로 권고도 하나뿐이다 — 한 계정을 두 서버가 동시에 노리면
+    # 배정 유니크 제약이 한쪽을 반드시 실패시킨다(예약 규칙).
+    recs = _build(tenant_id)
+    assert len(recs) == 1
+    chain = _start(recs[0].id)
+    running_server = recs[0].server_id
+    idle_server = server_b if running_server == server_a else server_a
 
     # 남은 권고를 치우고, 두 번째 서버에 다른 계정으로 하나만 놓는다 — 착수를 막는
     # 것이 일시정지인지 "계정이 이미 물려 있음"인지 헷갈리지 않게.
@@ -538,7 +612,7 @@ def test_apply_stale_recommendation_returns_409(app_env, client):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", AUTO)
     account_id = _account(tenant_id, "rest@x.example.com")
-    _ingest(tenant_id, server_id, "rest@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_id, "rest@x.example.com", five=1, seven=1)
     rec = _build(tenant_id)[0]
 
     base = f"/api/v1/tenants/{tenant_id}"
@@ -566,7 +640,7 @@ def test_pause_resume_endpoints_and_chain_ack(app_env, client):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", AUTO)
     _account(tenant_id, "sw@x.example.com")
-    _ingest(tenant_id, server_id, "sw@x.example.com", five=1, seven=1)
+    _observe(tenant_id, server_id, "sw@x.example.com", five=1, seven=1)
     base = f"/api/v1/tenants/{tenant_id}"
 
     assert client.post(f"{base}/pool:pause").json() == {"automationPaused": True}
@@ -590,7 +664,7 @@ def test_chain_tenant_isolation(app_env, client):
     tenant_b = _tenant()
     server_a = _server(tenant_a, "a", AUTO)
     _account(tenant_a, "a@x.example.com")
-    _ingest(tenant_a, server_a, "a@x.example.com", five=1, seven=1)
+    _observe(tenant_a, server_a, "a@x.example.com", five=1, seven=1)
     rec = _build(tenant_a)[0]
     chain = _start(rec.id)
 

@@ -13,6 +13,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models import (
     Account,
@@ -109,6 +110,58 @@ def _ingest(tenant_id, server_id, payload, reported_at=None) -> int:
         return touched
 
 
+def _observe(tenant_id, server_id, payload, reported_at=None) -> int:
+    """창 관측을 그 계정의 **마지막으로 알려진 값**으로 직접 적어 둔다.
+
+    ``ingest_usage_report`` 는 이제 보고한 서버가 라이브 배정을 들고 있는 계정의
+    창만 받는다(에이전트는 자기가 들고 있는 계정만 보고하고, 그 사실만이 서버
+    쪽에서 검증된다). 그런데 배급처에서 대기 중인 계정에는 배정이 없다 — 실제
+    운영에서 그 계정의 창 값은 **대여 중이던 시절에** 기록된 것이 남아 있는
+    것이고, 이 헬퍼가 만드는 상태가 바로 그 상태다.
+    """
+    stamp = reported_at or _now()
+    rows = 0
+    with _db() as db:
+        known = set(db.scalars(select(Account.id).where(Account.tenant_id == tenant_id)).all())
+        index = {
+            a.email.strip().lower(): a.id
+            for a in db.scalars(select(Account).where(Account.tenant_id == tenant_id)).all()
+            if a.email
+        }
+        for acc in payload.get("accounts", []):
+            account_id = pool._resolve_account_id(acc, email_index=index, known=known)
+            if account_id is None:
+                continue
+            for w in pool._window_rows(acc):
+                stmt = pg_insert(AccountUsageWindow).values(
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    window_id=w["window_id"],
+                    pct=w["pct"],
+                    resets_at=w["resets_at"],
+                    window_minutes=w["window_minutes"],
+                    usage_fetched_at=pool._ts(acc.get("usage_fetched_at")),
+                    reported_at=stamp,
+                    server_id=server_id,
+                )
+                db.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["tenant_id", "account_id", "window_id"],
+                        set_={
+                            "pct": stmt.excluded.pct,
+                            "resets_at": stmt.excluded.resets_at,
+                            "reported_at": stmt.excluded.reported_at,
+                            "server_id": stmt.excluded.server_id,
+                        },
+                    )
+                )
+                rows += 1
+        db.commit()
+    return rows
+
+
+
+
 def _windows(tenant_id, account_id) -> list[AccountUsageWindow]:
     with _db() as db:
         return list(
@@ -154,6 +207,9 @@ def test_ingest_upserts_latest_window_values(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1")
     account_id = _account(tenant_id, "a@x.example.com")
+    # 에이전트는 자기가 들고 있는 계정만 보고하고, 서버 쪽에서 그 사실을 확인할 수
+    # 있는 유일한 근거가 라이브 배정이다. 배정 없는 계정의 창은 무시된다.
+    _assign(tenant_id, account_id, server_id)
 
     assert _ingest(tenant_id, server_id, _report("a@x.example.com", five=10, seven=20)) == 2
     rows = {w.window_id: w for w in _windows(tenant_id, account_id)}
@@ -174,6 +230,7 @@ def test_ingest_maps_by_ams_account_id_and_ignores_unknown_accounts(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1")
     account_id = _account(tenant_id, "known@x.example.com")
+    _assign(tenant_id, account_id, server_id)
 
     payload = _report("someone-else@x.example.com", five=5, seven=5)
     payload["accounts"][0]["account"]["ams_account_id"] = str(account_id)
@@ -189,6 +246,7 @@ def test_ingest_opens_and_resolves_account_window_high_alert(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1")
     account_id = _account(tenant_id, "hot@x.example.com")
+    _assign(tenant_id, account_id, server_id)
 
     _ingest(tenant_id, server_id, _report("hot@x.example.com", five=91, seven=10))
     with _db() as db:
@@ -226,7 +284,7 @@ def test_leased_then_cooling_then_ready(app_env):
 
     # 회수 후(detached) 창이 막혀 있으면 충전소로 간다.
     resets_at = _now() + timedelta(hours=3)
-    _ingest(
+    _observe(
         tenant_id, server_id, _report("cycle@x.example.com", five=97, seven=30, resets_at=resets_at)
     )
     with _db() as db:
@@ -245,7 +303,7 @@ def test_leased_then_cooling_then_ready(app_env):
     # 리셋 이후의 관측이라도 pct 가 높으면 안 풀린다 — 시각만 믿으면 리셋 직후 다시
     # 소진되는 계정을 못 막는다.
     later = resets_at + timedelta(minutes=1)
-    _ingest(
+    _observe(
         tenant_id,
         server_id,
         _report("cycle@x.example.com", five=90, seven=30, resets_at=resets_at),
@@ -255,7 +313,7 @@ def test_leased_then_cooling_then_ready(app_env):
     assert _state(account_id).pool_state == "cooling"
 
     # 복귀 임계 이하 관측이 오면 배급처로.
-    _ingest(
+    _observe(
         tenant_id,
         server_id,
         _report("cycle@x.example.com", five=4, seven=6, resets_at=resets_at),
@@ -271,7 +329,7 @@ def test_cooling_releases_without_observation_after_grace(app_env):
     account_id = _account(tenant_id, "stuck@x.example.com")
 
     resets_at = _now() + timedelta(hours=1)
-    _ingest(
+    _observe(
         tenant_id, server_id, _report("stuck@x.example.com", five=99, seven=1, resets_at=resets_at)
     )
     _compute(tenant_id)
@@ -372,7 +430,7 @@ def test_manual_server_still_gets_a_recommendation(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1")  # 기본 정책 = manual
     account_id = _account(tenant_id, "free@x.example.com")
-    _ingest(tenant_id, server_id, _report("free@x.example.com", five=1, seven=1))
+    _observe(tenant_id, server_id, _report("free@x.example.com", five=1, seven=1))
     assert _build(tenant_id) == 1
     recs = _recs(tenant_id)
     assert [r.kind for r in recs] == ["lease"]
@@ -402,7 +460,7 @@ def test_paused_tenant_keeps_recommendations_but_runs_nothing(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", _auto())
     _account(tenant_id, "free@x.example.com")
-    _ingest(tenant_id, server_id, _report("free@x.example.com", five=1, seven=1))
+    _observe(tenant_id, server_id, _report("free@x.example.com", five=1, seven=1))
     with _db() as db:
         from app.models import Tenant
 
@@ -420,9 +478,9 @@ def test_swap_recommendation_and_candidate_exclusions(app_env):
     excluded_id = _account(tenant_id, "excluded@x.example.com", assignment_excluded=True)
     fresh_id = _account(tenant_id, "fresh@x.example.com")
     _assign(tenant_id, hot_id, server_id)
-    _ingest(tenant_id, server_id, _report("hot@x.example.com", five=92, seven=40))
-    _ingest(tenant_id, server_id, _report("fresh@x.example.com", five=1, seven=2))
-    _ingest(tenant_id, server_id, _report("excluded@x.example.com", five=0, seven=0))
+    _observe(tenant_id, server_id, _report("hot@x.example.com", five=92, seven=40))
+    _observe(tenant_id, server_id, _report("fresh@x.example.com", five=1, seven=2))
+    _observe(tenant_id, server_id, _report("excluded@x.example.com", five=0, seven=0))
     _compute(tenant_id)
 
     _build(tenant_id)
@@ -448,7 +506,7 @@ def test_min_lease_minutes_blocks_a_fresh_swap(app_env):
         row = db.scalar(select(Assignment).where(Assignment.account_id == hot_id))
         row.delivered_at = _now() - timedelta(minutes=5)
         db.commit()
-    _ingest(tenant_id, server_id, _report("hot@x.example.com", five=95, seven=40))
+    _observe(tenant_id, server_id, _report("hot@x.example.com", five=95, seven=40))
     _compute(tenant_id)
 
     _build(tenant_id)
@@ -463,8 +521,8 @@ def test_candidate_order_prefers_the_most_remaining_seven_day_window(app_env):
     server_id = _server(tenant_id, "s1", _auto())
     busy_id = _account(tenant_id, "busy@x.example.com")
     idle_id = _account(tenant_id, "idle@x.example.com")
-    _ingest(tenant_id, server_id, _report("busy@x.example.com", five=1, seven=60))
-    _ingest(tenant_id, server_id, _report("idle@x.example.com", five=50, seven=5))
+    _observe(tenant_id, server_id, _report("busy@x.example.com", five=1, seven=60))
+    _observe(tenant_id, server_id, _report("idle@x.example.com", five=50, seven=5))
     _compute(tenant_id)
 
     _build(tenant_id)
@@ -482,7 +540,7 @@ def test_pool_overview_and_tenant_isolation(app_env, client):
     account_id = _account(tenant_a, "a@x.example.com")
     _account(tenant_b, "b@x.example.com")
     _assign(tenant_a, account_id, server_id)
-    _ingest(tenant_a, server_id, _report("a@x.example.com", five=12, seven=34))
+    _observe(tenant_a, server_id, _report("a@x.example.com", five=12, seven=34))
     _compute(tenant_a)
 
     body = client.get(f"/api/v1/tenants/{tenant_a}/pool").json()

@@ -15,6 +15,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import get_sessionmaker
 from app.models import (
@@ -86,6 +87,23 @@ def _assign(tenant_id, account_id, server_id, state="active") -> uuid.UUID:
         return assignment.id
 
 
+def _detach(tenant_id, account_id) -> None:
+    """대여가 끝난 상태로 되돌린다 — 창 값은 남고 계정은 배급처로 돌아간다."""
+    with _db() as db:
+        for assignment in db.scalars(
+            select(Assignment).where(
+                Assignment.tenant_id == tenant_id,
+                Assignment.account_id == account_id,
+                Assignment.state != "detached",
+            )
+        ).all():
+            assignment.state = "detached"
+        account = db.get(Account, account_id)
+        if account is not None and account.status == "assigned":
+            account.status = "available"
+        db.commit()
+
+
 def _payload(email, windows) -> dict:
     return {
         "accounts": [
@@ -122,6 +140,58 @@ def _ingest(tenant_id, server_id, payload, reported_at=None) -> int:
         )
         db.commit()
         return touched
+
+
+def _observe(tenant_id, server_id, payload, reported_at=None) -> int:
+    """창 관측을 그 계정의 **마지막으로 알려진 값**으로 직접 적어 둔다.
+
+    ``ingest_usage_report`` 는 이제 보고한 서버가 라이브 배정을 들고 있는 계정의
+    창만 받는다(에이전트는 자기가 들고 있는 계정만 보고하고, 그 사실만이 서버
+    쪽에서 검증된다). 그런데 배급처에서 대기 중인 계정에는 배정이 없다 — 실제
+    운영에서 그 계정의 창 값은 **대여 중이던 시절에** 기록된 것이 남아 있는
+    것이고, 이 헬퍼가 만드는 상태가 바로 그 상태다.
+    """
+    stamp = reported_at or _now()
+    rows = 0
+    with _db() as db:
+        known = set(db.scalars(select(Account.id).where(Account.tenant_id == tenant_id)).all())
+        index = {
+            a.email.strip().lower(): a.id
+            for a in db.scalars(select(Account).where(Account.tenant_id == tenant_id)).all()
+            if a.email
+        }
+        for acc in payload.get("accounts", []):
+            account_id = pool._resolve_account_id(acc, email_index=index, known=known)
+            if account_id is None:
+                continue
+            for w in pool._window_rows(acc):
+                stmt = pg_insert(AccountUsageWindow).values(
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    window_id=w["window_id"],
+                    pct=w["pct"],
+                    resets_at=w["resets_at"],
+                    window_minutes=w["window_minutes"],
+                    usage_fetched_at=pool._ts(acc.get("usage_fetched_at")),
+                    reported_at=stamp,
+                    server_id=server_id,
+                )
+                db.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["tenant_id", "account_id", "window_id"],
+                        set_={
+                            "pct": stmt.excluded.pct,
+                            "resets_at": stmt.excluded.resets_at,
+                            "reported_at": stmt.excluded.reported_at,
+                            "server_id": stmt.excluded.server_id,
+                        },
+                    )
+                )
+                rows += 1
+        db.commit()
+    return rows
+
+
 
 
 def _windows(tenant_id, account_id) -> dict[str, AccountUsageWindow]:
@@ -223,8 +293,8 @@ def test_one_tenant_failure_does_not_roll_back_another(app_env, monkeypatch):
     broken_server = _server(broken, "bad", {"mode": "auto"})
     healthy_account = _account(healthy, "ok@x.example.com")
     broken_account = _account(broken, "bad@x.example.com")
-    _ingest(healthy, healthy_server, _std("ok@x.example.com", five=1, seven=1))
-    _ingest(broken, broken_server, _std("bad@x.example.com", five=1, seven=1))
+    _observe(healthy, healthy_server, _std("ok@x.example.com", five=1, seven=1))
+    _observe(broken, broken_server, _std("bad@x.example.com", five=1, seven=1))
     # 이 배정이 있으면 compute_states 가 broken 계정을 leased 로 적는다 — 그 변경이
     # 롤백됐는지가 격리의 증거다.
     _assign(broken, broken_account, broken_server)
@@ -269,18 +339,18 @@ def test_stale_observation_does_not_trigger_a_swap(app_env):
     _assign(tenant_id, hot_id, server_id)
     _assign(tenant_id, cool_id, server_id)
     # 40분 전의 93% 는 이미 리셋됐을 수도 있는 값이다.
-    _ingest(
+    _observe(
         tenant_id,
         server_id,
         _std("stalehot@x.example.com", five=93, seven=40),
         reported_at=_now() - timedelta(minutes=40),
     )
-    _ingest(tenant_id, server_id, _std("stalecool@x.example.com", five=5, seven=5))
+    _observe(tenant_id, server_id, _std("stalecool@x.example.com", five=5, seven=5))
 
     assert _build(tenant_id) == []
 
     # 같은 값이 지금 관측으로 다시 들어오면 그때 교체한다.
-    _ingest(tenant_id, server_id, _std("stalehot@x.example.com", five=93, seven=40))
+    _observe(tenant_id, server_id, _std("stalehot@x.example.com", five=93, seven=40))
     recs = _build(tenant_id)
     assert [r.kind for r in recs] == ["swap"]
     assert recs[0].from_account_id == hot_id
@@ -291,6 +361,10 @@ def test_unreadable_pct_is_unknown_not_zero(app_env):
     server_id = _server(tenant_id, "s1", {"mode": "auto"})
     good_id = _account(tenant_id, "good@x.example.com")
     murky_id = _account(tenant_id, "murky@x.example.com")
+    # 보고는 그 서버가 실제로 들고 있는 계정만 반영된다. 관측을 남긴 뒤 회수하면
+    # 창 값은 남고 계정은 배급처로 돌아간다 — 실제 순환에서 후보가 갖는 상태다.
+    _assign(tenant_id, good_id, server_id)
+    _assign(tenant_id, murky_id, server_id)
 
     # 문자열 숫자는 읽는다(_int 와 대칭).
     _ingest(
@@ -315,6 +389,8 @@ def test_unreadable_pct_is_unknown_not_zero(app_env):
     )
     assert _windows(tenant_id, murky_id)["five_hour"].pct is None
 
+    _detach(tenant_id, good_id)
+    _detach(tenant_id, murky_id)
     # 0% 로 접혔다면 murky 가 최우선 후보가 됐을 것이다. 미상은 후보에서 빠진다.
     recs = _build(tenant_id)
     assert [r.to_account_id for r in recs] == [good_id]
@@ -335,6 +411,7 @@ def test_missing_pct_key_is_still_zero(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1")
     account_id = _account(tenant_id, "zero@x.example.com")
+    _assign(tenant_id, account_id, server_id)
     _ingest(
         tenant_id,
         server_id,
@@ -348,7 +425,7 @@ def test_offline_server_gets_no_recommendation(app_env):
     tenant_id = _tenant()
     offline_id = _server(tenant_id, "off", {"mode": "auto"}, status="offline")
     _account(tenant_id, "waiting@x.example.com")
-    _ingest(tenant_id, offline_id, _std("waiting@x.example.com", five=1, seven=1))
+    _observe(tenant_id, offline_id, _std("waiting@x.example.com", five=1, seven=1))
 
     assert _build(tenant_id) == []
 
@@ -369,8 +446,8 @@ def test_unusable_leased_account_is_swapped_and_ends_held(app_env):
     sick_assignment = _assign(tenant_id, sick_id, server_id)
     _assign(tenant_id, spare_id, server_id)
     # 사용률은 멀쩡하다 — 교체 이유는 오직 "쓸 수 없다"다.
-    _ingest(tenant_id, server_id, _std("sick@x.example.com", five=4, seven=4))
-    _ingest(tenant_id, server_id, _std("spare@x.example.com", five=6, seven=6))
+    _observe(tenant_id, server_id, _std("sick@x.example.com", five=4, seven=4))
+    _observe(tenant_id, server_id, _std("spare@x.example.com", five=6, seven=6))
     assert _build(tenant_id) == []
 
     with _db() as db:
@@ -409,8 +486,8 @@ def test_quarantined_account_is_excluded_from_candidates(app_env):
     server_id = _server(tenant_id, "s1", {"mode": "auto"})
     bad_id = _account(tenant_id, "quar@x.example.com")
     good_id = _account(tenant_id, "fine@x.example.com")
-    _ingest(tenant_id, server_id, _std("quar@x.example.com", five=1, seven=1))
-    _ingest(tenant_id, server_id, _std("fine@x.example.com", five=50, seven=50))
+    _observe(tenant_id, server_id, _std("quar@x.example.com", five=1, seven=1))
+    _observe(tenant_id, server_id, _std("fine@x.example.com", five=50, seven=50))
 
     with _db() as db:
         alerts_service.open_alert(
@@ -441,7 +518,7 @@ def test_dropped_recommendation_is_recorded_and_events_are_purged(app_env, monke
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", {"mode": "auto"})
     account_id = _account(tenant_id, "drop@x.example.com")
-    _ingest(tenant_id, server_id, _std("drop@x.example.com", five=1, seven=1))
+    _observe(tenant_id, server_id, _std("drop@x.example.com", five=1, seven=1))
     recs = _build(tenant_id)
     assert len(recs) == 1
 
@@ -509,6 +586,7 @@ def test_windows_without_ids_falls_back_to_legacy_fields(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1")
     account_id = _account(tenant_id, "legacy@x.example.com")
+    _assign(tenant_id, account_id, server_id)
 
     # windows 껍데기는 왔지만 항목에 id 가 없다 — 그 필드는 쓸모가 없으므로
     # 같은 보고 안의 위치 필드로 폴백한다. 창을 통째로 잃는 것보다 낫다.
@@ -546,8 +624,8 @@ def test_codex_single_slot_still_allows_a_replacement_candidate(app_env):
     hot_id = _account(tenant_id, "codexhot@x.example.com", provider="codex")
     spare_id = _account(tenant_id, "codexspare@x.example.com", provider="codex")
     _assign(tenant_id, hot_id, server_id)
-    _ingest(tenant_id, server_id, _std("codexhot@x.example.com", five=94, seven=20))
-    _ingest(tenant_id, server_id, _std("codexspare@x.example.com", five=2, seven=2))
+    _observe(tenant_id, server_id, _std("codexhot@x.example.com", five=94, seven=20))
+    _observe(tenant_id, server_id, _std("codexspare@x.example.com", five=2, seven=2))
 
     # 예열(prefetch)은 여전히 막힌다 — 호스트에 자격증명은 하나뿐이다.
     # 교체(swap)의 상대로는 뽑힌다: 안 그러면 소진된 Codex 서버가 영영 못 바뀐다.
@@ -570,9 +648,9 @@ def test_api_key_accounts_are_out_of_automation_and_say_why(app_env, client):
     key_id = _account(tenant_id, "apikey@x.example.com", credential_type="api_key")
     oauth_id = _account(tenant_id, "oauth@x.example.com")
     excluded_id = _account(tenant_id, "excluded@x.example.com", assignment_excluded=True)
-    _ingest(tenant_id, server_id, _std("apikey@x.example.com", five=0, seven=0))
-    _ingest(tenant_id, server_id, _std("oauth@x.example.com", five=40, seven=40))
-    _ingest(tenant_id, server_id, _std("excluded@x.example.com", five=0, seven=0))
+    _observe(tenant_id, server_id, _std("apikey@x.example.com", five=0, seven=0))
+    _observe(tenant_id, server_id, _std("oauth@x.example.com", five=40, seven=40))
+    _observe(tenant_id, server_id, _std("excluded@x.example.com", five=0, seven=0))
 
     # 잔여량만 보면 api_key 와 excluded 가 앞서지만 둘 다 후보가 아니다.
     recs = _build(tenant_id)
@@ -588,7 +666,7 @@ def test_api_key_accounts_are_out_of_automation_and_say_why(app_env, client):
 
     # 관측을 못 읽은 계정도 이유를 말한다.
     murky_id = _account(tenant_id, "murky2@x.example.com")
-    _ingest(
+    _observe(
         tenant_id,
         server_id,
         _payload("murky2@x.example.com", {"windows": [{"id": "five_hour", "pct": "??"}]}),
@@ -615,8 +693,8 @@ def test_codex_swap_recalls_before_delivering(app_env):
     hot_id = _account(tenant_id, "cxhot@x.example.com", provider="codex")
     next_id = _account(tenant_id, "cxnext@x.example.com", provider="codex")
     hot_assignment = _assign(tenant_id, hot_id, server_id)
-    _ingest(tenant_id, server_id, _std("cxhot@x.example.com", five=95, seven=30))
-    _ingest(tenant_id, server_id, _std("cxnext@x.example.com", five=3, seven=3))
+    _observe(tenant_id, server_id, _std("cxhot@x.example.com", five=95, seven=30))
+    _observe(tenant_id, server_id, _std("cxnext@x.example.com", five=3, seven=3))
 
     recs = _build(tenant_id)
     assert [r.kind for r in recs] == ["swap"]
@@ -686,3 +764,199 @@ def _assignment_of(tenant_id, account_id):
                 Assignment.state != "detached",
             )
         ).first()
+
+
+# -- H2) 잔여 pending 배정이 서버를 영구 in-flight 로 만들지 않는다 ------------
+def test_pending_assignment_without_a_live_command_is_not_in_flight(app_env):
+    """명령이 하나도 큐에 없는 pending 은 "움직이는 중"이 아니다.
+
+    그걸 in-flight 로 세면 그 서버는 사람이 손대기 전까지 자동화에서 영구히
+    제외된다 — 아무도 그 배정을 밀고 있지 않은데도.
+    """
+    from app.core.errors import ApiError
+
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", {"mode": "auto", "target_leases": 2})
+    stray_id = _account(tenant_id, "stray@x.example.com")
+    free_id = _account(tenant_id, "free@x.example.com")
+    # 배정 행만 만들고 전달 명령은 내지 않는다(수동 API 의 정상 경로이자, 실패한
+    # 체인이 정리되기 전에 남길 수 있는 모양이기도 하다).
+    with _db() as db:
+        inventory.create_assignment(
+            db, tenant_id, account_id=stray_id, server_id=server_id, pinned=False
+        )
+    _observe(tenant_id, server_id, _std("free@x.example.com", five=2, seven=2))
+    rec_id = _mk_rec(tenant_id, server_id, "prefetch", from_id=stray_id, to_id=free_id)
+
+    # 아무 명령도 큐에 없으므로 이 서버는 in-flight 가 아니다.
+    with _db() as db:
+        chain = pool.start_chain(
+            db, db.get(PoolRecommendation, rec_id), actor="op@x.example.com"
+        )
+        assert chain.to_account_id == free_id
+
+    # 반대로 명령이 실제로 큐에 있으면 그 서버는 in-flight 다.
+    other_id = _account(tenant_id, "other@x.example.com")
+    second = _mk_rec(tenant_id, server_id, "prefetch", from_id=stray_id, to_id=other_id)
+    with _db() as db:
+        try:
+            pool.start_chain(
+                db, db.get(PoolRecommendation, second), actor="op@x.example.com"
+            )
+        except ApiError as exc:
+            # 앞 체인이 이미 돌고 있으므로 chain_active 가 먼저 걸린다.
+            assert exc.code in ("pool.chain_active", "pool.server_in_flight")
+        else:  # pragma: no cover
+            raise AssertionError("두 번째 체인이 착수됐다")
+
+
+# -- M4) 한 계정을 두 서버가 동시에 노리지 않는다 ------------------------------
+def test_one_account_is_never_targeted_by_two_servers(app_env):
+    from app.core.errors import ApiError
+    from app.models import PoolChain
+
+    tenant_id = _tenant()
+    server_a = _server(tenant_id, "a", {"mode": "auto"})
+    server_b = _server(tenant_id, "b", {"mode": "auto"})
+    only_id = _account(tenant_id, "only@x.example.com")
+    _observe(tenant_id, server_a, _std("only@x.example.com", five=1, seven=1))
+
+    # 계정이 하나면 권고도 하나다. 둘을 만들면 배정 유니크 제약이 반드시 한쪽을
+    # 실패시키고, 그 서버는 운영자 확인을 기다리며 멈춘다.
+    recs = _build(tenant_id)
+    assert len(recs) == 1
+    owner = recs[0].server_id
+    other = server_b if owner == server_a else server_a
+
+    with _db() as db:
+        pool.start_chain(db, db.get(PoolRecommendation, recs[0].id), actor="op@x.example.com")
+
+    # 체인이 도는 동안에도 예약은 유효하다 — 다른 서버에 손으로 권고를 놓고
+    # 실행하려 해도 막힌다.
+    rec_id = _mk_rec(tenant_id, other, "lease", to_id=only_id)
+    with _db() as db:
+        try:
+            pool.start_chain(db, db.get(PoolRecommendation, rec_id), actor="op@x.example.com")
+        except ApiError as exc:
+            assert exc.status == 409
+            assert exc.code == "pool.target_reserved"
+        else:  # pragma: no cover
+            raise AssertionError("두 서버가 같은 계정을 잡았다")
+    with _db() as db:
+        assert (
+            len(db.scalars(select(PoolChain).where(PoolChain.tenant_id == tenant_id)).all())
+            == 1
+        )
+
+
+def _mk_rec(tenant_id, server_id, kind, *, from_id=None, to_id=None) -> uuid.UUID:
+    with _db() as db:
+        row = PoolRecommendation(
+            tenant_id=tenant_id,
+            server_id=server_id,
+            kind=kind,
+            from_account_id=from_id,
+            to_account_id=to_id,
+            reason="테스트가 놓은 권고",
+        )
+        db.add(row)
+        db.commit()
+        return row.id
+
+
+# -- M5) 도는 체인 위로 수동 조작이 끼어들지 못한다 ----------------------------
+def test_manual_assignment_actions_are_blocked_while_a_chain_runs(app_env, client):
+    from app.models import PoolChain
+
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", {"mode": "auto", "target_leases": 2})
+    held_id = _account(tenant_id, "held@x.example.com")
+    _account(tenant_id, "incoming@x.example.com")
+    held_assignment = _assign(tenant_id, held_id, server_id)
+    _observe(tenant_id, server_id, _std("held@x.example.com", five=96, seven=50))
+    _observe(tenant_id, server_id, _std("incoming@x.example.com", five=2, seven=2))
+
+    recs = _build(tenant_id)
+    assert [r.kind for r in recs] == ["swap"]
+    with _db() as db:
+        chain = pool.start_chain(
+            db, db.get(PoolRecommendation, recs[0].id), actor="op@x.example.com"
+        )
+        chain_id = chain.id
+
+    base = f"/api/v1/tenants/{tenant_id}/assignments/{held_assignment}"
+    for action in (":recall", ":switch-now"):
+        response = client.post(f"{base}{action}")
+        assert response.status_code == 409, action
+        assert response.json()["code"] == "pool.chain_active"
+
+    # 체인은 그대로 살아 있고 배정도 움직이지 않았다.
+    with _db() as db:
+        assert db.get(PoolChain, chain_id).step in ("deliver", "switch")
+        assert db.get(Assignment, held_assignment).state == "active"
+
+    # force 회수는 탈출구다: 막지 않되 체인을 실패로 접는다.
+    forced = client.post(f"{base}:recall", json={"force": True})
+    assert forced.status_code == 200
+    with _db() as db:
+        failed = db.get(PoolChain, chain_id)
+        assert failed.step == "failed"
+        assert "강제" in failed.error
+        assert db.get(Assignment, held_assignment).state == "recalling"
+
+
+def test_manual_actions_are_untouched_without_a_chain(app_env, client):
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1")
+    account_id = _account(tenant_id, "plain@x.example.com")
+    assignment_id = _assign(tenant_id, account_id, server_id)
+
+    base = f"/api/v1/tenants/{tenant_id}/assignments/{assignment_id}"
+    assert client.post(f"{base}:switch-now").status_code == 200
+    assert client.post(f"{base}:recall").json()["state"] == "recalling"
+
+
+# -- M6) 초과분 회수도 신선한 관측과 최소 대여를 지킨다 ------------------------
+def test_recall_idle_skips_fresh_leases_and_stale_readings(app_env):
+    tenant_id = _tenant()
+    server_id = _server(
+        tenant_id, "s1", {"mode": "auto", "target_leases": 1, "min_lease_minutes": 30}
+    )
+    old_id = _account(tenant_id, "old@x.example.com")
+    fresh_id = _account(tenant_id, "fresh@x.example.com")
+    _assign(tenant_id, old_id, server_id)  # delivered_at = 4시간 전
+    with _db() as db:
+        assignment = inventory.create_assignment(
+            db, tenant_id, account_id=fresh_id, server_id=server_id, pinned=False
+        )
+        assignment.state = "active"
+        assignment.delivered_at = _now()  # 방금 올렸다
+        db.commit()
+
+    # 방금 올린 계정이 가장 소진돼 보여도 거두지 않는다 — min_lease 안이다.
+    _observe(tenant_id, server_id, _std("fresh@x.example.com", five=80, seven=80))
+    _observe(tenant_id, server_id, _std("old@x.example.com", five=10, seven=10))
+    recs = _build(tenant_id)
+    assert [r.kind for r in recs] == ["recall_idle"]
+    assert recs[0].from_account_id == old_id
+    assert recs[0].trigger_pct == 10.0
+
+    # 낡은 관측은 순위 재료가 아니다: old 의 값이 40분 전 것이면 미상으로 떨어져
+    # trigger_pct 가 빈다. 살아 있는 권고 행은 조건이 같으면 갱신되지 않으므로
+    # (created_at 이 조건의 시작 시각을 유지한다) 먼저 치운다.
+    with _db() as db:
+        for row in db.scalars(
+            select(PoolRecommendation).where(PoolRecommendation.tenant_id == tenant_id)
+        ).all():
+            db.delete(row)
+        db.commit()
+    _observe(
+        tenant_id,
+        server_id,
+        _std("old@x.example.com", five=10, seven=10),
+        reported_at=_now() - timedelta(minutes=40),
+    )
+    recs = _build(tenant_id)
+    assert [r.kind for r in recs] == ["recall_idle"]
+    assert recs[0].from_account_id == old_id
+    assert recs[0].trigger_pct is None

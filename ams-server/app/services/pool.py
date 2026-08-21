@@ -72,6 +72,33 @@ _DETACHED = "detached"
 # 서버에 전달이 진행 중이면 컨트롤러는 그 서버에 아무 권고도 내지 않는다. reconcile 의
 # CORRECTION_CAP 과 부딪히면 둘 다 in-flight 스킵으로 서로를 막기 때문이다(기획서 §4.2).
 _IN_FLIGHT_STATES = ("pending", "delivering", "recalling")
+# 그중 ``pending`` 은 애매하다. 배정 행만 만들고 전달 명령은 아직 안 낸 상태라, 큐에
+# 아무 명령도 없으면 움직이는 것이 하나도 없다 — 그런 배정을 in-flight 로 세면 그
+# 서버는 사람이 손대기 전까지 자동화에서 영구히 제외된다. 그래서 "명령이 실제로 큐에
+# 있거나 나갔는가"까지 확인한다.
+_AMBIGUOUS_IN_FLIGHT_STATES = ("pending",)
+
+
+def _in_flight(db: Session, assignments: list[Assignment]) -> bool:
+    """이 배정들 중 실제로 명령이 오가는 중인 것이 있는가."""
+    ambiguous = []
+    for assignment in assignments:
+        if assignment.state not in _IN_FLIGHT_STATES:
+            continue
+        if assignment.state not in _AMBIGUOUS_IN_FLIGHT_STATES:
+            return True
+        ambiguous.append(assignment.id)
+    if not ambiguous:
+        return False
+    return (
+        db.scalars(
+            select(AgentCommand.id).where(
+                AgentCommand.assignment_id.in_(ambiguous),
+                AgentCommand.status.in_(("queued", "sent")),
+            )
+        ).first()
+        is not None
+    )
 
 # 후보에서 아예 빼는 재고 상태.
 _UNUSABLE_STATUSES = ("disabled", "quarantined")
@@ -261,15 +288,32 @@ def ingest_usage_report(
     ).all()
     known = {r.id for r in rows}
     email_index = {r.email.strip().lower(): r.id for r in rows if r.email}
+    # 이 서버가 **실제로 들고 있는** 계정만 받는다. 보고는 에이전트가 스스로 채우는
+    # 목록이라, 잘못 설정된(또는 장악된) 서버 한 대가 남의 계정 창을 덮어써서 그
+    # 계정을 충전소에 가두거나 반대로 소진된 계정을 여유 있어 보이게 만들 수 있다.
+    # 배정이 유일하게 서버 쪽에서 검증된 사실이므로 그것을 기준으로 삼는다.
+    reportable = set(
+        db.scalars(
+            select(Assignment.account_id).where(
+                Assignment.tenant_id == tenant_id,
+                Assignment.server_id == server_id,
+                Assignment.state != _DETACHED,
+            )
+        ).all()
+    )
 
     stamp = _aware(reported_at) or _now()
     high_pct = get_settings().pool_window_high_pct
     touched = 0
+    unowned = 0
     for acc in accounts:
         if not isinstance(acc, dict):
             continue
         account_id = _resolve_account_id(acc, email_index=email_index, known=known)
         if account_id is None:
+            continue
+        if account_id not in reportable:
+            unowned += 1
             continue
         fetched_at = _ts(acc.get("usage_fetched_at"))
         windows = _window_rows(acc)
@@ -309,6 +353,13 @@ def ingest_usage_report(
             windows=windows,
             high_pct=high_pct,
             source_snapshot_id=source_snapshot_id,
+        )
+    if unowned:
+        _logger.warning(
+            "server %s reported %d account(s) it holds no live assignment for; "
+            "their windows were ignored",
+            server_id,
+            unowned,
         )
     return touched
 
@@ -753,6 +804,7 @@ def _candidates(
     windows: dict[uuid.UUID, list[AccountUsageWindow]],
     unusable: set[uuid.UUID],
     server_has_live: bool,
+    reserved: set[uuid.UUID] | None = None,
     replacing: bool = False,
 ) -> list[Account]:
     """배급처에서 뽑을 수 있는 계정 목록, 기획서 §2.4 의 순서로 정렬해 반환.
@@ -778,6 +830,8 @@ def _candidates(
         if account.pool_state in ("cooling", "recalling", "leased"):
             continue
         if account.id in live:
+            continue
+        if reserved is not None and account.id in reserved:
             continue
         # Codex 는 서버당 1개 제한이라, 이미 뭔가 붙어 있는 서버에는 얹지 않는다.
         # 다만 대체 상대를 찾는 중이면 이 필터를 걸지 않는다(§8 — 나가는 계정의
@@ -928,15 +982,20 @@ def _desired_recommendation(
         }
 
     if len(leased) > target:
-        # 초과분은 남은 여유가 가장 적은 계정부터 거둔다.
-        drop = max(leased, key=lambda a: (_max_pct(windows.get(a.id, [])), str(a.id)))
-        if now - _lease_started_at(live[drop.id]) < min_lease:
+        # 초과분은 남은 여유가 가장 적은 계정부터 거둔다. 방금 올린 계정은 후보에서
+        # 빼고(min_lease), 순위는 신선한 관측으로만 매긴다 — 낡은 pct 로 고르면
+        # 이미 리셋된 계정을 "가장 소진된 것"으로 착각해 거둔다.
+        settled = [
+            a for a in leased if now - _lease_started_at(live[a.id]) >= min_lease
+        ]
+        if not settled:
             return None
+        drop = max(settled, key=lambda a: (_fresh(a) if _fresh(a) is not None else -1.0, str(a.id)))
         return {
             "kind": "recall_idle",
             "from_account_id": drop.id,
             "to_account_id": None,
-            "trigger_pct": _max_pct(windows.get(drop.id, [])),
+            "trigger_pct": _fresh(drop),
             "reason": (
                 f"대여 계정이 {len(leased)}개로 목표({target}개)를 넘겼다. "
                 f"{drop.email}을 배급처로 거둔다."
@@ -987,9 +1046,18 @@ def build_recommendations(
     # 이렇게 하겠다"가 나란히 보이면 운영자는 실행할 수 없는 버튼을 누르게 된다.
     busy = _servers_with_active_chain(db, tenant_id)
     stale_after = _stale_after()
+    # 한 계정을 두 서버가 동시에 노리지 않게 한다. 배정 유니크 제약이 결국 한쪽을
+    # 막긴 하지만, 그때는 이미 체인이 시작된 뒤라 그 서버는 실패 하나를 얻고 운영자
+    # 확인을 기다리게 된다. 권고 단계에서 갈라놓는 편이 훨씬 싸다.
+    reservations = _reservations(db, tenant_id)
 
     created = 0
     for server in servers:
+        reserved = {
+            account_id
+            for account_id, owner_id in reservations.items()
+            if owner_id != server.id
+        }
         policy = resolve_policy(server)
         server_live = [a for a in live.values() if a.server_id == server.id]
         desired: dict | None = None
@@ -1002,8 +1070,7 @@ def build_recommendations(
         # "누르면 된다"처럼 보이는 버튼이 떠 있게 된다. 이미 도는 체인은 여기서
         # 건드리지 않는다 — 단계 타임아웃이 접는다.
         if server.id not in busy and server.status != "offline":
-            in_flight = any(a.state in _IN_FLIGHT_STATES for a in server_live)
-            if not in_flight:
+            if not _in_flight(db, server_live):
                 leased = [
                     by_id[a.account_id]
                     for a in server_live
@@ -1021,6 +1088,7 @@ def build_recommendations(
                         live=live,
                         windows=windows,
                         unusable=unusable,
+                        reserved=reserved,
                         server_has_live=bool(server_live),
                     ),
                     replacements=_candidates(
@@ -1028,6 +1096,7 @@ def build_recommendations(
                         live=live,
                         windows=windows,
                         unusable=unusable,
+                        reserved=reserved,
                         server_has_live=bool(server_live),
                         replacing=True,
                     ),
@@ -1035,10 +1104,40 @@ def build_recommendations(
                     stale_after=stale_after,
                     now=stamp,
                 )
+        if desired is not None and desired["to_account_id"] is not None:
+            # 이번 틱에 만든 권고의 대상도 곧바로 예약된다 — 뒤에 오는 서버가 같은
+            # 계정을 다시 고르면 둘 중 하나는 반드시 실패한다.
+            reservations[desired["to_account_id"]] = server.id
         created += _reconcile_recommendation(
             db, tenant_id=tenant_id, server_id=server.id, desired=desired
         )
     return created
+
+
+def _reservations(db: Session, tenant_id: uuid.UUID) -> dict[uuid.UUID, uuid.UUID]:
+    """계정 -> 그 계정을 이미 대상으로 잡은 서버.
+
+    자기 서버의 예약은 예약이 아니다 — 그래서 집합이 아니라 사상(mapping)이다.
+    집합으로 두면 서버가 자기가 지난 틱에 만든 권고 때문에 후보를 잃고, 매 틱
+    권고를 지웠다 만들었다 하며 ``created_at`` 이 계속 초기화된다.
+    """
+    owner: dict[uuid.UUID, uuid.UUID] = {}
+    for account_id, server_id in db.execute(
+        select(PoolRecommendation.to_account_id, PoolRecommendation.server_id).where(
+            PoolRecommendation.tenant_id == tenant_id,
+            PoolRecommendation.to_account_id.is_not(None),
+        )
+    ).all():
+        owner[account_id] = server_id
+    for account_id, server_id in db.execute(
+        select(PoolChain.to_account_id, PoolChain.server_id).where(
+            PoolChain.tenant_id == tenant_id,
+            PoolChain.step.in_(CHAIN_ACTIVE_STEPS),
+            PoolChain.to_account_id.is_not(None),
+        )
+    ).all():
+        owner[account_id] = server_id
+    return owner
 
 
 def _reconcile_recommendation(
@@ -1243,11 +1342,13 @@ def _chain_detail(chain: PoolChain, **extra) -> dict:
 def _touch(db: Session, chain: PoolChain, *, step: str, now: datetime, **detail) -> bool:
     """체인을 다음 단계로 옮기고 감사 한 줄을 남긴다. 항상 True(무언가 일어났다).
 
-    ``updated_at`` 은 여기서만 움직인다 — 그래서 단계 타임아웃이 "이 단계에 들어온
-    뒤 흐른 시간"을 정확히 뜻하고, 아무 일도 없는 틱이 시계를 되감지 못한다.
+    ``updated_at`` 은 **단계가 실제로 바뀔 때만** 움직인다. 그래야 단계 타임아웃이
+    "이 단계에 들어온 뒤 흐른 시간"을 뜻한다 — 같은 단계 안에서 명령을 발행할 때마다
+    시계를 다시 감으면, 한 단계가 제한 시간의 두 배를 쓰고도 만료되지 않는다.
     """
+    if chain.step != step:
+        chain.updated_at = now
     chain.step = step
-    chain.updated_at = now
     record_event(
         db,
         tenant_id=chain.tenant_id,
@@ -1275,6 +1376,74 @@ def _finish(db: Session, chain: PoolChain, *, now: datetime, **detail) -> bool:
     return True
 
 
+def _chain_assignment_ids(db: Session, chain: PoolChain) -> list[uuid.UUID]:
+    """이 체인이 만질 수 있는 (서버, 계정) 배정 행 전부 — 상태 무관."""
+    account_ids = [a for a in (chain.to_account_id, chain.from_account_id) if a]
+    if not account_ids:
+        return []
+    return list(
+        db.scalars(
+            select(Assignment.id).where(
+                Assignment.tenant_id == chain.tenant_id,
+                Assignment.server_id == chain.server_id,
+                Assignment.account_id.in_(account_ids),
+            )
+        ).all()
+    )
+
+
+def _abort_chain_commands(db: Session, chain: PoolChain, reason: str) -> list[str]:
+    """이 체인이 남긴 미전달 명령을 접고, 그 명령이 만든 배정 상태를 되돌린다.
+
+    실패를 선언하면서 자기가 낸 명령을 큐에 그대로 두면, 몇 시간 뒤 에이전트가
+    돌아왔을 때 아무도 기다리지 않는 계획이 뒤늦게 실행된다. 운영자는 그 사이
+    손으로 다른 결정을 내렸을 것이고, 그 둘이 충돌한다.
+
+    **새 명령은 내지 않는다.** 되돌리기는 아직 도착하지 않은 명령을 취소하는 것뿐이고,
+    이미 에이전트에 반영된 것을 원복하는 판단은 사람 몫이다(_fail 참조).
+    """
+    assignment_ids = _chain_assignment_ids(db, chain)
+    if not assignment_ids:
+        return []
+    pending_commands = list(
+        db.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id.in_(assignment_ids),
+                AgentCommand.status.in_(("queued", "sent")),
+            )
+        ).all()
+    )
+    aborted = []
+    for command in pending_commands:
+        command.status = "failed"
+        command.detail = f"pool chain aborted: {reason}"
+        command.updated_at = _now()
+        aborted.append(command.command_id)
+
+    # 이 체인이 만든 배정(pending/delivering)은 되돌려 놓는다. 착수 전 in-flight
+    # 가드가 통과했다는 것은 이 상태의 배정이 그때는 없었다는 뜻이므로, 지금 있다면
+    # 이 체인이 만든 것이다. detached 로 보내면 계정은 배급처로 돌아가고 서버는
+    # 다음 결정을 받을 수 있다 — pending 인 채로 두면 그 서버가 영구히 in-flight 로
+    # 보여 자동화가 그 서버에서 영영 아무것도 못 한다.
+    for assignment in db.scalars(
+        select(Assignment).where(Assignment.id.in_(assignment_ids))
+    ).all():
+        if assignment.state in ("pending", "delivering"):
+            assignment.state = _DETACHED
+            assignment.pending_command_id = None
+            assignment.last_error = f"pool chain aborted: {reason}"
+            assignment.updated_at = _now()
+            account = db.get(Account, assignment.account_id)
+            if account is not None and account.status == "assigned":
+                account.status = "available"
+        elif assignment.state == "recalling":
+            # 회수는 되돌리지 않는다 — 이미 계정을 지웠을 수 있다. 마커만 떼어
+            # 정착된 recalling 으로 만들면 D1 경로가 detached 까지 몰고 간다.
+            assignment.pending_command_id = None
+            assignment.updated_at = _now()
+    return aborted
+
+
 def _fail(db: Session, chain: PoolChain, reason: str, *, now: datetime, **detail) -> bool:
     """체인을 실패로 접고 경보를 연다. **롤백 명령은 내지 않는다.**
 
@@ -1284,6 +1453,7 @@ def _fail(db: Session, chain: PoolChain, reason: str, *, now: datetime, **detail
     변경이다. 컨트롤러가 할 수 있는 정직한 일은 멈추고 알리는 것뿐이다.
     """
     failed_at_step = chain.step
+    aborted = _abort_chain_commands(db, chain, reason)
     chain.step = "failed"
     chain.error = reason
     chain.updated_at = now
@@ -1294,7 +1464,9 @@ def _fail(db: Session, chain: PoolChain, reason: str, *, now: datetime, **detail
         server_id=chain.server_id,
         account_id=chain.to_account_id or chain.from_account_id,
         actor=chain.actor,
-        detail=_chain_detail(chain, failed_step=failed_at_step, error=reason, **detail),
+        detail=_chain_detail(
+            chain, failed_step=failed_at_step, error=reason, aborted_commands=aborted, **detail
+        ),
     )
     alerts_service.open_alert(
         db,
@@ -1360,8 +1532,8 @@ def _advance_deliver(db: Session, chain: PoolChain, now: datetime) -> bool:
             # 배정 생성이 거부되는 이유(다른 서버에 이미 붙음, assignment_excluded,
             # Codex 서버당 1개)는 재시도로 풀리지 않는다 — 즉시 실패로 접는다.
             return _fail(db, chain, f"배정 생성 거부: {exc.code}", now=now)
-        if _expired(chain, now):
-            return _fail(db, chain, "deliver 단계 제한 시간 초과", now=now)
+        # 방금 배정을 만들었으므로 이 틱에서는 만료를 따지지 않는다. 만드는 데 성공한
+        # 직후에 "늦었다"고 접으면, 배정만 남기고 명령은 못 낸 잔해가 생긴다.
 
     if assignment.server_id != chain.server_id:
         return _fail(db, chain, "대상 계정이 다른 서버에 배정돼 있다.", now=now)
@@ -1540,11 +1712,26 @@ def start_chain(
         )
     live = _live_assignments(db, tenant_id)
     server_live = [a for a in live.values() if a.server_id == server_id]
-    if any(a.state in _IN_FLIGHT_STATES for a in server_live):
+    if _in_flight(db, server_live):
         raise conflict(
             "pool.server_in_flight",
             "이 서버에 전달·회수가 진행 중인 배정이 있다.",
         )
+
+    if recommendation.to_account_id is not None:
+        competing = db.scalars(
+            select(PoolChain).where(
+                PoolChain.tenant_id == tenant_id,
+                PoolChain.to_account_id == recommendation.to_account_id,
+                PoolChain.step.in_(CHAIN_ACTIVE_STEPS),
+            )
+        ).first()
+        if competing is not None and competing.server_id != server_id:
+            raise conflict(
+                "pool.target_reserved",
+                "그 계정은 다른 서버의 교체가 이미 대상으로 잡고 있다. "
+                "한 계정은 서버 하나에만 붙을 수 있으므로 그 체인이 끝난 뒤에 실행하라.",
+            )
 
     kind = recommendation.kind
     if kind in ("lease", "prefetch", "swap") and recommendation.to_account_id is None:
@@ -1629,6 +1816,35 @@ def start_chain(
     db.commit()
     db.refresh(chain)
     return chain
+
+
+def guard_manual_assignment_action(
+    db: Session, assignment: Assignment, *, action: str, force: bool = False
+) -> None:
+    """수동 배정 조작이 도는 체인과 부딪히지 않게 막는다.
+
+    체인은 배정 상태를 읽어 다음 단계를 정한다. 그 사이 사람이 같은 서버에서
+    deliver/recall/switch 를 손으로 실행하면 컨트롤러는 그 변화를 자기 명령의
+    결과로 읽고, 있지도 않은 진행을 근거로 다음 명령을 낸다 — 둘이 같은 배정을
+    반대 방향으로 밀면 reconcile 의 CORRECTION_CAP 이 3회에서 끊어 어느 쪽도
+    수렴하지 않는다.
+
+    ``force`` 회수만 예외다. 그건 사람이 "자동화가 뭘 하든 이건 지금 떼어내야
+    한다"고 판단한 탈출구이므로 막지 않되, 체인은 실패로 접는다 — 발밑이 바뀐
+    계획을 계속 진행시키는 것이 더 위험하다.
+    """
+    chain = active_chain_for_server(db, assignment.server_id)
+    if chain is None:
+        return
+    if force:
+        _fail(db, chain, f"운영자가 강제 {action} 을 실행해 계획이 무효가 됐다.", now=_now())
+        db.commit()
+        return
+    raise conflict(
+        "pool.chain_active",
+        f"이 서버에서 계정 풀 교체가 진행 중이라 {action} 을 지금 실행할 수 없다. "
+        "체인이 끝나기를 기다리거나, 풀 화면에서 그 체인을 확인하라.",
+    )
 
 
 def ack_chain(
