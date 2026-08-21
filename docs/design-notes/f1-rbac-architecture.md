@@ -80,3 +80,13 @@ def require_global_admin(principal=Depends(require_admin)) -> Principal:
 
 ## SSOT 수정 (오케스트레이터 반영)
 - §5.1: admins·admin_sessions 추가. §7 REST 인증 행: 다중관리자·세션·2-role·공통 집행·교차404·부트스트랩. openapi: /auth/*·/admins·403·404. proto 무변경.
+
+## 현행 대조 (2026-08-22)
+
+| 항목 | 설계(F1) | 현행 | 근거 |
+|---|---|---|---|
+| 집행 = 라우터 공통 의존성 | `require_tenant_scope`를 라우터 dependencies에 | 그대로. 다수 라우터가 `TenantScope`를 공통으로 문다 | `ams-server/app/api/deps.py:26,60` |
+| 부트스트랩 = AMX_ADMIN_TOKEN | 루트 Bearer는 항상 global-admin, admins 비어도 잠금 불가 | 그대로 | `ams-server/app/core/auth.py:75-83` |
+| 세션 = DB opaque 토큰(해시 저장) | `admin_sessions`, email+bcrypt 로그인 | 그대로 | `ams-server/app/models.py:231`, `app/core/auth.py:56` |
+| 2-role, Principal 타입 무변경 | global-admin·tenant-admin를 all_tenants/tenant_ids로 표현 | 그대로 | `ams-server/app/core/auth.py:22,38` |
+| 교차 테넌트=404 / 역량 거부=403 | 스코프(404) 먼저, 역량(403) 다음 | 이 대조에서 코드 존재는 확인, 404/403 순서·문구 자체는 미검증 | 미확인 |

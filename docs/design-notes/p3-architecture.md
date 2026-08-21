@@ -129,3 +129,13 @@ default_strategy=BEST 하달 후 switch_now(미지정)가 best로 동작.
 ## SSOT 반영 (이 브랜치에서 완료)
 - §8 O4 = 하이브리드(O4-C) 확정.
 - §6.4 = SetPolicy 하달·세션 재천명·reconcile-on-report·엔진 락 명문화.
+
+## 현행 대조 (2026-08-22)
+
+| 항목 | 설계(P3) | 현행 | 근거 |
+|---|---|---|---|
+| O4-C SetPolicy (cmd 17) | threshold_pct·default_strategy만, cooldown/hysteresis는 로컬 | 필드 두 개가 P5 F4로 proto에 올라와 O4-B로 완성(`cooldown_seconds=3`·`hysteresis_pct=4`). 나머지는 그대로 | `contracts/proto/amx.proto:246,395-408` |
+| servers 정책 컬럼(alembic 0003) | `threshold_pct`·`default_strategy` NULL=하달 안 함 | 그대로 | `ams-server/app/models.py:375-376` |
+| 결정3 reconcile-on-report | 5분 UsageReport가 actual 권위, 별도 타이머 없음 | 그대로 | `ams-server/app/services/reconcile.py` |
+| 결정8 AccountEvent Outbox = 메모리 전용, best-effort | 재시작·적재 직후 단절 시 인플라이트 1건 유실 허용 | **변경됨.** C1(회복 설계)에서 디스크 영속 outbox로 승격, 전송 확인 후에만 삭제. 두 유실창을 닫음. 잔존창은 stream.Send 성공 후 AMS 커밋 전 crash뿐 | `ama-agent/internal/reporter/outboxlog.go`, recovery-architecture.md C1 |
+| 역할 분리 (계정 풀 도입) | "AMS가 desired, AMA가 auto 틱으로 전환 실행" | 계정 풀로 역할이 더 또렷해짐. **무엇을 주고 거둘지**는 서버가 결정(서버별 `pool_policy.mode`, deliver→switch→recall 체인 착수), **한도 도달 시 계정 간 전환 실행**은 여전히 에이전트 `auto --once`+SetPolicy threshold. 두 층이 겹치지 않는다 | `ams-server/app/services/pool.py`, `app/models.py:399-404`, AMX-DESIGN §5.8 |

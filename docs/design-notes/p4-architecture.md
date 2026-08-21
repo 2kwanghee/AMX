@@ -102,3 +102,14 @@
    enforced" 문구를 P4 단일관리자 실상으로 수정(P5 훅 명시).
 4. **§5.1 servers.status:** degraded 정의 또는 제거.
 5. **O8:** P4 건너뜀·미해결 유지(반영 완료).
+
+## 현행 대조 (2026-08-22)
+
+| 항목 | 설계(P4) | 현행 | 근거 |
+|---|---|---|---|
+| 결정3·4 alerts 테이블+REST, all_exhausted 승격 | 신규 alerts + dedupe + auto-resolve | 그대로. 경보 kind가 크게 늘어 계정 풀의 `account_window_high`·`pool_chain_failed`까지 포함 | `ams-server/app/models.py`(ALERT kinds `models.py:89,93`), `app/api/v1/alerts.py` |
+| 결정5 단일 관리자 + Principal 자리 | P4는 단일 Bearer, RBAC 미구현 | **확장됨.** P5 E3/F1로 `Principal` 반환형과 다중관리자 RBAC(global-admin·tenant-admin, `admins`/`admin_sessions`)이 올라옴 | `ams-server/app/core/auth.py:22,56`, `app/api/deps.py:26` |
+| degraded 상태 정의 | 정의 또는 제거 결정 대기 | **미해결 유지.** enum·Literal에만 있고 코드 어디서도 할당하지 않는다(BACKLOG G1) | `ams-server/app/models.py:41`, `app/schemas.py:32` |
+| `GET /servers/{sid}/events` | 신설 제안 | 신설됨. 단 UI 소비자가 아직 없다(BACKLOG E2) | `ams-server/app/api/v1/servers.py:132` |
+| 콘솔 패널 목록 | 계정·서버·배정·경보 4패널 | 크게 확장. 위 넷에 더해 AuditLogPanel·SessionUsagePanel·LangfuseUsagePanel·UsageCostPanel·PoolPanel·SetupGuidePanel | `ams-web/src/components/` (PoolPanel·SessionUsagePanel·LangfuseUsagePanel·UsageCostPanel·AuditLogPanel) |
+| 결정6 O8 ClickEye | P4 건너뜀 | 그대로 미착수(BACKLOG A2) | BACKLOG A2 |
