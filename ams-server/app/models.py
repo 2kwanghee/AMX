@@ -102,6 +102,9 @@ POOL_CHAIN_STEPS = ("deliver", "switch", "recall", "done", "failed")
 POOL_EVENT_KINDS = (
     "state_changed",
     "recommendation_created",
+    # 조건이 해소되거나 다른 조건으로 바뀌어 권고가 사라질 때. 운영자가 본 버튼이
+    # 왜 없어졌는지는 이 줄 말고는 답할 곳이 없다.
+    "recommendation_dropped",
     "chain_started",
     "chain_step",
     "chain_done",
@@ -1029,7 +1032,10 @@ class AccountUsageWindow(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
     account_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
     window_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    pct: Mapped[float] = mapped_column(nullable=False, server_default=text("0"))
+    # NULL 이면 "모른다"다. proto3 이 0.0 을 빼므로 **누락**은 0.0 이지만, 값이
+    # 있는데 못 읽은 경우까지 0.0 으로 접으면 그 계정이 후보 정렬 최상위로 올라간다
+    # (0% = 여유 가득). 미상은 미상으로 적고 판단에서 뺀다(마이그레이션 0030).
+    pct: Mapped[float | None] = mapped_column(nullable=True, server_default=text("0"))
     # NULL이면 공급자가 리셋 시각을 주지 않은 것. 그런 창은 쿨다운 만료를 계산할 수
     # 없으므로 cooling 판정에서 아예 제외한다(시각을 지어내지 않는다).
     resets_at: Mapped[datetime | None] = mapped_column(

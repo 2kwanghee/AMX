@@ -279,8 +279,21 @@ def _set_state(
 def pin_account(
     tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession, principal: AdminPrincipal
 ):
-    """계정을 자동화 밖으로 고정한다. 스윕은 이 계정의 상태를 다시 계산하지 않는다."""
-    return _set_state(db, tenant_id, account_id, "pinned", principal=principal, reason="operator_pin")
+    """계정을 자동화 밖으로 고정한다. 스윕은 이 계정의 상태를 다시 계산하지 않는다.
+
+    배급처에 있는 계정(ready)과 충전 중인 계정(cooling)에만 쓴다. 대여 중인 계정을
+    pinned 로 적으면 배정은 살아 있는데 상태만 "자동화 밖"이 되어, 콘솔은 어느
+    서버가 그 계정을 쓰고 있는지 잃어버린다 — 대여를 자동화에서 빼고 싶다면 hold 다.
+    """
+    return _set_state(
+        db,
+        tenant_id,
+        account_id,
+        "pinned",
+        principal=principal,
+        reason="operator_pin",
+        allowed_from=("ready", "cooling"),
+    )
 
 
 @router.post(
@@ -307,9 +320,20 @@ def unpin_account(
 def hold_account(
     tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession, principal: AdminPrincipal
 ):
-    """사용 불가로 묶는다(격리·점검). pinned 와 마찬가지로 스윕이 덮지 않는다."""
+    """사용 불가로 묶는다(격리·점검). pinned 와 마찬가지로 스윕이 덮지 않는다.
+
+    어느 상태에서나 걸 수 있다(이미 held 인 것만 빼고). 사고 대응 수단이라, "지금
+    상태가 무엇이냐"를 먼저 따지게 만들면 정작 급할 때 못 쓴다. 대여 중인 계정에
+    걸면 배정은 그대로 살아 있고 다음 회수 뒤에도 배급처로 돌아오지 않는다.
+    """
     return _set_state(
-        db, tenant_id, account_id, "held", principal=principal, reason="operator_hold"
+        db,
+        tenant_id,
+        account_id,
+        "held",
+        principal=principal,
+        reason="operator_hold",
+        allowed_from=("ready", "leased", "recalling", "cooling", "pinned"),
     )
 
 

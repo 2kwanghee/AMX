@@ -872,17 +872,32 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             drift_entries=drift_entries,
             source_snapshot_id=snapshot.id,
         )
-        # 계정 풀 P0: 같은 트랜잭션에서 계정별 창(pct·resets_at)을 정규화 테이블에
-        # upsert 하고, 고사용 계정의 경보를 열고 닫는다. 30초 풀 스윕이 읽는 입력이
-        # 여기서 만들어진다 — JSONB 원장은 그대로 두고 최신값만 따로 둔다.
-        pool.ingest_usage_report(
-            db,
-            tenant_id=server.tenant_id,
-            server_id=server.id,
-            payload=snapshot.payload,
-            reported_at=_now(),
-            source_snapshot_id=snapshot.id,
-        )
+        # 계정 풀 P0: 계정별 창(pct·resets_at)을 정규화 테이블에 upsert 하고, 고사용
+        # 계정의 경보를 열고 닫는다. 30초 풀 스윕이 읽는 입력이 여기서 만들어진다 —
+        # JSONB 원장은 그대로 두고 최신값만 따로 둔다.
+        #
+        # SAVEPOINT 로 감싸는 이유: 이 정규화는 **보고 수신의 부수 효과**이지 보고
+        # 자체가 아니다. 창 파싱이나 경보 upsert 가 어떤 이유로든 터지면 바깥
+        # 트랜잭션 전체가 죽어 usage_snapshots·드리프트·all_exhausted 경보까지 함께
+        # 사라진다 — 관측 편의 기능 하나가 정산 원장과 사고 신호를 데려가는 셈이다.
+        # 중첩 트랜잭션으로 잘라 두면 실패는 창 값 한 틱만 잃고, 30초 뒤 다음 보고가
+        # 같은 자리를 덮어쓴다(upsert 라 누적 손실이 없다).
+        try:
+            with db.begin_nested():
+                pool.ingest_usage_report(
+                    db,
+                    tenant_id=server.tenant_id,
+                    server_id=server.id,
+                    payload=snapshot.payload,
+                    reported_at=_now(),
+                    source_snapshot_id=snapshot.id,
+                )
+        except Exception:  # noqa: BLE001 - 창 정규화 실패가 보고를 데려가면 안 된다
+            _logger.warning(
+                "pool window ingest failed for server %s; usage report kept",
+                server.id,
+                exc_info=False,
+            )
         # A usage report proves liveness, so refresh last_seen and clear any
         # standing offline alert (mirrors _touch_last_seen on heartbeat). This
         # is what lets a fallback-only server auto-resolve its offline alert.
@@ -1590,9 +1605,9 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("session usage retention sweep iteration failed", exc_info=False)
-        # 계정 풀 P1: 열두 번째 형제 스윕이 배정·창 관측으로부터 계정의 pool_state 를
-        # 다시 계산하고, mode=auto 서버의 교체 권고를 갱신한다. 자체 락(…0D)과 격리
-        # try/except 로 독립적이며, **명령은 한 줄도 내지 않는다**(관측만).
+        # 계정 풀: 열두 번째 형제 스윕이 배정·창 관측으로부터 계정의 pool_state 를
+        # 다시 계산하고, 권고를 갱신하고, 체인을 전진시킨다. 자체 락(…0D/…0E)과
+        # 격리 try/except 로 독립적이다.
         try:
             pool_changes = await asyncio.to_thread(_sweep_pool_once, session_factory)
             if pool_changes:
@@ -1601,6 +1616,20 @@ async def _offline_sweeper(
             raise
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
             _logger.warning("pool sweep iteration failed", exc_info=False)
+        # 열세 번째 형제 스윕: pool_events 보존 purge. 감사 행 위에 도는 적분이
+        # 없으므로 나이만 보고 지운다. 자체 락(…0F)과 격리 try/except.
+        try:
+            events_purged = await asyncio.to_thread(
+                _sweep_pool_event_retention_once, session_factory
+            )
+            if events_purged:
+                _logger.info(
+                    "pool event retention sweeper purged %d row(s)", events_purged
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a sweep failure must not kill the process
+            _logger.warning("pool event retention sweep iteration failed", exc_info=False)
         # NOTE: 경보 웹훅 드레인은 이 공유 루프에 두지 않는다 — 불량 수신자로 인한 HTTP
         # 지연이 오프라인 탐지·명령 복구를 밀어내지 못하게, 전용 백그라운드 태스크
         # (_alert_webhook_drainer, 자체 주기)로 분리했다. 락 …08은 그대로 유지한다.
@@ -1732,6 +1761,13 @@ def _sweep_session_usage_retention_once(session_factory: sessionmaker[Session]) 
     # when AMX_SESSION_USAGE_RETENTION_DAYS <= 0.
     with session_factory() as db:
         return session_usage.sweep_session_usage_retention(db)
+
+
+def _sweep_pool_event_retention_once(session_factory: sessionmaker[Session]) -> int:
+    # pool.sweep_pool_event_retention takes its own advisory lock (…0F), batches its
+    # deletes and commits each batch. No-op when AMX_POOL_EVENT_RETENTION_DAYS <= 0.
+    with session_factory() as db:
+        return pool.sweep_pool_event_retention(db)
 
 
 def _sweep_pool_once(session_factory: sessionmaker[Session]) -> int:

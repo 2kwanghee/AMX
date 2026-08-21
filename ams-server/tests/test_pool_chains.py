@@ -62,6 +62,7 @@ def _server(tenant_id: uuid.UUID, name: str, policy: dict | None = None) -> uuid
         server = inventory.create_server(
             db, tenant_id, name=name, hostname=None, switch_mode="auto"
         )
+        server.status = "online"
         if policy is not None:
             server.pool_policy = policy
         db.commit()

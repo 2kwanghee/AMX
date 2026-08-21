@@ -43,6 +43,7 @@ PoolChainStep = Literal["deliver", "switch", "recall", "done", "failed"]
 PoolEventKind = Literal[
     "state_changed",
     "recommendation_created",
+    "recommendation_dropped",
     "chain_started",
     "chain_step",
     "chain_done",

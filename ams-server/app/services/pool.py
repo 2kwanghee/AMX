@@ -25,6 +25,7 @@ P1 은 **명령을 내지 않는다**. deliver/switch_now/recall 은 한 줄도 
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -59,6 +60,11 @@ _POOL_SWEEP_LOCK_KEY = 0x414D580F0D
 # 풀린다. 그래서 체인 한 건을 전진시킬 때마다 락을 새로 잡는다 — 보호해야 하는
 # 것은 "결정하고 명령을 내는" 한 걸음이지 스윕 전체가 아니다.
 _POOL_CHAIN_LOCK_KEY = 0x414D580F0E
+# pool_events 보존 purge. 배치마다 커밋하므로 자체 키로 따로 잡는다(…0C 관례).
+_POOL_EVENT_RETENTION_LOCK_KEY = 0x414D580F0F
+_POOL_EVENT_RETENTION_BATCH = 5000
+
+_logger = logging.getLogger(__name__)
 
 # 배정이 살아 있다고 보는 상태 — detached 만 이력이다(models.Assignment 의 부분 유니크
 # 인덱스가 쓰는 것과 같은 기준).
@@ -138,7 +144,12 @@ def _window_rows(acc: dict) -> list[dict]:
                     "window_minutes": _int(w.get("window_minutes")),
                 }
             )
-        return rows
+        # 항목이 하나라도 살아남았으면 그게 정본이다. 전부 id 가 없어 한 줄도 못
+        # 건졌다면 그건 "자기서술적 창을 보냈다"가 아니라 그 필드가 쓸모없다는
+        # 뜻이므로, 같은 보고 안의 위치 필드로 폴백한다 — 창을 통째로 잃는 것보다
+        # 낫다(구형 필드는 채우면서 windows 껍데기만 보내는 에이전트가 있다).
+        if rows:
+            return rows
     for legacy_id in (WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY):
         w = acc.get(legacy_id)
         if isinstance(w, dict):
@@ -153,11 +164,27 @@ def _window_rows(acc: dict) -> list[dict]:
     return rows
 
 
-def _pct(value: object) -> float:
-    """proto3 은 0.0 스칼라를 MessageToDict 에서 아예 빼므로 누락은 0.0 으로 읽는다."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+def _pct(value: object) -> float | None:
+    """창의 사용률. **누락은 0.0, 읽을 수 없는 값은 미상(None)** 이다.
+
+    proto3 은 0.0 스칼라를 MessageToDict 에서 아예 빼므로 키가 없는 것은 진짜
+    0% 다. 하지만 값이 있는데 숫자로 읽히지 않는 경우까지 0.0 으로 접으면 안
+    된다 — 0% 는 "여유가 가득하다"는 가장 강한 주장이라, 파싱 실패가 곧 그
+    계정을 최우선 후보로 밀어 올린다. 미상은 미상으로 남겨 두고, 미상인 계정은
+    트리거에도 후보에도 쓰지 않는다.
+    """
+    if value is None:
         return 0.0
-    return float(value)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def _int(value: object) -> int | None:
@@ -301,7 +328,9 @@ def _sync_window_alert(
     서버 범위 ``all_exhausted`` 는 전원이 막힌 뒤에야 울린다. 그 사이 한 계정만
     한계에 가까워지는 흔한 경우가 관측되지 않으므로, 계정 범위로 따로 연다.
     """
-    worst = max(windows, key=lambda w: w["pct"], default=None)
+    # pct 를 못 읽은 창은 "0% 였다"가 아니라 "모른다"이므로 경보 판단에서 뺀다.
+    known = [w for w in windows if w["pct"] is not None]
+    worst = max(known, key=lambda w: w["pct"], default=None)
     if worst is not None and worst["pct"] >= high_pct:
         alerts_service.open_alert(
             db,
@@ -322,6 +351,38 @@ def _sync_window_alert(
         alerts_service.resolve(
             db, server_id=server_id, kind=WINDOW_HIGH_KIND, account_id=account_id
         )
+
+
+def _stale_after() -> timedelta:
+    return timedelta(minutes=get_settings().pool_window_stale_minutes)
+
+
+def _fresh_pct(
+    window: AccountUsageWindow, now: datetime, stale_after: timedelta
+) -> float | None:
+    """이 창의 pct 를 **지금 믿어도 되는 값**으로 돌려준다. 아니면 None.
+
+    값 자체가 미상이거나(파싱 실패) 관측이 낡았으면 None 이다. 낡은 관측으로
+    교체를 트리거하면 이미 리셋된 계정을 거두거나 소진된 계정을 계속 물린 채
+    둔다 — 둘 다 관측이 없을 때보다 나쁘다.
+    """
+    if window.pct is None:
+        return None
+    reported = _aware(window.reported_at)
+    if reported is None or now - reported > stale_after:
+        return None
+    return float(window.pct)
+
+
+def _max_fresh_pct(
+    windows: list[AccountUsageWindow], now: datetime, stale_after: timedelta
+) -> float | None:
+    values = [
+        p
+        for p in (_fresh_pct(w, now, stale_after) for w in windows)
+        if p is not None
+    ]
+    return max(values) if values else None
 
 
 # -- P1 상태 계산 -------------------------------------------------------------
@@ -448,12 +509,14 @@ def compute_states(
     """
     stamp = _aware(now) or _now()
     grace = timedelta(minutes=get_settings().pool_observation_grace_minutes)
+    stale_after = _stale_after()
     accounts = db.scalars(
         select(Account).where(Account.tenant_id == tenant_id).order_by(Account.id)
     ).all()
     live = _live_assignments(db, tenant_id)
     windows = _windows_by_account(db, tenant_id)
     servers = _servers_by_id(db, tenant_id)
+    unusable = _unusable_account_ids(db, tenant_id)
 
     changed = 0
     for account in accounts:
@@ -482,14 +545,35 @@ def compute_states(
         if account.pool_state in ("leased", "recalling"):
             account.last_lease_ended_at = stamp
 
+        # 사용 불가로 신고된 계정은 충전소가 아니라 **보류**로 간다. cooling 은
+        # "시간이 지나면 스스로 돌아온다"는 뜻인데, 자격증명이 죽었거나 격리된
+        # 계정은 시간이 해결해 주지 않는다. held 는 운영자 상태라 스윕이 다시
+        # 건드리지 않으므로, 사람이 원인을 없애고 release 할 때까지 머문다.
+        if account.id in unusable or account.status in _UNUSABLE_STATUSES:
+            if set_pool_state(
+                db,
+                account,
+                "held",
+                actor=POOL_CONTROLLER_ACTOR,
+                reason="account_unusable",
+                detail={"account_status": account.status},
+                now=stamp,
+            ):
+                changed += 1
+            continue
+
         policy = _observing_policy(account_windows, servers)
         swap_at = float(policy["swap_at_pct"])
         ready_return = float(policy["ready_return_pct"])
 
+        # 소진 판정에는 **신선한** 관측만 쓴다. 30분 전의 95% 는 리셋이 지났을 수도
+        # 있는 값이라, 그걸로 충전소에 넣으면 멀쩡한 계정이 갇힌다.
         exhausted = [
             w
             for w in account_windows
-            if w.pct >= swap_at and _aware(w.resets_at) is not None and _aware(w.resets_at) > stamp
+            if (_fresh_pct(w, stamp, stale_after) or -1.0) >= swap_at
+            and _aware(w.resets_at) is not None
+            and _aware(w.resets_at) > stamp
         ]
         if exhausted:
             worst = max(exhausted, key=lambda w: _aware(w.resets_at))
@@ -563,7 +647,7 @@ def _cooling_release(
     fresh = [
         w
         for w in account_windows
-        if (_aware(w.reported_at) or now) >= cooling_until
+        if (_aware(w.reported_at) or now) >= cooling_until and w.pct is not None
     ]
     if fresh:
         worst = max(w.pct for w in fresh)
@@ -582,25 +666,45 @@ def _cooling_release(
 
 # -- P1 권고 ------------------------------------------------------------------
 def _max_pct(windows: list[AccountUsageWindow]) -> float:
-    return max((w.pct for w in windows), default=0.0)
+    """마지막으로 알려진 최대 pct. 미상 창은 없는 셈 친다(표시·정렬용)."""
+    return max((w.pct for w in windows if w.pct is not None), default=0.0)
 
 
-def _window_pct(windows: list[AccountUsageWindow], window_id: str) -> float:
+def _window_pct(windows: list[AccountUsageWindow], window_id: str) -> float | None:
     for w in windows:
         if w.window_id == window_id:
             return w.pct
-    return 0.0
+    return None
+
+
+def _sort_pct(windows: list[AccountUsageWindow], window_id: str) -> tuple[int, float]:
+    """정렬 키: 미상은 항상 뒤로. 0.0 으로 접으면 미상이 최우선 후보가 된다."""
+    value = _window_pct(windows, window_id)
+    return (1, 0.0) if value is None else (0, value)
+
+
+def _all_pct_unknown(windows: list[AccountUsageWindow]) -> bool:
+    """창 행이 있는데 그 pct 를 하나도 못 읽었는가.
+
+    창이 아예 없는 계정(아직 한 번도 배급된 적 없는 새 계정)과 구별한다. 전자는
+    "읽었는데 모르겠다"라 후보에서 빼야 하고, 후자는 "볼 기회가 없었다"라
+    빼면 배급처가 영영 비지 않는다.
+    """
+    return bool(windows) and all(w.pct is None for w in windows)
 
 
 def _unusable_account_ids(db: Session, tenant_id: uuid.UUID) -> set[uuid.UUID]:
-    """최근 ``credential_unusable`` 경보가 열려 있는 계정 — 후보에서 뺀다(§2.4).
+    """``credential_unusable`` 또는 ``quarantine`` 경보가 열려 있는 계정(§2.4).
 
     자격증명이 못 쓰는 상태로 신고된 계정을 다시 배급하면 그 서버까지 같이 죽는다.
+    격리(quarantine)를 같이 보는 이유도 같다 — 에이전트가 그 계정을 이미 쓰지
+    못하고 있다는 1차 신고이므로, 컨트롤러가 그걸 무시하고 계속 물려 두면 서버는
+    자격증명이 있는 채로 아무 일도 못 한다.
     """
     rows = db.execute(
         select(Alert.account_id).where(
             Alert.tenant_id == tenant_id,
-            Alert.kind == "credential_unusable",
+            Alert.kind.in_(("credential_unusable", "quarantine")),
             Alert.status.in_(("open", "acked")),
             Alert.account_id.is_not(None),
         )
@@ -615,12 +719,17 @@ def _candidates(
     windows: dict[uuid.UUID, list[AccountUsageWindow]],
     unusable: set[uuid.UUID],
     server_has_live: bool,
+    replacing: bool = False,
 ) -> list[Account]:
     """배급처에서 뽑을 수 있는 계정 목록, 기획서 §2.4 의 순서로 정렬해 반환.
 
     정렬은 ① 7일 창 잔여 ② 5시간 창 잔여 ③ 마지막 대여 종료가 오래된 순이고, 동점은
     account_id 로 끊는다. 결정적이어야 하는 이유는 스윕이 30초마다 재진입하기 때문이다 —
     타이브레이크가 흔들리면 매 틱 다른 후보를 권고해 권고가 계속 지워졌다 생긴다.
+
+    ``replacing`` 은 "나가는 계정을 대체할 자리를 찾는 중"이라는 뜻이다. 그때는
+    Codex 의 서버당 1개 제한을 후보 필터로 쓰지 않는다 — 그 제한 때문에 후보가
+    비면, 이미 소진된 Codex 계정을 물고 있는 서버는 영영 교체 상대를 못 찾는다.
     """
     epoch = datetime.min.replace(tzinfo=UTC)
     out = []
@@ -635,14 +744,20 @@ def _candidates(
             continue
         if account.id in unusable:
             continue
+        # 창을 읽었는데 pct 를 하나도 못 건진 계정은 미상이다. 미상을 0% 로 접으면
+        # 그 계정이 "가장 여유 있는 후보"가 되어 제일 먼저 뽑힌다.
+        if _all_pct_unknown(windows.get(account.id, [])):
+            continue
         # Codex 는 서버당 1개 제한이라, 이미 뭔가 붙어 있는 서버에는 얹지 않는다.
-        if account.provider == "codex" and server_has_live:
+        # 다만 대체 상대를 찾는 중이면 이 필터를 걸지 않는다(§8 — 나가는 계정의
+        # 자리를 물려받을 후보까지 막으면 교체 자체가 불가능해진다).
+        if account.provider == "codex" and server_has_live and not replacing:
             continue
         out.append(account)
     out.sort(
         key=lambda a: (
-            _window_pct(windows.get(a.id, []), WINDOW_SEVEN_DAY),
-            _window_pct(windows.get(a.id, []), WINDOW_FIVE_HOUR),
+            _sort_pct(windows.get(a.id, []), WINDOW_SEVEN_DAY),
+            _sort_pct(windows.get(a.id, []), WINDOW_FIVE_HOUR),
             _aware(a.last_lease_ended_at) or epoch,
             str(a.id),
         )
@@ -662,13 +777,25 @@ def _desired_recommendation(
     live: dict[uuid.UUID, Assignment],
     windows: dict[uuid.UUID, list[AccountUsageWindow]],
     candidates: list[Account],
+    replacements: list[Account],
+    unusable: set[uuid.UUID],
+    stale_after: timedelta,
     now: datetime,
 ) -> dict | None:
     """이 서버에 대해 지금 참인 권고 한 건(또는 없음).
 
     서버당 최대 한 건이다. 기획서 §4.2 의 in-flight 규칙 때문에 어차피 한 번에 한
     체인만 실행할 수 있으므로, 여러 건을 쌓아 두면 운영자에게 실행할 수 없는 선택지를
-    보여 주는 셈이 된다. 판정 순서는 급한 것부터: 빈 서버 → 교체 → 초과분 회수 → 예열.
+    보여 주는 셈이 된다. 판정 순서는 급한 것부터: 빈 서버 → **사용 불가 계정 교체**
+    → 소진 교체 → 초과분 회수 → 예열.
+
+    사용 불가 교체가 소진 교체보다 앞인 이유는, 소진은 시간이 지나면 풀리지만 죽은
+    자격증명은 풀리지 않기 때문이다. 그 계정을 물고 있는 서버는 지금 이 순간
+    아무것도 못 하고 있고, ``min_lease_minutes`` 같은 안정화 장치도 여기서는
+    적용하지 않는다 — 붙잡아 둘 이유가 없다.
+
+    임계 판정에는 **신선한** 관측만 쓴다. 낡은 pct 로 교체를 걸면 이미 리셋된
+    계정을 거두거나, 반대로 소진된 계정을 계속 물린 채 두게 된다.
     """
     target = int(policy["target_leases"])
     swap_at = float(policy["swap_at_pct"])
@@ -687,24 +814,56 @@ def _desired_recommendation(
             "reason": f"서버에 대여 중인 계정이 없다. 배급처에서 {pick.email}을 내보낸다.",
         }
 
-    hot = [
-        a
-        for a in leased
-        if _max_pct(windows.get(a.id, [])) >= swap_at
-        and now - _lease_started_at(live[a.id]) >= min_lease
-    ]
-    if hot:
-        worst = max(hot, key=lambda a: _max_pct(windows.get(a.id, [])))
-        # 이미 예열해 둔 계정이 서버에 있으면 그쪽으로 넘긴다 — 자격증명 재전송이 없다.
+    def _fresh(account: Account) -> float | None:
+        return _max_fresh_pct(windows.get(account.id, []), now, stale_after)
+
+    def _handover_target(exclude: set[uuid.UUID]) -> Account | None:
+        """넘겨받을 계정. 이미 서버에 올라와 있는 여유분이 1순위다.
+
+        서버에 설치된 계정으로 넘기면 자격증명 재전송이 없고, 체인도 전환부터
+        시작한다. 없으면 배급처에서 뽑는다 — 그 경우 체인이 전달부터 돈다.
+        """
         spare = [
             a
             for a in leased
-            if a.id != worst.id and _max_pct(windows.get(a.id, [])) < prefetch_at
+            if a.id not in exclude and (_fresh(a) is not None and _fresh(a) < prefetch_at)
         ]
-        target_account = spare[0] if spare else (candidates[0] if candidates else None)
+        if spare:
+            return spare[0]
+        return replacements[0] if replacements else None
+
+    broken = sorted(
+        (a for a in leased if a.id in unusable or a.status in _UNUSABLE_STATUSES),
+        key=lambda a: str(a.id),
+    )
+    if broken:
+        worst = broken[0]
+        target_account = _handover_target({a.id for a in broken})
         if target_account is None:
             return None
-        pct = _max_pct(windows.get(worst.id, []))
+        return {
+            "kind": "swap",
+            "from_account_id": worst.id,
+            "to_account_id": target_account.id,
+            "trigger_pct": None,
+            "reason": (
+                f"{worst.email}이 사용 불가(unusable) 상태다 — 격리됐거나 자격증명이 "
+                f"죽었다. {target_account.email}로 전환하고 거둔다."
+            ),
+        }
+
+    hot = [
+        a
+        for a in leased
+        if (_fresh(a) is not None and _fresh(a) >= swap_at)
+        and now - _lease_started_at(live[a.id]) >= min_lease
+    ]
+    if hot:
+        worst = max(hot, key=lambda a: _fresh(a) or 0.0)
+        target_account = _handover_target({worst.id})
+        if target_account is None:
+            return None
+        pct = _fresh(worst) or 0.0
         return {
             "kind": "swap",
             "from_account_id": worst.id,
@@ -733,9 +892,9 @@ def _desired_recommendation(
         }
 
     if len(leased) == target and candidates:
-        warm = max(leased, key=lambda a: _max_pct(windows.get(a.id, [])))
-        pct = _max_pct(windows.get(warm.id, []))
-        if pct >= prefetch_at:
+        warm = max(leased, key=lambda a: _fresh(a) or -1.0)
+        pct = _fresh(warm)
+        if pct is not None and pct >= prefetch_at:
             pick = candidates[0]
             return {
                 "kind": "prefetch",
@@ -777,13 +936,22 @@ def build_recommendations(
     # 체인이 도는 서버에는 권고를 만들지 않는다. 실행 중인 계획과 "지금이라면
     # 이렇게 하겠다"가 나란히 보이면 운영자는 실행할 수 없는 버튼을 누르게 된다.
     busy = _servers_with_active_chain(db, tenant_id)
+    stale_after = _stale_after()
 
     created = 0
     for server in servers:
         policy = resolve_policy(server)
         server_live = [a for a in live.values() if a.server_id == server.id]
         desired: dict | None = None
-        if policy["mode"] == "auto" and not paused and server.id not in busy:
+        # 오프라인 서버에는 권고를 만들지 않는다. 명령은 큐에 쌓일 뿐 전달되지 않고,
+        # 그 사이 운영자에게는 "누르면 된다"처럼 보이는 버튼이 떠 있게 된다. 이미
+        # 도는 체인은 여기서 건드리지 않는다 — 단계 타임아웃이 접는다.
+        if (
+            policy["mode"] == "auto"
+            and not paused
+            and server.id not in busy
+            and server.status != "offline"
+        ):
             in_flight = any(a.state in _IN_FLIGHT_STATES for a in server_live)
             if not in_flight:
                 leased = [
@@ -805,6 +973,16 @@ def build_recommendations(
                         unusable=unusable,
                         server_has_live=bool(server_live),
                     ),
+                    replacements=_candidates(
+                        accounts,
+                        live=live,
+                        windows=windows,
+                        unusable=unusable,
+                        server_has_live=bool(server_live),
+                        replacing=True,
+                    ),
+                    unusable=unusable,
+                    stale_after=stale_after,
                     now=stamp,
                 )
         created += _reconcile_recommendation(
@@ -834,6 +1012,27 @@ def _reconcile_recommendation(
                 break
     stale = [r for r in existing if r is not match]
     if stale:
+        # 권고가 사라지는 것도 사건이다. 운영자가 화면에서 본 버튼이 다음 새로고침에
+        # 없어졌을 때, 조건이 해소된 것인지 다른 조건으로 바뀐 것인지 여기 말고는
+        # 답할 곳이 없다(체인으로 소비된 경우는 start_chain 이 chain_started 를 남긴다).
+        for row in stale:
+            record_event(
+                db,
+                tenant_id=tenant_id,
+                kind="recommendation_dropped",
+                server_id=server_id,
+                account_id=row.to_account_id or row.from_account_id,
+                detail={
+                    "recommendation_id": str(row.id),
+                    "kind": row.kind,
+                    "from_account_id": str(row.from_account_id)
+                    if row.from_account_id
+                    else None,
+                    "to_account_id": str(row.to_account_id) if row.to_account_id else None,
+                    "trigger_pct": row.trigger_pct,
+                    "replaced_by": desired["kind"] if desired is not None else None,
+                },
+            )
         db.execute(
             delete(PoolRecommendation).where(
                 PoolRecommendation.id.in_([r.id for r in stale])
@@ -889,9 +1088,19 @@ def sweep_pool(db: Session, *, now: datetime | None = None) -> int:
     if _try_advisory_xact_lock(db, _POOL_SWEEP_LOCK_KEY):
         tenant_ids = list(db.scalars(select(Tenant.id).order_by(Tenant.id)).all())
         for tenant_id in tenant_ids:
-            total += compute_states(db, tenant_id, now=stamp)
-            total += build_recommendations(db, tenant_id, now=stamp)
-        db.commit()
+            # 테넌트마다 자기 트랜잭션이다. 한 테넌트의 데이터가 계산을 터뜨렸을 때
+            # 그 틱의 다른 테넌트 계산까지 롤백되면, 고장 난 테넌트 하나가 전체
+            # 자동화를 인질로 잡는다. 락은 커밋에서 놓이므로 다음 테넌트 앞에서
+            # 다시 잡되, 못 잡으면 이번 틱의 나머지는 다른 인스턴스 몫이다.
+            if not _try_advisory_xact_lock(db, _POOL_SWEEP_LOCK_KEY):
+                break
+            try:
+                total += compute_states(db, tenant_id, now=stamp)
+                total += build_recommendations(db, tenant_id, now=stamp)
+                db.commit()
+            except Exception:  # noqa: BLE001 - 한 테넌트의 실패가 나머지를 막지 않는다
+                db.rollback()
+                _logger.warning("pool sweep failed for tenant %s", tenant_id, exc_info=False)
     total += advance_chains(db, now=stamp)
     total += start_auto_chains(db, now=stamp)
     return total
@@ -1460,3 +1669,46 @@ def set_automation_paused(
         )
         db.commit()
     return bool(paused)
+
+
+# -- pool_events 보존 --------------------------------------------------------
+def sweep_pool_event_retention(db: Session) -> int:
+    """보존 창을 넘긴 ``pool_events`` 행을 purge 한다. 삭제 행 수 반환.
+
+    자동 변경 감사 행이라 이 위에서 도는 적분이 없고(정산은 usage 쪽 원장이 한다)
+    나이만 보고 지운다. 배치마다 자기 트랜잭션에서 트랜잭션 범위 advisory lock 을
+    다시 잡는다 — 앞 배치의 커밋이 락을 놓기 때문이고, 재획득 실패는 다른
+    인스턴스가 이번 틱의 purge 를 가져갔다는 뜻이므로 남은 배치를 양보한다.
+    ``pool_event_retention_days <= 0`` 이면 영구 보존이라 0 을 돌려준다.
+    """
+    days = get_settings().pool_event_retention_days
+    if days <= 0:
+        return 0
+    delete_before = _now() - timedelta(days=days)
+
+    total = 0
+    while True:
+        if not _try_advisory_xact_lock(db, _POOL_EVENT_RETENTION_LOCK_KEY):
+            break
+        ids = list(
+            db.scalars(
+                select(PoolEvent.id)
+                .where(PoolEvent.created_at < delete_before)
+                .limit(_POOL_EVENT_RETENTION_BATCH)
+            ).all()
+        )
+        if not ids:
+            db.rollback()  # 락 반납; 지울 게 없다.
+            break
+        db.execute(delete(PoolEvent).where(PoolEvent.id.in_(ids)))
+        db.commit()  # 다음 배치가 다시 잡을 때까지 advisory lock 반납.
+        total += len(ids)
+        if len(ids) < _POOL_EVENT_RETENTION_BATCH:
+            break
+    if total:
+        _logger.info(
+            "pool event retention purged %d row(s) older than %s",
+            total,
+            delete_before.isoformat(),
+        )
+    return total

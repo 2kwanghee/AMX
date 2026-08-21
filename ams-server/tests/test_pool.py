@@ -59,6 +59,9 @@ def _server(tenant_id: uuid.UUID, name: str, policy: dict | None = None) -> uuid
         server = inventory.create_server(
             db, tenant_id, name=name, hostname=None, switch_mode="auto"
         )
+        # 서버는 등록 직후 offline 이다. 권고는 온라인 서버에만 만들어지므로
+        # (오프라인이면 명령이 큐에만 쌓인다) 테스트도 실제 운영 상태에서 시작한다.
+        server.status = "online"
         if policy is not None:
             server.pool_policy = policy
         db.commit()
