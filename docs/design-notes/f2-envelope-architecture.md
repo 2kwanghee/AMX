@@ -66,3 +66,12 @@ unwrap DEK를 (tenant_id, version) 키로 in-process 캐시(TTL+max). 로테이�
 
 ## proto/SSOT
 - proto 무변경. §5.1 tenant_deks 추가, §7 At-rest SaaS 행을 테넌트별 DEK+KEK provider 봉투암호화(local MVP, KMS-ready)로.
+
+## 현행 대조 (2026-08-22)
+
+| 항목 | 설계(F2) | 현행 | 근거 |
+|---|---|---|---|
+| 결정1 단일 초크포인트 | 모든 at-rest가 `encrypt_secret`/`decrypt_secret` 경유, 두 함수에 `tenant_id` | 그대로. 두 함수가 `tenant_id`+`db`를 받는다 | `ams-server/app/core/crypto.py:53,82` |
+| 결정2 KEK provider 추상화 | `AMX_KEK_PROVIDER=local\|aws-kms\|vault`, 로컬 MVP + KMS 스텁 | 그대로. 로컬 provider 동작, KMS 어댑터는 스텁(BACKLOG G19) | `ams-server/app/core/kek.py:10,78` |
+| 결정3 tenant_deks 테이블 | 컬럼 아닌 테이블, lazy 재암호로 버전 공존 | 그대로 | `ams-server/app/models.py:150` |
+| 결정4 v2 AES-256-GCM + Fernet 레거시 | `v2:` 접두로 자동판별, 쓰기 플래그로 롤백 경계 | 그대로. 쓰기는 `AMX_ENVELOPE_WRITE=1`일 때만 v2 방출 | `ams-server/app/core/crypto.py:12-16,38` |

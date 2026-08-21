@@ -57,3 +57,16 @@ E3만이 F1을 막음. 나머지 독립. F2는 O9(A1)와 `encrypt_secret` 쓰기
 ## 미해결
 - F4 tsamx cooldown/hysteresis config 키 실재 여부 미확인(F4 착수 전 tsamx 소스 확인).
 - F5 과금 대상 사용자·요금 정책 미정(스키마·집계는 구현 완료; 외부 결제 연동은 도입 시점 재검토).
+
+## 현행 대조 (2026-08-22)
+
+MVP 순서 E3 → F1 → F2 ∥ F3 → F4 → F5의 단계별 완료 여부다.
+
+| 단계 | 설계 | 현행 | 근거 |
+|---|---|---|---|
+| S1 E3 Principal 리팩터 | `require_admin -> Principal`, 무행위변경 | 완료 | `ams-server/app/core/auth.py:56`, `app/api/deps.py:18` |
+| S2 F1 RBAC | admins/roles + Principal 스코핑, 2-role | 완료. `admins`·`admin_sessions` 테이블, `require_tenant_scope` 공통 dep, global-admin·tenant-admin | `ams-server/app/models.py:186,231`, `app/api/deps.py:26`, `app/core/auth.py:22` |
+| S3 F2 봉투암호화 | KMS 봉투(DEK 간접화), 로컬 MVP | 완료(로컬 KEK MVP). v2 AES-256-GCM + tenant DEK, `AMX_KEK_PROVIDER` 플러그, 쓰기는 `AMX_ENVELOPE_WRITE=1` 게이트. KMS 어댑터는 스텁(BACKLOG G19) | `ams-server/app/core/crypto.py:12,53`, `app/core/kek.py:10`, `app/models.py:150` |
+| S4 F3 멀티인스턴스 | SKIP LOCKED + 스위퍼 단일화 | **부분.** 명령 fetch는 `FOR UPDATE SKIP LOCKED`로 동시 안전. 다만 presence는 여전히 in-process `_online` dict라 다중 AMS 운영은 미착수(BACKLOG F3) | `ams-server/app/grpc/server.py:299,412` |
+| S5 F4 SetPolicy cooldown/hysteresis | proto 필드 추가 | 완료. proto에 `cooldown_seconds`·`hysteresis_pct` 추가되고 AMS 하달·AMA 적용까지 배선 | `contracts/proto/amx.proto:407-408`, `ama-agent/internal/command/handlers.go` |
+| S6 F5 billing_events outbox | usage_snapshots 원장 기반 집계 | 완료. 내부 청구 스키마 + void/재집계까지(BACKLOG G26) | `ams-server/app/models.py`(BillingEvent), `app/services/billing.py` |

@@ -233,10 +233,10 @@ e2e는 DB·REST·gRPC·에이전트 3대·tsamx를 실제 프로세스로 전부
 | 문서 | 내용 |
 |---|---|
 | `BACKLOG.md` | 이월·미해결 항목의 현행 원장. 번호(A1, G53 …)로 추적 |
-| `design-notes/` | 각 단계 착수 전 설계 메모 7건(p2~p5, f1·f2, recovery). as-designed 기록 |
+| `design-notes/` | 각 단계 착수 전 설계 메모 9건(p2~p5, f1·f2, recovery, 계정 풀 기획·API 계약). as-designed 기록 |
 | `archive/` | 완료된 실행 계획(todo ①~④)·종료된 인수인계. 스냅샷이라 갱신하지 않는다 |
 | `presentation/amx-intro.html` | 소개용 발표 자료 |
-| `cswapGitRepo.txt` | 원본 claude-swap 저장소 주소 한 줄 메모 |
+| claude-swap 원본 | tsamx upstream 저장소 주소. `README.md` "그 밖에" 절에 한 줄로 있다 |
 
 읽는 순서로 정리하면: 처음이면 OVERVIEW → 이 문서로 켜 보고, 정확한 사양이
 필요해지면 AMX-DESIGN, 배포할 때 PROD-GUIDE(시험이면 DEV-TEST-GUIDE 차이분),

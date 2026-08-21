@@ -366,7 +366,11 @@ Assignment 한 행의 `tenant_id`는 하나이므로, 계정과 서버가 서로
 | recalling | 회수 명령 전송, 확인 대기 | `tsamx remove` 수행 중 — 항상 `purge_local_copy=true`(O2 변경 2026-08-14): 로컬 credential·매니페스트 레코드 완전 삭제 |
 | detached | 종말 상태 (행은 감사용 유지) | 로컬 흔적 완전 제거됨; 이력은 detached 배정 행·이벤트로만 남는다(재배정은 재전달) |
 
-- **스위칭 모드**는 서버 단위 속성(`servers.switch_mode`), 계정 단위 제외는 `pinned`로.
+- **스위칭 모드**는 서버 단위 속성(`servers.switch_mode`)이다. 계정을 로테이션에서만
+  빼려면 `inactive`(tsamx disable)로 두고, 배정 자체를 막으려면 아래 `assignment_excluded`를
+  켠다. 계정 단위 `pinned` 제외라는 개념은 없다. `pinned`는 계정 풀의 상태값
+  (`pool_state=pinned`, 콘솔 "계정 풀" 탭의 "고정" 열, 자동 스윕에서 제외)일 뿐 스위칭
+  로테이션과 무관하다(§5.8).
 - **배정 제외**: 사람이 자기 프로필에서 직접 쓰는 계정은 `accounts.assignment_excluded`로
   표시한다. 표시된 계정은 신규 배정이 거부되는데, 같은 OAuth refresh token 회전을 두 곳이
   경합하면 양쪽 다 깨지기 때문이다(2026-08-17 관측). opt-in이라 기본값은 배정 가능이고,
@@ -759,6 +763,78 @@ refresh하며 refresh token을 회전 → AMS 보관본(`accounts.encrypted_secr
 
 구현: proto `CredentialUpdate`(AmaMessage 15) · AMA `internal/resync/` · AMS `_apply_cred_update` ·
 마이그레이션 0005 · E2E `e2e/test_o9_resync_e2e.py`. 이월: 가용성 격리(encrypt 실패 시 스트림 유지) 패치 별도.
+
+---
+
+### 5.8 계정 풀 자동 배분 (배급처·대여중·충전소, 2026-08-21 병합)
+
+테넌트·서버는 고정하고 계정만 순환시키는 서버 측 컨트롤러다. 계정이 "배급처(가용 풀) →
+대여중(서버 귀속) → 충전소(리밋 쿨다운) → 배급처"를 돈다. 설계 배경은
+`docs/design-notes/account-pool-automation-plan.md`, API 계약은
+`docs/design-notes/account-pool-api.md`에 있다.
+
+**상태 머신 (`accounts.pool_state`, `models.py:97-99`).** 값은 `ready`·`leased`·`recalling`·
+`cooling`·`pinned`·`held` 여섯이다. 앞의 넷은 스윕이 관측으로 계산하고, 뒤의 둘
+(`pinned`·`held`)은 운영자만 세우는 상태다(`POOL_OPERATOR_STATES`). 콘솔 "계정 풀" 탭은
+배급처(ready)·대여중(leased)·충전소(cooling)를 세 열로, 고정(pinned)·보류(held)를 별도
+열로 보여준다. `pinned`은 자동 스윕에서 제외(고정), `held`는 사용 불가로 묶기(격리·점검)다.
+충전소 분류는 별도 테이블이 아니라 어느 창이 막혔는지로 정한다.
+
+**스윕 순서 (`services/pool.py:1226` `sweep_pool`).** 30초 형제 스윕이 advisory lock 아래
+한 틱에 세 구간을 이 순서로 돈다.
+
+1. **관측**: `compute_states`가 배정·창 관측으로 `pool_state`를 계산하고,
+   `build_recommendations`가 `mode=auto` 서버의 교체 권고를 만든다(한 트랜잭션).
+2. **체인 전진**: `advance_chains`가 진행 중 체인을 deliver → switch → recall 단계로 민다.
+3. **자동 착수**: `start_auto_chains`가 `mode=auto` 서버의 권고를 실제 체인으로 시작한다.
+
+권고를 먼저 갱신해야 조건이 사라진 권고로 체인이 시작되지 않고, 체인을 먼저 전진시켜야
+방금 끝난 서버가 같은 틱에 다음 체인을 받는다.
+
+**단계별 강도.** P1은 관측만 한다. deliver/switch_now/recall을 한 줄도 발행하지 않고 권고
+행만 남긴다. P2는 운영자가 권고를 한 번 클릭해 체인을 실행한다. P3는 서버별
+`pool_policy.mode=auto`일 때 스윕이 체인을 직접 착수한다(`mode` 기본값은 `manual`,
+`models.py:399-402`). 자동 변경은 `actor=pool-controller`로 감사에 남고, 테넌트 단위
+자동화 일시정지 스위치가 있다(`pool:pause`/`pool:resume`).
+
+**안전장치.**
+
+- 충전소 복귀는 `cooling_until` 경과 **그리고** 다음 관측에서 복귀 임계 이하로 확인된
+  때다. 다만 관측이 영영 안 오면 계정이 갇히므로 `cooling_until` + 유예(기본 15분)를
+  넘기면 관측 없이 풀어 준다(`services/pool.py:707-713`).
+- 서버당 활성 체인은 하나뿐이다. 마이그레이션 0031이 `step NOT IN ('done','failed')`
+  조건의 부분 유니크 인덱스(`uq_pool_chains_active_server`)로 강제한다
+  (`0031_pool_chain_step_clock.py:47-53`).
+- 테넌트 동시 체인 상한은 `AMX_POOL_MAX_CONCURRENT_CHAINS`(기본 3)다.
+- 수동 배정 조작(deliver·recall·switch-now)이 그 서버에 활성 체인이 있으면 409
+  `pool.chain_active`로 거부된다(`guard_manual_assignment_action`,
+  `services/pool.py:1882-1907`; 호출부 `api/v1/assignments.py:109,136,190`). 예외는 force
+  recall뿐이다. 그때는 진행 중 체인을 무효로 실패 처리하고 회수를 진행한다.
+- 경보 두 종이 붙는다. 계정 창 하나라도 고사용 임계에 닿으면 `account_window_high`(P1
+  관측), 체인이 실패하면 `pool_chain_failed`가 열린다(`models.py:89,93`). 실패한 체인은
+  그 서버의 자동 실행을 사람이 확인(`pool-chain:ack`)할 때까지 멈춘다.
+
+**환경변수 7종 (`config.py:386-402`).** `AMX_POOL_WINDOW_HIGH_PCT`(기본 80, 고사용 경보
+임계), `AMX_POOL_OBSERVATION_GRACE_MINUTES`(15, 충전소 복귀 관측 유예),
+`AMX_POOL_WINDOW_STALE_MINUTES`(30, 관측이 낡았다고 보는 경계),
+`AMX_POOL_CHAIN_STEP_TIMEOUT_MINUTES`(10, 체인 한 단계 시간 초과),
+`AMX_POOL_CHAIN_MAX_MINUTES`(60, 체인 전체 상한), `AMX_POOL_MAX_CONCURRENT_CHAINS`(3),
+`AMX_POOL_EVENT_RETENTION_DAYS`(90, `pool_events` 보존).
+
+**API 표면 (`api/v1/pool.py`).** `GET …/pool`(개요)·`/pool/recommendations`·`/pool/events`·
+`/pool/chains`, 서버 정책 `PATCH …/servers/{sid}/pool-policy`, 계정 상태
+`POST …/accounts/{aid}/pool:pin|:unpin|:hold|:release`, 권고 착수
+`…/pool/recommendations/{id}:apply`, 체인 확인 `…/pool/chains/{id}:ack`, 자동화
+`…/pool:pause|:resume`. openapi.yaml에는 아직 미기재다(BACKLOG G33 계열).
+
+**에이전트 신호.** 풀 판정의 입력을 넓히려고 에이전트 보고가 바뀌었다. 격리 판정을
+`relogin_required`로 좁히고(`reporter.go:42`), 사용량을 못 잰 계정(`token_expired`·`api_key`·
+`keychain_unavailable` 등)은 headroom을 몰라 `eligible`에서 빼며 소진 판정도 몰지 않는다
+(`reporter.go:161-184`). 캐시 신선도 `usage_fetched_at`을 실어 보내고
+(`reporter.go:197-200`), deliver 락이 fail-open으로 열리면 ack detail에
+`deliver_lock_timeout` 표식을 붙인다(`command.go:356-360`). **이 신호를 받으려면 에이전트를
+재빌드·재설치해야 한다.** api_key 계정은 구독 쿼터가 없어 자동화 밖이다
+(`ineligible_reason=api_key`).
 
 ---
 

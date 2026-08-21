@@ -138,3 +138,16 @@ scheduler·switch_now·set_mode는 골격만.
 - **KEK 부트스트랩 순환**: SessionSetup 전 빈 Register 규칙을 AMS reconcile이 반드시 지켜야 함.
   리뷰 필수 포인트.
 - **DB 폴링 vs LISTEN/NOTIFY**: P2는 폴링 허용(지연 0.5s). 부하 시 재작업.
+
+## 현행 대조 (2026-08-22)
+
+설계 당시 확정과 현재 코드의 일치 여부다. 이 문서는 as-designed 기록이라 본문은 그대로 두고, 달라진 곳만 아래에 모은다.
+
+| 항목 | 설계(P2) | 현행 | 근거 |
+|---|---|---|---|
+| 결정2 명령 아웃박스 | `agent_commands` 신설, REST가 INSERT하고 gRPC가 소비 | 그대로 | `ams-server/app/models.py:470,483` |
+| 결정3 SessionSetup 무조건 하달 | applied 억제 불가, Register 직후 항상 | 그대로 | `ams-server/app/grpc/server.py:9` |
+| 결정5 recall 기본 = disable+레코드 보존 | O2 초안: 로테이션 제외만, `purge_local_copy=true`만 완전 삭제 | **변경됨.** 회수는 provider 무관 항상 purge. `recall_purges_local_copy`가 상시 True를 돌려 detached↔inactive 불일치와 비용 오배분을 없앴다(2026-08-14 사용자 지시) | `ams-server/app/services/commands.py:134-157,216` |
+| 결정6 암호화 스토어 + 평문 사이드카 | AES-256-GCM(KEK 메모리) 매니페스트 + `applied.log` | 그대로 | `ama-agent/internal/store/`, `internal/reporter/` |
+| O1 메모리 전용 세션 KEK | 세션마다 KEK를 에이전트 메모리에만 | 그대로. 추가로 C2 per-agent NaCl sealed box 봉인이 위에 올라감 | `ams-server/app/grpc/server.py:10,323-340` |
+| (신규 축) 계정 풀 상태 | P2엔 없음 | `accounts.pool_state` 6종과 풀 테이블(마이그레이션 0028~0031)이 배정 상태기계와 별개 축으로 추가됨. 배정(pending~detached)은 불변, 풀은 그 위의 순환 관측 | `ams-server/app/models.py:97`, AMX-DESIGN §5.8 |

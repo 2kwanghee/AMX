@@ -69,3 +69,12 @@ sweep tick:
 ## 이월 (완료판정 비차단)
 - C1 완전무손실(b2 AMS 앱-ack + event_id dedup, proto 변경) — BACKLOG.
 - quarantine 경보 리포트화(alerts.sync_from_report에 quarantined 추가) — 소규모 인접 하드닝, BACKLOG.
+
+## 현행 대조 (2026-08-22)
+
+| 항목 | 설계 | 현행 | 근거 |
+|---|---|---|---|
+| D1 recall 실패 stranded | `recalling` 유지(`pending_command_id=NULL`+`last_error`) + 자동 재recall(CORRECTION_CAP) + REST 수동 탈출구 | 구현됨. `recall_retry_count` 컬럼, reconcile 재recall과 성공 시 리셋, force recall 탈출구 | `ams-server/app/models.py:459`, `app/services/reconcile.py:192,249` |
+| D2 sent-미ack 고착 | 타임아웃 스윕이 `sent→queued` 재큐(멱등), `send_attempts` 상한 초과 시 failed | 구현됨 | `ams-server/app/models.py:514`, `app/services/reconcile.py` |
+| C1 AccountEvent 무손실 | Outbox를 디스크 영속 로그로 승격, 전송 확인 후 삭제 | 구현됨. 잔존창은 stream.Send 성공 후 AMS 커밋 전 crash뿐(결정8 수용), 앱-ack(b2)는 이월(BACKLOG G12) | `ama-agent/internal/reporter/outboxlog.go`, `internal/reporter/outbox_disk_test.go` |
+| CORRECTION_CAP | reconcile 자동 재하달 유계(기본 3) | 그대로. `AMX_RECONCILE_CORRECTION_CAP` 기본 3 | `ams-server/app/services/reconcile.py:64` |
