@@ -25,6 +25,18 @@ describe('isAllowedPath', () => {
       'tenants/ten-1/assignments/asg-1:deliver',
       'tenants/ten-1/alerts',
       'tenants/ten-1/alerts/alr-1:ack',
+      'tenants/ten-1/pool',
+      'tenants/ten-1/pool:pause',
+      'tenants/ten-1/pool:resume',
+      'tenants/ten-1/pool/recommendations',
+      'tenants/ten-1/pool/chains',
+      'tenants/ten-1/pool/events',
+      'tenants/ten-1/pool/recommendations/rec-1:apply',
+      'tenants/ten-1/servers/srv-1/pool-policy',
+      'tenants/ten-1/accounts/acc-1/pool:pin',
+      'tenants/ten-1/accounts/acc-1/pool:unpin',
+      'tenants/ten-1/accounts/acc-1/pool:hold',
+      'tenants/ten-1/accounts/acc-1/pool:release',
     ]) {
       expect(isAllowedPath(p), p).toBe(true);
     }
@@ -38,6 +50,9 @@ describe('isAllowedPath', () => {
       'admin',
       'tenants/ten-1/accounts/acc-1/secret',
       'tenants/ten-1/assignments/asg-1:drop-table',
+      'tenants/ten-1/accounts/acc-1/pool:drop',
+      'tenants/ten-1/pool:halt',
+      'tenants/ten-1/pool/secrets',
       'http://evil.test/',
       'tenants//servers',
     ]) {

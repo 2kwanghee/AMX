@@ -182,6 +182,73 @@ async function resolver({ request }: { request: Request }) {
     return HttpResponse.json({ id: 'alr-1', tenantId: 'ten-1', kind: 'all_exhausted', severity: 'critical', status: 'acked', createdAt: iso(), ackedAt: iso() });
   }
 
+  // --- 계정 풀 ---
+  if (path === 'tenants/ten-1/pool' && m === 'GET') {
+    return HttpResponse.json({
+      automationPaused: false,
+      accounts: [
+        {
+          accountId: 'acc-1', email: 'a@acme.io', provider: 'claude', poolState: 'cooling',
+          coolingUntil: new Date(Date.now() + 3600_000).toISOString(), coolingWindowId: 'five_hour',
+          leasedServerId: null, windows: [
+            { windowId: 'five_hour', pct: 92, resetsAt: iso(), reportedAt: iso(), serverId: 'srv-1' },
+            { windowId: 'seven_day', pct: 40, reportedAt: iso(), serverId: 'srv-1' },
+          ],
+        },
+      ],
+      servers: [
+        {
+          serverId: 'srv-1', name: 'ama-1', status: 'online',
+          poolPolicy: { mode: 'manual', targetLeases: 1, swapAtPct: 85, prefetchAtPct: 70, minLeaseMinutes: 30, readyReturnPct: 20 },
+          leasedAccountIds: [], activeAccountId: null, inFlight: false, maxPct: 92,
+        },
+      ],
+      recommendations: [
+        { id: 'rec-1', serverId: 'srv-1', kind: 'swap', reason: 'five_hour 창 92%', createdAt: iso(), triggerPct: 92 },
+      ],
+    });
+  }
+  if (path === 'tenants/ten-1/pool/recommendations' && m === 'GET') {
+    return HttpResponse.json([
+      { id: 'rec-1', serverId: 'srv-1', kind: 'swap', reason: 'five_hour 창 92%', createdAt: iso(), triggerPct: 92 },
+    ]);
+  }
+  if (path === 'tenants/ten-1/pool/recommendations/rec-1:apply' && m === 'POST') {
+    return HttpResponse.json(
+      { id: 'chn-1', serverId: 'srv-1', recommendationId: 'rec-1', step: 'deliver', startedAt: iso(), updatedAt: iso(), actor: 'root@amx.test' },
+      { status: 202 },
+    );
+  }
+  if (path === 'tenants/ten-1/pool/chains' && m === 'GET') {
+    return HttpResponse.json([
+      { id: 'chn-1', serverId: 'srv-1', step: 'switch', startedAt: iso(), updatedAt: iso(), actor: 'pool-controller' },
+    ]);
+  }
+  if (path === 'tenants/ten-1/pool/events' && m === 'GET') {
+    return HttpResponse.json([
+      { id: 'pe-1', kind: 'state_changed', accountId: 'acc-1', serverId: 'srv-1', detail: {}, createdAt: iso(), actor: 'pool-controller' },
+    ]);
+  }
+  if ((path === 'tenants/ten-1/pool:pause' || path === 'tenants/ten-1/pool:resume') && m === 'POST') {
+    return HttpResponse.json({ automationPaused: path.endsWith('pause') });
+  }
+  if (path === 'tenants/ten-1/servers/srv-1/pool-policy' && m === 'PATCH') {
+    let patch: Record<string, unknown> = {};
+    try { patch = JSON.parse(body || '{}'); } catch { /* leave empty */ }
+    return HttpResponse.json({
+      id: 'srv-1', tenantId: 'ten-1', name: 'ama-1', switchMode: 'manual', status: 'online',
+      poolPolicy: { mode: 'manual', targetLeases: 1, swapAtPct: 85, prefetchAtPct: 70, minLeaseMinutes: 30, readyReturnPct: 20, ...patch },
+    });
+  }
+  if (path.startsWith('tenants/ten-1/accounts/acc-1/pool:') && m === 'POST') {
+    const verb = path.split(':')[1];
+    const stateByVerb: Record<string, string> = { pin: 'pinned', unpin: 'available', hold: 'quarantined', release: 'available' };
+    return HttpResponse.json({
+      id: 'acc-1', tenantId: 'ten-1', provider: 'claude', email: 'a@acme.io', credentialType: 'oauth',
+      status: stateByVerb[verb] ?? 'available', secretMasked: 'oauth:…AB3F',
+    });
+  }
+
   return HttpResponse.json({ title: 'not-mapped', status: 404, path }, { status: 404 });
 }
 

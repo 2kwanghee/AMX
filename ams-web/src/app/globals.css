@@ -1062,3 +1062,69 @@ tbody tr.usage-detail-row:hover > td { background: var(--surface-2); }
 .usage-basis {
   display: block; font-size: 10.5px; color: var(--muted); font-weight: 500;
 }
+
+/* -- 계정 풀 --------------------------------------------------------------- */
+.pool-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px; margin-bottom: 14px;
+}
+.pool-paused-note { color: var(--warn); font-weight: 600; }
+.pool-summary { display: flex; flex-wrap: wrap; gap: 8px; }
+.pool-stat {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); font-size: 13px; color: var(--muted);
+}
+.pool-stat b { color: var(--ink); font-size: 15px; }
+.pool-board {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px; margin-top: 8px;
+}
+@media (max-width: 900px) { .pool-board { grid-template-columns: 1fr; } }
+.pool-col {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface-2); padding: 12px; min-width: 0;
+}
+.pool-col-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-weight: 700; color: var(--ink); margin-bottom: 10px;
+}
+.pool-col-count {
+  font-size: 12px; color: var(--muted); font-weight: 600;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 8px;
+}
+.pool-col-empty { color: var(--muted); font-size: 13px; padding: 6px 2px; }
+.pool-cards { display: flex; flex-direction: column; gap: 10px; }
+.pool-card {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); padding: 10px 11px;
+}
+.pool-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pool-card-email { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pool-card-server { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.pool-cool { font-size: 12px; color: var(--warn); margin-top: 4px; display: flex; align-items: center; gap: 5px; }
+.pool-win { margin-top: 8px; }
+.pool-win-row { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+.pool-win-name { font-size: 11px; color: var(--muted); width: 44px; flex: none; }
+.pool-win-bar { flex: 1; height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+.pool-win-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; transition: width 0.35s ease; }
+.pool-win-fill.warn { background: var(--warn); }
+.pool-win-fill.crit { background: var(--crit); }
+.pool-win-pct { font-size: 11px; color: var(--ink); width: 40px; text-align: right; flex: none; }
+.pool-obs { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.pool-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pool-aside { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+@media (max-width: 900px) { .pool-aside { grid-template-columns: 1fr; } }
+.pool-reco { display: flex; flex-direction: column; gap: 6px; }
+.pool-reco-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 8px 10px;
+}
+.pool-reco-reason { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.pool-chain-step { font-size: 12px; color: var(--muted); }
+.pool-chain-step.failed { color: var(--crit); }
+.pool-timeline { display: flex; flex-direction: column; gap: 4px; }
+.pool-timeline-row { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.pool-timeline-when { color: var(--muted); flex: none; }
+.pool-kind { font-weight: 600; color: var(--ink); flex: none; }
