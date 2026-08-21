@@ -94,12 +94,13 @@ describe('상태별 허용 동작', () => {
   it('충전소는 해제까지 허용', () => {
     expect(allowedPoolActions('cooling')).toEqual(['pin', 'hold', 'release']);
   });
-  it('고정은 해제만, 보류는 되돌리기만', () => {
-    expect(allowedPoolActions('pinned')).toEqual(['unpin']);
+  it('고정은 해제와 보류, 보류는 되돌리기만', () => {
+    expect(allowedPoolActions('pinned')).toEqual(['unpin', 'hold']);
     expect(allowedPoolActions('held')).toEqual(['release']);
   });
-  it('회수중도 고정과 보류를 허용한다', () => {
-    expect(allowedPoolActions('recalling')).toEqual(['pin', 'hold']);
+  it('대여중과 회수중은 보류만 허용한다', () => {
+    expect(allowedPoolActions('leased')).toEqual(['hold']);
+    expect(allowedPoolActions('recalling')).toEqual(['hold']);
   });
 });
 

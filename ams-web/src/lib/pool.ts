@@ -106,13 +106,14 @@ export function isChainActive(step: string): boolean {
 export function allowedPoolActions(state: PoolState): PoolAccountVerb[] {
   switch (state) {
     case 'ready':
+      return ['pin', 'hold'];
     case 'leased':
     case 'recalling':
-      return ['pin', 'hold'];
+      return ['hold'];
     case 'cooling':
       return ['pin', 'hold', 'release'];
     case 'pinned':
-      return ['unpin'];
+      return ['unpin', 'hold'];
     case 'held':
       return ['release'];
     default:
