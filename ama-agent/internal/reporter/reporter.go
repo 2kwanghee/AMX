@@ -32,6 +32,15 @@ func NewEventID() string {
 // exhausted for pool summary purposes (D10, injected into tsamx as 95).
 const SwitchThresholdPct = 95.0
 
+// usageStatusQuarantined is the tsamx `usageStatus` value for a quarantined
+// account. Quarantine is a dead refresh-token lineage (repeated invalid_grant)
+// that tsamx holds out of fetching until a re-login; tsamx surfaces it as
+// "relogin_required" (json_output.py usage_fields returns it for the
+// USAGE_RELOGIN_REQUIRED sentinel, which switcher.py sets on entries whose
+// token_dead()). The list --json schema has no literal "quarantined" value, so
+// matching that string counted zero accounts as quarantined.
+const usageStatusQuarantined = "relogin_required"
+
 // Reporter turns the local pool into UsageReports. It reads one bridge per
 // registered provider and sums their pools into a single report; today only
 // "claude" is registered, so the report matches the pre-multi-provider output
@@ -91,12 +100,17 @@ func (r *Reporter) BuildUsageReport(ctx context.Context, trigger amxv1.UsageRepo
 	}
 	var (
 		total, active, eligible, quarantined uint32
-		maxPct                               float64
+		// measured counts accounts carrying a live usage measurement (usage != nil).
+		// all_exhausted is decided over these ONLY: an unmeasured account has unknown
+		// headroom, so counting its empty windows as pct 0 would falsely mark it
+		// eligible and mask a genuinely exhausted pool. It must neither be eligible
+		// nor drive/relieve the exhausted signal.
+		measured uint32
+		maxPct   float64
 		// relievesExhaustion is set by any account that keeps the pool from being
-		// fully exhausted (a disabled account, or an eligible one under threshold).
-		// allExhausted is then total>0 && !relievesExhaustion. Only the auto-switch
-		// provider's accounts contribute, so it is numerically identical to the
-		// former single-provider computation.
+		// fully exhausted (a disabled account, or a MEASURED one under threshold).
+		// allExhausted is then measured>0 && !relievesExhaustion. Only the auto-switch
+		// provider's accounts contribute.
 		relievesExhaustion bool
 	)
 	keys := make([]string, 0, len(r.bridges))
@@ -146,10 +160,17 @@ func (r *Reporter) BuildUsageReport(ctx context.Context, trigger amxv1.UsageRepo
 			case row.Disabled:
 				// out of rotation; not eligible, not counted as exhausted driver
 				relievesExhaustion = true
-			case row.UsageStatus == "quarantined":
+			case row.UsageStatus == usageStatusQuarantined:
 				quarantined++
+			case row.Usage == nil:
+				// Unmeasured (token_expired/api_key/keychain_unavailable/
+				// foreign_credential/no_credentials/unavailable): in rotation but its
+				// headroom is unknown, so it is NOT eligible and it neither drives nor
+				// relieves all_exhausted.
+				active++
 			default:
 				active++
+				measured++
 				if pct < SwitchThresholdPct {
 					eligible++
 					relievesExhaustion = true
@@ -162,7 +183,7 @@ func (r *Reporter) BuildUsageReport(ctx context.Context, trigger amxv1.UsageRepo
 		Active:            active,
 		Eligible:          eligible,
 		Quarantined:       quarantined,
-		AllExhausted:      total > 0 && !relievesExhaustion,
+		AllExhausted:      measured > 0 && !relievesExhaustion,
 		MaxUtilizationPct: maxPct,
 	}
 	return rep, nil
@@ -173,10 +194,15 @@ func accountUsage(row provider.AccountRow) *amxv1.AccountUsage {
 		Account:   &amxv1.AccountRef{Email: row.Email},
 		IsCurrent: row.Active,
 	}
+	// Cache freshness of the served usage measurement (tsamx usageFetchedAt, emitted
+	// only alongside a non-null usage). Empty/unparseable leaves the field nil.
+	if t := parseTime(row.UsageFetchedAt); t != nil {
+		au.UsageFetchedAt = t
+	}
 	switch {
 	case row.Disabled:
 		au.AllocationStatus = amxv1.AllocationStatus_ALLOCATION_STATUS_INACTIVE
-	case row.UsageStatus == "quarantined":
+	case row.UsageStatus == usageStatusQuarantined:
 		au.AllocationStatus = amxv1.AllocationStatus_ALLOCATION_STATUS_QUARANTINED
 	default:
 		au.AllocationStatus = amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE

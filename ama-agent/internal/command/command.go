@@ -347,6 +347,24 @@ func converged(ack *amxv1.CommandAck) *amxv1.CommandAck {
 	return ack
 }
 
+// deliverLockTimeoutMarker flags an ack whose deliver proceeded WITHOUT the
+// cross-process deliver lock (the bounded acquisition failed open). It rides in
+// CommandAck.detail — a diagnostic-only field — so the server can see the deliver
+// ran unprotected without any proto change. Convergence is untouched: the deliver
+// may still fully converge; the marker only records that the over-charge window
+// was open. Server-side interpretation is out of scope.
+const deliverLockTimeoutMarker = "deliver_lock_timeout"
+
+// markDeliverLockTimeout prepends the fail-open marker to ack.detail, preserving
+// any existing detail (e.g. a diverged/reject reason) after it.
+func markDeliverLockTimeout(ack *amxv1.CommandAck) {
+	if ack.Detail == "" {
+		ack.Detail = deliverLockTimeoutMarker
+		return
+	}
+	ack.Detail = deliverLockTimeoutMarker + "; " + ack.Detail
+}
+
 // alreadyApplied reports whether cmdID is already recorded in the applied log
 // with a CONVERGED result. A replay of such a command — a valid signature reused
 // inside the freshness window — MUST re-emit the prior convergence WITHOUT

@@ -44,16 +44,22 @@ type Fake struct {
 	ConfigErr error
 	// StatePath is returned by AutoStatePath (test seeding for the watcher).
 	StatePath string
+	// DeliverLockFailOpen, when set, makes DeliverLock report fail-open (the
+	// bounded acquisition gave up), so tests can exercise the handler's fail-open
+	// warning + ack marker without a real contended flock.
+	DeliverLockFailOpen bool
 	// quarantine is number->email, returned by ReadQuarantine.
 	quarantine map[string]string
 }
 
 type fakeAccount struct {
-	email    string
-	org      string
-	disabled bool
-	usage    *provider.Usage
-	cred     []byte
+	email          string
+	org            string
+	disabled       bool
+	usage          *provider.Usage
+	usageStatus    string // empty defaults to "ok" in List
+	usageFetchedAt string // RFC3339; empty leaves the row field unset
+	cred           []byte
 }
 
 // NewFake returns an empty Fake.
@@ -168,14 +174,19 @@ func (f *Fake) List(_ context.Context) (*provider.ListResult, error) {
 			u.Windows = claudeWindows(&u)
 			usage = &u
 		}
+		status := acc.usageStatus
+		if status == "" {
+			status = "ok"
+		}
 		row := provider.AccountRow{
 			Number:           num,
 			Email:            acc.email,
 			OrganizationName: acc.org,
 			Active:           f.active == e,
 			Disabled:         acc.disabled,
-			UsageStatus:      "ok",
+			UsageStatus:      status,
 			Usage:            usage,
+			UsageFetchedAt:   acc.usageFetchedAt,
 		}
 		if f.active == e {
 			n := num
@@ -294,17 +305,20 @@ func (f *Fake) ReadQuarantine(_ context.Context) (map[string]string, error) {
 
 // DeliverLock records the call and returns a no-op release. The Fake models no
 // real config home, so there is no cross-process lock to take; tests assert the
-// call ordering (lock is taken around the swap) via the call log.
-func (f *Fake) DeliverLock(_ context.Context) func() error {
+// call ordering (lock is taken around the swap) via the call log. The second
+// return echoes DeliverLockFailOpen so a test can drive the handler's fail-open
+// path (warning + ack marker) without a real contended flock.
+func (f *Fake) DeliverLock(_ context.Context) (func() error, bool) {
 	f.mu.Lock()
 	f.log("deliver_lock")
+	failOpen := f.DeliverLockFailOpen
 	f.mu.Unlock()
 	return func() error {
 		f.mu.Lock()
 		f.log("deliver_unlock")
 		f.mu.Unlock()
 		return nil
-	}
+	}, failOpen
 }
 
 // --- test helpers -----------------------------------------------------------
@@ -339,6 +353,30 @@ func (f *Fake) SetUsage(email string, u *provider.Usage) {
 	defer f.mu.Unlock()
 	if acc, ok := f.accounts[email]; ok {
 		acc.usage = u
+	}
+}
+
+// SetUsageStatus overrides the list --json usageStatus for an account and, when
+// the status implies no measurement (e.g. relogin_required, token_expired),
+// clears any seeded usage so the row matches what tsamx emits (test seeding).
+func (f *Fake) SetUsageStatus(email, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if acc, ok := f.accounts[email]; ok {
+		acc.usageStatus = status
+		if status != "ok" {
+			acc.usage = nil
+		}
+	}
+}
+
+// SetUsageFetchedAt sets the RFC3339 usageFetchedAt freshness stamp for an
+// account (test seeding).
+func (f *Fake) SetUsageFetchedAt(email, ts string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if acc, ok := f.accounts[email]; ok {
+		acc.usageFetchedAt = ts
 	}
 }
 

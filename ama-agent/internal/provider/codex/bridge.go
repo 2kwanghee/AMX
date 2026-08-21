@@ -317,31 +317,31 @@ func (b *Bridge) Status(ctx context.Context) (*provider.StatusResult, error) {
 // non-nil release. Mirrors the tsamx ExecBridge lock so the two vendors behave
 // identically; the code is duplicated rather than shared to keep this package free
 // of a tsamx dependency.
-func (b *Bridge) DeliverLock(ctx context.Context) func() error {
+func (b *Bridge) DeliverLock(ctx context.Context) (func() error, bool) {
 	noop := func() error { return nil }
 	dir := b.lockConfigHome()
 	if dir == "" {
-		return noop
+		return noop, false
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return noop
+		return noop, false
 	}
 	lockPath := filepath.Join(dir, deliverLockName)
 	deadline := time.Now().Add(b.lockMaxWait())
 	for {
 		lock, lockErr := fslock.TryLock(lockPath)
 		if lockErr == nil {
-			return lock.Unlock
+			return lock.Unlock, false
 		}
 		if !errors.Is(lockErr, fslock.ErrWouldBlock) {
-			return noop
+			return noop, true
 		}
 		if time.Now().After(deadline) {
-			return noop
+			return noop, true
 		}
 		select {
 		case <-ctx.Done():
-			return noop
+			return noop, false
 		case <-time.After(deliverLockRetryInterval):
 		}
 	}
