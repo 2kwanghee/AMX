@@ -165,6 +165,13 @@ class Settings:
     # 시각(cooling_until)과 관측(pct<=readyReturnPct)을 함께 요구하는데, 에이전트가
     # 죽어 관측이 영영 안 오면 계정이 충전소에 갇힌다 — 그 유예 창이다.
     pool_observation_grace_minutes: int = 15
+    # 체인 한 단계(deliver/switch/recall)가 이 분 수 안에 수렴하지 않으면 실패로
+    # 접는다. 에이전트가 오프라인이면 명령은 큐에 남아 언젠가 전달되는데, 그 사이
+    # 체인이 서버를 계속 점유하면 다음 교체가 영영 시작되지 않는다.
+    pool_chain_step_timeout_minutes: int = 10
+    # 한 테넌트에서 컨트롤러가 동시에 돌릴 수 있는 자동 체인 수. 관측이 한꺼번에
+    # 틀렸을 때 피해 범위를 묶는 상한이다(운영자가 여는 체인은 세지 않는다).
+    pool_max_concurrent_chains: int = 3
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -368,6 +375,12 @@ def load_settings() -> Settings:
         pool_window_high_pct=float(os.environ.get("AMX_POOL_WINDOW_HIGH_PCT", "80")),
         pool_observation_grace_minutes=int(
             os.environ.get("AMX_POOL_OBSERVATION_GRACE_MINUTES", "15")
+        ),
+        pool_chain_step_timeout_minutes=int(
+            os.environ.get("AMX_POOL_CHAIN_STEP_TIMEOUT_MINUTES", "10")
+        ),
+        pool_max_concurrent_chains=int(
+            os.environ.get("AMX_POOL_MAX_CONCURRENT_CHAINS", "3")
         ),
     )
 

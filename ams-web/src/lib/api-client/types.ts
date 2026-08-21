@@ -286,7 +286,8 @@ export type AlertKind =
   | 'alert_webhook_dropped'
   | 'dangerous_command'
   | 'credential_unusable'
-  | 'account_window_high';
+  | 'account_window_high'
+  | 'pool_chain_failed';
 export type AlertSeverity = 'critical' | 'warning';
 export type AlertStatus = 'open' | 'acked' | 'resolved';
 

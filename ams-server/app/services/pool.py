@@ -35,22 +35,30 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import try_advisory_xact_lock as _try_advisory_xact_lock
+from app.core.errors import ApiError, conflict, not_found
 from app.models import (
     POOL_CONTROLLER_ACTOR,
     POOL_OPERATOR_STATES,
     Account,
     AccountUsageWindow,
+    AgentCommand,
     Alert,
     Assignment,
+    PoolChain,
     PoolEvent,
     PoolRecommendation,
     Server,
     Tenant,
 )
-from app.services import alerts as alerts_service
+from app.services import alerts as alerts_service, commands, inventory
 
 # 보존 스윕 …0C 다음 번호. 한 인스턴스만 이번 틱의 풀 계산을 소유한다(F3 다중 인스턴스).
 _POOL_SWEEP_LOCK_KEY = 0x414D580F0D
+# 체인 실행은 별도 락이다. 관측 스윕과 달리 명령 발행 서비스(create_assignment /
+# request_deliver / …)가 **스스로 커밋**하는데, 트랜잭션 범위 락은 그 커밋에서
+# 풀린다. 그래서 체인 한 건을 전진시킬 때마다 락을 새로 잡는다 — 보호해야 하는
+# 것은 "결정하고 명령을 내는" 한 걸음이지 스윕 전체가 아니다.
+_POOL_CHAIN_LOCK_KEY = 0x414D580F0E
 
 # 배정이 살아 있다고 보는 상태 — detached 만 이력이다(models.Assignment 의 부분 유니크
 # 인덱스가 쓰는 것과 같은 기준).
@@ -766,13 +774,16 @@ def build_recommendations(
     windows = _windows_by_account(db, tenant_id)
     unusable = _unusable_account_ids(db, tenant_id)
     paused = bool(tenant is not None and tenant.pool_automation_paused)
+    # 체인이 도는 서버에는 권고를 만들지 않는다. 실행 중인 계획과 "지금이라면
+    # 이렇게 하겠다"가 나란히 보이면 운영자는 실행할 수 없는 버튼을 누르게 된다.
+    busy = _servers_with_active_chain(db, tenant_id)
 
     created = 0
     for server in servers:
         policy = resolve_policy(server)
         server_live = [a for a in live.values() if a.server_id == server.id]
         desired: dict | None = None
-        if policy["mode"] == "auto" and not paused:
+        if policy["mode"] == "auto" and not paused and server.id not in busy:
             in_flight = any(a.state in _IN_FLIGHT_STATES for a in server_live)
             if not in_flight:
                 leased = [
@@ -864,18 +875,588 @@ def _reconcile_recommendation(
 
 # -- 30초 형제 스윕 -----------------------------------------------------------
 def sweep_pool(db: Session, *, now: datetime | None = None) -> int:
-    """상태 계산 + 권고 재계산을 테넌트마다 한 번씩. 자체 advisory 락(…0D).
+    """관측(상태·권고) → 체인 전진 → 자동 착수, 이 순서로 한 틱.
 
-    명령은 한 줄도 내지 않는다(P1). 락을 못 잡으면 이번 틱은 다른 인스턴스 몫이므로
-    그냥 0 을 돌려준다. 스스로 커밋한다 — 트랜잭션 범위 락이라 커밋이 곧 반납이다.
+    관측 구간만 …0D 락 안의 한 트랜잭션이다. 그 뒤 두 구간은 명령 발행 서비스가
+    스스로 커밋하므로 같은 트랜잭션에 담기지 않고, …0E 락을 걸음마다 새로 잡는다.
+
+    순서에는 이유가 있다. 권고를 먼저 갱신해야 조건이 사라진 권고로 체인이
+    시작되지 않고, 체인을 먼저 전진시켜야 방금 끝난 체인의 서버가 같은 틱에
+    다음 체인을 받을 수 있다.
     """
-    if not _try_advisory_xact_lock(db, _POOL_SWEEP_LOCK_KEY):
-        return 0
     stamp = _aware(now) or _now()
-    tenant_ids = list(db.scalars(select(Tenant.id).order_by(Tenant.id)).all())
     total = 0
-    for tenant_id in tenant_ids:
-        total += compute_states(db, tenant_id, now=stamp)
-        total += build_recommendations(db, tenant_id, now=stamp)
-    db.commit()
+    if _try_advisory_xact_lock(db, _POOL_SWEEP_LOCK_KEY):
+        tenant_ids = list(db.scalars(select(Tenant.id).order_by(Tenant.id)).all())
+        for tenant_id in tenant_ids:
+            total += compute_states(db, tenant_id, now=stamp)
+            total += build_recommendations(db, tenant_id, now=stamp)
+        db.commit()
+    total += advance_chains(db, now=stamp)
+    total += start_auto_chains(db, now=stamp)
     return total
+
+
+# -- P2 체인 실행기 -----------------------------------------------------------
+# 체인이 아직 진행 중인 단계들. done/failed 는 종착이라 스윕이 다시 보지 않는다.
+CHAIN_ACTIVE_STEPS = ("deliver", "switch", "recall")
+# 에이전트에 설치가 끝난 배정 — switch_now 와 recall 이 요구하는 상태(§6.3).
+_INSTALLED_STATES = ("active", "inactive")
+
+
+def _chain_timeout() -> timedelta:
+    return timedelta(minutes=get_settings().pool_chain_step_timeout_minutes)
+
+
+def _servers_with_active_chain(db: Session, tenant_id: uuid.UUID) -> set[uuid.UUID]:
+    return set(
+        db.scalars(
+            select(PoolChain.server_id).where(
+                PoolChain.tenant_id == tenant_id,
+                PoolChain.step.in_(CHAIN_ACTIVE_STEPS),
+            )
+        ).all()
+    )
+
+
+def active_chain_for_server(db: Session, server_id: uuid.UUID) -> PoolChain | None:
+    """이 서버에서 지금 도는 체인. 서버당 최대 하나라는 규칙의 판정자다.
+
+    둘 이상이 돌면 두 체인이 같은 배정을 서로 다른 방향으로 밀게 되고, reconcile 의
+    CORRECTION_CAP 이 그 싸움을 3회에서 끊어 버려 어느 쪽도 수렴하지 않는다.
+    """
+    return db.scalars(
+        select(PoolChain)
+        .where(PoolChain.server_id == server_id, PoolChain.step.in_(CHAIN_ACTIVE_STEPS))
+        .order_by(PoolChain.started_at)
+        .limit(1)
+    ).first()
+
+
+def unacked_failed_chain(db: Session, server_id: uuid.UUID) -> PoolChain | None:
+    """운영자가 아직 확인하지 않은 실패 체인.
+
+    이게 남아 있는 동안 이 서버의 **자동** 실행은 멈춘다. 실패의 원인이 관측이든
+    에이전트든 그대로인 채 컨트롤러가 30초마다 같은 계획을 다시 밀면, 실패가
+    쌓이는 속도만 빨라지고 사람이 볼 것은 늘지 않는다.
+    """
+    return db.scalars(
+        select(PoolChain)
+        .where(
+            PoolChain.server_id == server_id,
+            PoolChain.step == "failed",
+            PoolChain.acked_at.is_(None),
+        )
+        .order_by(PoolChain.started_at.desc())
+        .limit(1)
+    ).first()
+
+
+def _live_assignment(
+    db: Session, tenant_id: uuid.UUID, account_id: uuid.UUID | None
+) -> Assignment | None:
+    if account_id is None:
+        return None
+    return db.scalars(
+        select(Assignment).where(
+            Assignment.tenant_id == tenant_id,
+            Assignment.account_id == account_id,
+            Assignment.state != _DETACHED,
+        )
+    ).first()
+
+
+def _chain_detail(chain: PoolChain, **extra) -> dict:
+    detail = {
+        "chain_id": str(chain.id),
+        "kind": chain.kind,
+        "step": chain.step,
+        "recommendation_id": str(chain.recommendation_id)
+        if chain.recommendation_id
+        else None,
+        "from_account_id": str(chain.from_account_id) if chain.from_account_id else None,
+        "to_account_id": str(chain.to_account_id) if chain.to_account_id else None,
+    }
+    detail.update(extra)
+    return detail
+
+
+def _touch(db: Session, chain: PoolChain, *, step: str, now: datetime, **detail) -> bool:
+    """체인을 다음 단계로 옮기고 감사 한 줄을 남긴다. 항상 True(무언가 일어났다).
+
+    ``updated_at`` 은 여기서만 움직인다 — 그래서 단계 타임아웃이 "이 단계에 들어온
+    뒤 흐른 시간"을 정확히 뜻하고, 아무 일도 없는 틱이 시계를 되감지 못한다.
+    """
+    chain.step = step
+    chain.updated_at = now
+    record_event(
+        db,
+        tenant_id=chain.tenant_id,
+        kind="chain_step",
+        server_id=chain.server_id,
+        account_id=chain.to_account_id or chain.from_account_id,
+        actor=chain.actor,
+        detail=_chain_detail(chain, **detail),
+    )
+    return True
+
+
+def _finish(db: Session, chain: PoolChain, *, now: datetime, **detail) -> bool:
+    chain.step = "done"
+    chain.updated_at = now
+    record_event(
+        db,
+        tenant_id=chain.tenant_id,
+        kind="chain_done",
+        server_id=chain.server_id,
+        account_id=chain.to_account_id or chain.from_account_id,
+        actor=chain.actor,
+        detail=_chain_detail(chain, **detail),
+    )
+    return True
+
+
+def _fail(db: Session, chain: PoolChain, reason: str, *, now: datetime, **detail) -> bool:
+    """체인을 실패로 접고 경보를 연다. **롤백 명령은 내지 않는다.**
+
+    되돌리는 판단은 사람 몫이다. 실패한 이유가 "에이전트가 응답하지 않는다"라면
+    자동 롤백은 응답하지 않는 에이전트에 명령을 하나 더 쌓을 뿐이고, 실패가 부분
+    성공(예: deliver 는 됐고 switch 만 안 됨)이라면 되돌리는 쪽이 오히려 더 큰
+    변경이다. 컨트롤러가 할 수 있는 정직한 일은 멈추고 알리는 것뿐이다.
+    """
+    failed_at_step = chain.step
+    chain.step = "failed"
+    chain.error = reason
+    chain.updated_at = now
+    record_event(
+        db,
+        tenant_id=chain.tenant_id,
+        kind="chain_failed",
+        server_id=chain.server_id,
+        account_id=chain.to_account_id or chain.from_account_id,
+        actor=chain.actor,
+        detail=_chain_detail(chain, failed_step=failed_at_step, error=reason, **detail),
+    )
+    alerts_service.open_alert(
+        db,
+        tenant_id=chain.tenant_id,
+        server_id=chain.server_id,
+        kind="pool_chain_failed",
+        severity="warning",
+        detail=_chain_detail(chain, failed_step=failed_at_step, error=reason, **detail),
+    )
+    return True
+
+
+def _expired(chain: PoolChain, now: datetime) -> bool:
+    return now - (_aware(chain.updated_at) or now) >= _chain_timeout()
+
+
+def _started_only(chain: PoolChain) -> bool:
+    """아직 이 체인이 아무 명령도 내지 않았는가.
+
+    ``_touch`` 만 ``updated_at`` 을 움직이므로, 시작 시각과 같다는 것은 곧
+    "명령 발행 이전"이라는 뜻이다. 배정이 없을 때 그것이 *아직 안 만든* 것인지
+    *만들었다가 사라진* 것인지를 가르는 유일한 증거다.
+    """
+    return _aware(chain.updated_at) == _aware(chain.started_at)
+
+
+# -- 단계별 전진 --------------------------------------------------------------
+def _advance_deliver(db: Session, chain: PoolChain, now: datetime) -> bool:
+    assignment = _live_assignment(db, chain.tenant_id, chain.to_account_id)
+
+    if assignment is None:
+        if not _started_only(chain):
+            return _fail(db, chain, "전달한 배정이 사라졌다(회수 또는 삭제).", now=now)
+        try:
+            assignment = inventory.create_assignment(
+                db,
+                chain.tenant_id,
+                account_id=chain.to_account_id,
+                server_id=chain.server_id,
+                pinned=False,
+            )
+        except ApiError as exc:
+            # 배정 생성이 거부되는 이유(다른 서버에 이미 붙음, assignment_excluded,
+            # Codex 서버당 1개)는 재시도로 풀리지 않는다 — 즉시 실패로 접는다.
+            return _fail(db, chain, f"배정 생성 거부: {exc.code}", now=now)
+        if _expired(chain, now):
+            return _fail(db, chain, "deliver 단계 제한 시간 초과", now=now)
+
+    if assignment.server_id != chain.server_id:
+        return _fail(db, chain, "대상 계정이 다른 서버에 배정돼 있다.", now=now)
+
+    if assignment.state == "pending":
+        commands.request_deliver(db, chain.tenant_id, assignment.id)
+        return _touch(db, chain, step="deliver", now=now, assignment_id=str(assignment.id))
+
+    if assignment.state in _INSTALLED_STATES:
+        if chain.kind == "prefetch":
+            return _finish(db, chain, now=now, assignment_id=str(assignment.id))
+        return _touch(db, chain, step="switch", now=now, assignment_id=str(assignment.id))
+
+    if assignment.state == "delivering":
+        if _expired(chain, now):
+            return _fail(db, chain, "deliver 단계 제한 시간 초과", now=now)
+        return False
+
+    return _fail(db, chain, f"배정이 예상 밖 상태다: {assignment.state}", now=now)
+
+
+def _newest_switch_command(db: Session, assignment_id: uuid.UUID) -> AgentCommand | None:
+    return db.scalars(
+        select(AgentCommand)
+        .where(
+            AgentCommand.assignment_id == assignment_id,
+            AgentCommand.command_type == "switch_now",
+        )
+        .order_by(AgentCommand.created_at.desc(), AgentCommand.id.desc())
+        .limit(1)
+    ).first()
+
+
+def _advance_switch(db: Session, chain: PoolChain, now: datetime) -> bool:
+    assignment = _live_assignment(db, chain.tenant_id, chain.to_account_id)
+    if assignment is None or assignment.state not in _INSTALLED_STATES:
+        state = assignment.state if assignment is not None else "없음"
+        return _fail(db, chain, f"전환 대상 배정이 설치 상태가 아니다: {state}", now=now)
+
+    if chain.command_id is None:
+        commands.request_switch_now(db, chain.tenant_id, assignment.id)
+        issued = _newest_switch_command(db, assignment.id)
+        if issued is None:  # pragma: no cover - enqueue 가 항상 한 줄을 남긴다
+            return _fail(db, chain, "switch_now 명령을 찾을 수 없다.", now=now)
+        chain.command_id = issued.command_id
+        return _touch(db, chain, step="switch", now=now, command_id=issued.command_id)
+
+    command = db.scalars(
+        select(AgentCommand).where(AgentCommand.command_id == chain.command_id)
+    ).first()
+    if command is None:
+        return _fail(db, chain, "발행한 switch_now 명령이 사라졌다.", now=now)
+    if command.status == "acked":
+        # lease 는 여기서 끝이고, swap 은 이제 이전 계정을 거둔다.
+        if chain.kind == "swap":
+            return _touch(db, chain, step="recall", now=now, command_id=command.command_id)
+        return _finish(db, chain, now=now, command_id=command.command_id)
+    if command.status == "failed":
+        return _fail(db, chain, f"switch_now 실패: {command.detail or '사유 없음'}", now=now)
+    if _expired(chain, now):
+        return _fail(db, chain, "switch 단계 제한 시간 초과", now=now)
+    return False
+
+
+def _advance_recall(db: Session, chain: PoolChain, now: datetime) -> bool:
+    assignment = _live_assignment(db, chain.tenant_id, chain.from_account_id)
+    if assignment is None:
+        # detached 까지 갔다. 공평 순환의 기준점을 찍는다 — compute_states 도 같은
+        # 값을 쓰지만, 그쪽은 다음 스윕에나 돌므로 여기서 먼저 확정한다.
+        account = db.get(Account, chain.from_account_id) if chain.from_account_id else None
+        if account is not None and account.tenant_id == chain.tenant_id:
+            account.last_lease_ended_at = now
+            account.updated_at = now
+        return _finish(db, chain, now=now)
+
+    if assignment.state == "recalling":
+        if _expired(chain, now):
+            return _fail(db, chain, "recall 단계 제한 시간 초과", now=now)
+        return False
+
+    if assignment.state in _INSTALLED_STATES or assignment.state == "delivering":
+        try:
+            commands.request_recall(db, chain.tenant_id, assignment.id)
+        except ApiError as exc:
+            return _fail(db, chain, f"회수 거부: {exc.code}", now=now)
+        return _touch(db, chain, step="recall", now=now, assignment_id=str(assignment.id))
+
+    return _fail(db, chain, f"회수 대상이 예상 밖 상태다: {assignment.state}", now=now)
+
+
+_STEP_HANDLERS = {
+    "deliver": _advance_deliver,
+    "switch": _advance_switch,
+    "recall": _advance_recall,
+}
+
+
+def advance_chain(db: Session, chain: PoolChain, *, now: datetime | None = None) -> bool:
+    """체인 하나를 한 걸음 전진시킨다. 무언가 바뀌었으면 True.
+
+    커밋하지 않는다 — 다만 이 안에서 부르는 명령 서비스(create_assignment /
+    request_deliver / request_recall / request_switch_now)가 스스로 커밋하므로,
+    체인 행 변경은 그 커밋에 함께 실린다. 명령을 낸 뒤 체인 단계를 못 적는 창을
+    없애려는 순서다.
+    """
+    stamp = _aware(now) or _now()
+    handler = _STEP_HANDLERS.get(chain.step)
+    if handler is None:
+        return False
+    return handler(db, chain, stamp)
+
+
+def advance_chains(db: Session, *, now: datetime | None = None) -> int:
+    """활성 체인 전부를 한 걸음씩. 자체 advisory 락(…0E), 걸음마다 새로 잡는다.
+
+    락을 한 번만 잡을 수 없는 이유는 명령 서비스가 커밋하기 때문이다 — 트랜잭션
+    범위 락은 그 순간 풀린다. 그래서 보호 단위를 "체인 한 걸음"으로 잡는다.
+    한 걸음 안에서는 판단(배정 상태 읽기)과 발행(명령 INSERT)이 같은 트랜잭션에
+    있으므로, 두 인스턴스가 같은 체인에 명령을 겹쳐 내는 일은 없다.
+    """
+    stamp = _aware(now) or _now()
+    chain_ids = [
+        c
+        for c in db.scalars(
+            select(PoolChain.id)
+            .where(PoolChain.step.in_(CHAIN_ACTIVE_STEPS))
+            .order_by(PoolChain.started_at, PoolChain.id)
+        ).all()
+    ]
+    db.commit()
+    moved = 0
+    for chain_id in chain_ids:
+        if not _try_advisory_xact_lock(db, _POOL_CHAIN_LOCK_KEY):
+            break
+        db.expire_all()
+        chain = db.get(PoolChain, chain_id)
+        if chain is None or chain.step not in CHAIN_ACTIVE_STEPS:
+            db.commit()
+            continue
+        if advance_chain(db, chain, now=stamp):
+            moved += 1
+        db.commit()
+    return moved
+
+
+# -- 착수(수동 :apply / 자동) --------------------------------------------------
+def start_chain(
+    db: Session,
+    recommendation: PoolRecommendation,
+    *,
+    actor: str,
+    now: datetime | None = None,
+) -> PoolChain:
+    """권고 한 건을 체인으로 바꾸고 첫 단계를 발행한다. 커밋한다.
+
+    권고 행은 여기서 지운다. 권고는 "조건의 투영"이고 그 조건에 대해 사람이 이미
+    결정을 내렸으므로, 남겨 두면 같은 계획을 두 번 실행할 수 있는 버튼이 콘솔에
+    계속 떠 있게 된다.
+    """
+    stamp = _aware(now) or _now()
+    tenant_id = recommendation.tenant_id
+    server_id = recommendation.server_id
+
+    if active_chain_for_server(db, server_id) is not None:
+        raise conflict(
+            "pool.chain_active",
+            "이 서버에는 이미 실행 중인 체인이 있다. 끝나기를 기다려라.",
+        )
+    live = _live_assignments(db, tenant_id)
+    server_live = [a for a in live.values() if a.server_id == server_id]
+    if any(a.state in _IN_FLIGHT_STATES for a in server_live):
+        raise conflict(
+            "pool.server_in_flight",
+            "이 서버에 전달·회수가 진행 중인 배정이 있다.",
+        )
+
+    kind = recommendation.kind
+    if kind in ("lease", "prefetch", "swap") and recommendation.to_account_id is None:
+        raise conflict("pool.recommendation_invalid", f"{kind} 권고에 대상 계정이 없다.")
+    if kind in ("swap", "recall_idle") and recommendation.from_account_id is None:
+        raise conflict("pool.recommendation_invalid", f"{kind} 권고에 회수 계정이 없다.")
+    if kind == "swap":
+        target = live.get(recommendation.to_account_id)
+        if (
+            target is None
+            or target.server_id != server_id
+            or target.state not in _INSTALLED_STATES
+        ):
+            raise conflict(
+                "pool.swap_target_not_installed",
+                "swap 은 이 서버에 이미 설치된 계정으로만 전환할 수 있다. "
+                "먼저 prefetch 로 올려라.",
+            )
+    if kind == "recall_idle":
+        source = live.get(recommendation.from_account_id)
+        if source is None or source.server_id != server_id:
+            raise conflict(
+                "pool.recall_source_missing",
+                "회수 대상 계정이 이 서버에 배정돼 있지 않다.",
+            )
+
+    first_step = {"lease": "deliver", "prefetch": "deliver", "swap": "switch"}.get(
+        kind, "recall"
+    )
+    chain = PoolChain(
+        tenant_id=tenant_id,
+        server_id=server_id,
+        recommendation_id=recommendation.id,
+        kind=kind,
+        from_account_id=recommendation.from_account_id,
+        to_account_id=recommendation.to_account_id,
+        step=first_step,
+        actor=actor,
+        started_at=stamp,
+        updated_at=stamp,
+    )
+    db.add(chain)
+    db.flush()
+    record_event(
+        db,
+        tenant_id=tenant_id,
+        kind="chain_started",
+        server_id=server_id,
+        account_id=recommendation.to_account_id or recommendation.from_account_id,
+        actor=actor,
+        detail=_chain_detail(
+            chain,
+            reason=recommendation.reason,
+            trigger_pct=recommendation.trigger_pct,
+        ),
+    )
+    db.execute(
+        delete(PoolRecommendation).where(PoolRecommendation.id == recommendation.id)
+    )
+    db.commit()
+
+    advance_chain(db, chain, now=stamp)
+    db.commit()
+    db.refresh(chain)
+    return chain
+
+
+def ack_chain(
+    db: Session, chain: PoolChain, *, actor: str, now: datetime | None = None
+) -> PoolChain:
+    """실패한 체인을 운영자가 확인했다고 표시하고, 그 서버의 자동 실행 빗장을 푼다."""
+    stamp = _aware(now) or _now()
+    if chain.step != "failed":
+        raise conflict(
+            "pool.chain_not_failed",
+            f"확인은 실패한 체인에만 쓴다. 이 체인은 {chain.step} 이다.",
+        )
+    if chain.acked_at is None:
+        chain.acked_at = stamp
+        chain.updated_at = stamp
+        record_event(
+            db,
+            tenant_id=chain.tenant_id,
+            kind="chain_step",
+            server_id=chain.server_id,
+            account_id=chain.to_account_id or chain.from_account_id,
+            actor=actor,
+            detail=_chain_detail(chain, action="ack"),
+        )
+        alerts_service.resolve(db, server_id=chain.server_id, kind="pool_chain_failed")
+        db.commit()
+        db.refresh(chain)
+    return chain
+
+
+# -- P3 자동 모드 -------------------------------------------------------------
+def start_auto_chains(db: Session, *, now: datetime | None = None) -> int:
+    """``mode=auto`` 서버의 권고를 컨트롤러 이름으로 착수한다. 착수한 수를 돌려준다.
+
+    세 개의 빗장을 모두 지나야 한 건이 시작된다. 테넌트가 일시정지되지 않았을 것,
+    그 서버에 도는 체인도 미확인 실패 체인도 없을 것, 그리고 테넌트의 동시 자동
+    체인이 상한 미만일 것. 상한은 "관측이 한꺼번에 틀렸을 때 몇 대까지 흔들려도
+    되는가"에 대한 답이고, 운영자가 손으로 연 체인은 세지 않는다 — 사람이 누른
+    버튼까지 컨트롤러의 예산으로 묶으면 사고 대응이 막힌다.
+    """
+    stamp = _aware(now) or _now()
+    cap = get_settings().pool_max_concurrent_chains
+    started = 0
+    tenant_ids = list(db.scalars(select(Tenant.id).order_by(Tenant.id)).all())
+    db.commit()
+    for tenant_id in tenant_ids:
+        db.expire_all()
+        tenant = db.get(Tenant, tenant_id)
+        if tenant is None or tenant.pool_automation_paused:
+            db.commit()
+            continue
+        running = _auto_chain_count(db, tenant_id)
+        recommendations = list(
+            db.scalars(
+                select(PoolRecommendation)
+                .where(PoolRecommendation.tenant_id == tenant_id)
+                .order_by(PoolRecommendation.created_at, PoolRecommendation.id)
+            ).all()
+        )
+        db.commit()
+        for recommendation in recommendations:
+            if running >= cap:
+                break
+            if not _try_advisory_xact_lock(db, _POOL_CHAIN_LOCK_KEY):
+                return started
+            db.expire_all()
+            fresh = db.get(PoolRecommendation, recommendation.id)
+            if fresh is None or not _auto_eligible(db, fresh, tenant_id):
+                db.commit()
+                continue
+            try:
+                start_chain(db, fresh, actor=POOL_CONTROLLER_ACTOR, now=stamp)
+            except ApiError:
+                # 착수 조건이 방금 깨졌다(다른 인스턴스가 먼저 잡았거나 배정이
+                # 움직였다). 권고는 그대로 두고 다음 틱에 다시 본다.
+                db.rollback()
+                continue
+            running += 1
+            started += 1
+    return started
+
+
+def _auto_chain_count(db: Session, tenant_id: uuid.UUID) -> int:
+    return len(
+        db.scalars(
+            select(PoolChain.id).where(
+                PoolChain.tenant_id == tenant_id,
+                PoolChain.step.in_(CHAIN_ACTIVE_STEPS),
+                PoolChain.actor == POOL_CONTROLLER_ACTOR,
+            )
+        ).all()
+    )
+
+
+def _auto_eligible(
+    db: Session, recommendation: PoolRecommendation, tenant_id: uuid.UUID
+) -> bool:
+    server = db.get(Server, recommendation.server_id)
+    if server is None or server.tenant_id != tenant_id:
+        return False
+    if resolve_policy(server)["mode"] != "auto":
+        return False
+    if active_chain_for_server(db, server.id) is not None:
+        return False
+    if unacked_failed_chain(db, server.id) is not None:
+        return False
+    return True
+
+
+def set_automation_paused(
+    db: Session,
+    tenant_id: uuid.UUID,
+    *,
+    paused: bool,
+    actor: str,
+    now: datetime | None = None,  # noqa: ARG001 - 호출부 대칭용, 이 전이는 시각을 안 쓴다
+) -> bool:
+    """테넌트의 자동 실행 스위치. 반환값은 적용 후의 값.
+
+    일시정지는 **신규 착수만** 막는다. 이미 도는 체인은 끝까지 간다 — deliver 만
+    되고 switch 가 안 된 서버, 전환은 됐는데 이전 계정을 못 거둔 서버는 어느 쪽도
+    정상 상태가 아니고, 그 중간에서 멈추는 것이 계속 가는 것보다 위험하다.
+    """
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise not_found("tenant")
+    if bool(tenant.pool_automation_paused) != paused:
+        tenant.pool_automation_paused = paused
+        record_event(
+            db,
+            tenant_id=tenant_id,
+            kind="automation_paused" if paused else "automation_resumed",
+            actor=actor,
+            detail={"paused": paused},
+        )
+        db.commit()
+    return bool(paused)

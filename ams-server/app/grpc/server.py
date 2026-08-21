@@ -1735,8 +1735,10 @@ def _sweep_session_usage_retention_once(session_factory: sessionmaker[Session]) 
 
 
 def _sweep_pool_once(session_factory: sessionmaker[Session]) -> int:
-    # pool.sweep_pool takes its own advisory lock (…0D) and commits. 관측만 하고
-    # 명령은 내지 않으므로 실패해도 배정에는 아무 영향이 없다.
+    # pool.sweep_pool 은 관측(…0D 락)과 체인 전진·자동 착수(…0E 락)를 이 순서로
+    # 한 틱에 돈다. P2/P3 부터는 명령을 발행하므로 더 이상 무해한 스윕이 아니다 —
+    # 다만 체인 한 걸음은 판단과 발행이 같은 트랜잭션이라, 중간에 죽어도 절반만
+    # 적용된 상태는 남지 않고 다음 틱이 배정 상태를 보고 이어 간다.
     with session_factory() as db:
         return pool.sweep_pool(db)
 

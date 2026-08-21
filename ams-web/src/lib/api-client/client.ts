@@ -220,6 +220,20 @@ const KR_API_ERROR: Record<string, string> = {
 
   'pool.state_conflict':
     '지금 상태에서는 적용할 수 없는 동작입니다. 대여 중인 계정은 먼저 회수하고, 고정 해제는 고정된 계정에만 씁니다.',
+  'pool.recommendation_stale':
+    '그 권고는 이미 실행됐거나 조건이 해소됐습니다. 풀 화면을 새로 읽고 지금 남아 있는 권고로 다시 실행하세요.',
+  'pool.chain_active':
+    '이 서버에서는 교체가 이미 진행 중입니다. 진행 중인 체인이 끝나거나 실패로 접힌 뒤에 다시 실행하세요.',
+  'pool.server_in_flight':
+    '이 서버에 전달·회수가 진행 중인 할당이 있습니다. 그 할당이 활성 또는 분리로 수렴한 뒤에 다시 실행하세요.',
+  'pool.recommendation_invalid':
+    '권고에 필요한 계정 정보가 비어 있습니다. 풀 화면을 새로 읽고, 같은 권고가 다시 뜨면 서버 담당자에게 알리세요.',
+  'pool.swap_target_not_installed':
+    '교체 대상 계정이 이 서버에 아직 설치돼 있지 않습니다. 예열(prefetch)로 먼저 올린 뒤 교체하세요.',
+  'pool.recall_source_missing':
+    '회수할 계정이 이 서버에 할당돼 있지 않습니다. 풀 화면을 새로 읽으세요.',
+  'pool.chain_not_failed':
+    '확인 처리는 실패한 체인에만 씁니다. 진행 중인 체인은 끝나기를 기다리세요.',
 
   'account.assigned':
     '이 계정은 아직 서버에 연결돼 있습니다. 할당을 회수하고 삭제한 뒤 계정을 지우세요.',

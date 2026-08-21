@@ -87,6 +87,10 @@ ALERT_KINDS = (
     # 닿았을 때 여는 경고(계정 범위). all_exhausted가 서버 전체가 막힌 뒤에야
     # 울리는 것과 달리, 이건 교체를 준비할 시간이 남아 있을 때 울린다.
     "account_window_high",
+    # 계정 풀 P2: 체인 한 단계가 제한 시간 안에 수렴하지 못했을 때 여는 경고(서버
+    # 범위). 컨트롤러는 롤백 명령을 자동으로 내지 않으므로 — 무엇을 되돌릴지는
+    # 사람이 판단해야 한다 — 이 경보가 유일한 인계 지점이다.
+    "pool_chain_failed",
 )
 # 계정 풀 순환의 위치. accounts.status(재고 상태)와 축이 다르다 — 격리된
 # 계정이면서 충전 중일 수 있으므로 한 컬럼에 합치지 않는다.
@@ -1100,7 +1104,12 @@ class PoolChain(Base):
             "step IN ('deliver','switch','recall','done','failed')",
             name="ck_pool_chains_step",
         ),
+        CheckConstraint(
+            "kind IN ('prefetch','swap','recall_idle','lease')",
+            name="ck_pool_chains_kind",
+        ),
         Index("ix_pool_chains_tenant_step", "tenant_id", "step"),
+        Index("ix_pool_chains_server_step", "server_id", "step"),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -1115,10 +1124,22 @@ class PoolChain(Base):
     to_account_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), nullable=True
     )
+    # 체인의 종류. from/to 조합으로는 prefetch 와 swap 이 구분되지 않는다 — 둘 다
+    # 양쪽을 채우지만 prefetch 는 deliver 에서 끝나고 swap 은 전환·회수까지 간다.
+    kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="swap", server_default=text("'swap'")
+    )
     step: Mapped[str] = mapped_column(
         String(16), nullable=False, default="deliver", server_default=text("'deliver'")
     )
+    # switch 단계에서 발행한 switch_now 의 command_id. 비-state 명령이라 배정에
+    # 흔적이 남지 않으므로, 이게 없으면 스윕이 매 틱 같은 전환을 다시 낸다.
+    command_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 실패한 체인을 운영자가 확인한 시각. 확인 전까지 이 서버의 자동 실행은 멈춘다.
+    acked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -22,11 +22,12 @@ from sqlalchemy import select
 
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, TenantScope
-from app.core.errors import conflict
+from app.core.errors import conflict, not_found
 from app.models import (
     Account,
     AccountUsageWindow,
     Assignment,
+    PoolChain,
     PoolEvent,
     PoolRecommendation,
     Server,
@@ -332,3 +333,107 @@ def release_account(
         reason="operator_release",
         allowed_from=("held", "cooling"),
     )
+
+
+# -- P2 체인 실행 / P3 자동 모드 스위치 ---------------------------------------
+@router.post(
+    "/pool/recommendations/{recommendation_id}:apply",
+    summary="pool-recommendation:apply",
+    response_model=schemas.PoolChain,
+)
+def apply_recommendation(
+    tenant_id: uuid.UUID,
+    recommendation_id: uuid.UUID,
+    db: DbSession,
+    principal: AdminPrincipal,
+):
+    """권고 한 건을 원클릭으로 실행한다 — 체인을 만들고 첫 명령을 낸다.
+
+    사라진 권고에 404 가 아니라 409 를 주는 이유는, 그것이 "없는 것을 눌렀다"가
+    아니라 "있었는데 조건이 해소됐다"이기 때문이다. 스윕은 참이 아니게 된 권고를
+    매 틱 지우므로, 콘솔이 몇 초 전에 그린 버튼은 정상적으로도 사라질 수 있다.
+    운영자가 받아야 할 메시지는 "다시 읽어라"이지 "잘못 눌렀다"가 아니다.
+    """
+    recommendation = db.scalars(
+        select(PoolRecommendation).where(
+            PoolRecommendation.id == recommendation_id,
+            PoolRecommendation.tenant_id == tenant_id,
+        )
+    ).first()
+    if recommendation is None:
+        raise conflict(
+            "pool.recommendation_stale",
+            "그 권고는 더 이상 유효하지 않다(조건이 해소됐거나 이미 실행됐다). "
+            "풀 화면을 새로 읽어라.",
+        )
+    chain = pool.start_chain(db, recommendation, actor=_actor(principal))
+    return schemas.PoolChain.model_validate(chain)
+
+
+@router.get("/pool/chains", response_model=list[schemas.PoolChain])
+def list_chains(
+    tenant_id: uuid.UUID,
+    db: DbSession,
+    principal: AdminPrincipal,
+    status: str = Query(default="active", pattern="^(active|all)$"),
+):
+    """``status=active`` 는 도는 것만, ``all`` 은 끝난 것까지 최신순으로."""
+    where = [PoolChain.tenant_id == tenant_id]
+    if status == "active":
+        where.append(PoolChain.step.in_(pool.CHAIN_ACTIVE_STEPS))
+    rows = db.scalars(
+        select(PoolChain)
+        .where(*where)
+        .order_by(PoolChain.started_at.desc(), PoolChain.id.desc())
+        .limit(200)
+    ).all()
+    return [schemas.PoolChain.model_validate(c) for c in rows]
+
+
+@router.post(
+    "/pool/chains/{chain_id}:ack",
+    summary="pool-chain:ack",
+    response_model=schemas.PoolChain,
+)
+def ack_chain(
+    tenant_id: uuid.UUID,
+    chain_id: uuid.UUID,
+    db: DbSession,
+    principal: AdminPrincipal,
+):
+    """실패한 체인을 확인 처리한다 — 그 서버의 자동 실행이 다시 열린다.
+
+    계약(pool-api-contract.md)에 없는 엔드포인트다. 실패한 서버의 자동 실행을 사람이
+    볼 때까지 멈추기로 한 이상, 그 빗장을 푸는 문이 어딘가에는 있어야 한다.
+    """
+    chain = db.scalars(
+        select(PoolChain).where(PoolChain.id == chain_id, PoolChain.tenant_id == tenant_id)
+    ).first()
+    if chain is None:
+        raise not_found("pool-chain")
+    return schemas.PoolChain.model_validate(
+        pool.ack_chain(db, chain, actor=_actor(principal))
+    )
+
+
+@router.post(
+    "/pool:pause", summary="pool:pause", response_model=schemas.PoolAutomationState
+)
+def pause_automation(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
+    """테넌트 전체의 자동 실행을 멈춘다. 이미 도는 체인은 끝까지 간다."""
+    inventory.get_tenant(db, tenant_id)
+    paused = pool.set_automation_paused(
+        db, tenant_id, paused=True, actor=_actor(principal)
+    )
+    return schemas.PoolAutomationState(automation_paused=paused)
+
+
+@router.post(
+    "/pool:resume", summary="pool:resume", response_model=schemas.PoolAutomationState
+)
+def resume_automation(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
+    inventory.get_tenant(db, tenant_id)
+    paused = pool.set_automation_paused(
+        db, tenant_id, paused=False, actor=_actor(principal)
+    )
+    return schemas.PoolAutomationState(automation_paused=paused)

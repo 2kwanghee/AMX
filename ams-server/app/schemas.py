@@ -316,11 +316,23 @@ class PoolChain(Wire):
     recommendation_id: uuid.UUID | None = None
     from_account_id: uuid.UUID | None = None
     to_account_id: uuid.UUID | None = None
+    # 계약(pool-api-contract.md)에 없던 필드. 체인 종류는 from/to 로 되돌릴 수 없고
+    # (prefetch 와 swap 이 같은 모양이다) 콘솔이 "무엇이 일어나는 중인지"를 쓰려면
+    # 필요하다. 추가 필드라 기존 소비자를 깨지 않는다.
+    kind: PoolRecommendationKind = "swap"
     step: PoolChainStep
     error: str | None = None
     started_at: datetime
     updated_at: datetime
+    # 실패한 체인을 운영자가 확인한 시각(:ack). 이것도 계약 밖 추가분이다.
+    acked_at: datetime | None = None
     actor: str
+
+
+class PoolAutomationState(Wire):
+    """``POST /pool:pause`` / ``:resume`` 의 응답. 계약이 정한 그대로 한 필드다."""
+
+    automation_paused: bool = False
 
 
 class PoolEvent(Wire):
@@ -459,6 +471,7 @@ AlertKind = Literal[
     "dangerous_command",
     "credential_unusable",
     "account_window_high",
+    "pool_chain_failed",
 ]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]
