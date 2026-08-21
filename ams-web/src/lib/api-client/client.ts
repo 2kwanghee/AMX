@@ -229,7 +229,9 @@ const KR_API_ERROR: Record<string, string> = {
   'pool.recommendation_invalid':
     '권고에 필요한 계정 정보가 비어 있습니다. 풀 화면을 새로 읽고, 같은 권고가 다시 뜨면 서버 담당자에게 알리세요.',
   'pool.swap_target_not_installed':
-    '교체 대상 계정이 이 서버에 아직 설치돼 있지 않습니다. 예열(prefetch)로 먼저 올린 뒤 교체하세요.',
+    '교체 대상 할당이 아직 전달 중입니다. 전달이 끝나 활성이 된 뒤에 다시 실행하세요.',
+  'pool.swap_target_elsewhere':
+    '교체 대상 계정이 다른 서버에 할당돼 있습니다. 그 할당을 먼저 회수한 뒤 다시 실행하세요.',
   'pool.recall_source_missing':
     '회수할 계정이 이 서버에 할당돼 있지 않습니다. 풀 화면을 새로 읽으세요.',
   'pool.chain_not_failed':

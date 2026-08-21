@@ -712,6 +712,40 @@ def _unusable_account_ids(db: Session, tenant_id: uuid.UUID) -> set[uuid.UUID]:
     return {r.account_id for r in rows}
 
 
+# 창 개념이 없는 자격증명 유형. 사용률을 물어볼 수 없으니 컨트롤러가 언제 거둘지
+# 판단할 근거가 없다(기획서 §4.7 — 자동화 밖에 둔다).
+_WINDOWLESS_CREDENTIAL_TYPES = ("api_key",)
+
+
+def ineligible_reason(
+    account: Account,
+    *,
+    unusable: set[uuid.UUID],
+    windows: list[AccountUsageWindow],
+) -> str | None:
+    """이 계정이 자동화 대상이 **될 수 없는** 이유. 될 수 있으면 None.
+
+    후보 선정과 콘솔 표시가 같은 함수를 쓴다. 둘이 갈라지면 운영자는 "왜 안 뽑히지"를
+    화면에서 알아낼 수 없고, 그 질문에 답하려고 로그를 뒤지게 된다.
+
+    여기 담기는 것은 **지속적인** 사유뿐이다. 대여 중이거나 충전 중인 것은 순환의
+    정상 국면이지 부적격이 아니므로, 그 판단은 ``_candidates`` 의 상태 필터가 한다.
+    """
+    if account.credential_type in _WINDOWLESS_CREDENTIAL_TYPES:
+        return "api_key"
+    if account.assignment_excluded:
+        return "excluded"
+    if account.status in _UNUSABLE_STATUSES or account.id in unusable:
+        return "unusable"
+    if account.pool_state == "pinned":
+        return "pinned"
+    if account.pool_state == "held":
+        return "held"
+    if _all_pct_unknown(windows):
+        return "no_observation"
+    return None
+
+
 def _candidates(
     accounts: list[Account],
     *,
@@ -734,19 +768,16 @@ def _candidates(
     epoch = datetime.min.replace(tzinfo=UTC)
     out = []
     for account in accounts:
-        if account.pool_state in ("pinned", "held", "cooling", "recalling", "leased"):
+        # 지속적인 부적격 사유(자격증명 유형·제외 플래그·사용 불가·운영자 상태·
+        # 미상 관측)는 한 곳에서 판정한다 — 콘솔이 보여 주는 이유와 같은 함수다.
+        if ineligible_reason(
+            account, unusable=unusable, windows=windows.get(account.id, [])
+        ) is not None:
             continue
-        if account.assignment_excluded:
-            continue
-        if account.status in _UNUSABLE_STATUSES:
+        # 순환의 정상 국면(대여 중·회수 중·충전 중)은 부적격이 아니라 "지금은 아님"이다.
+        if account.pool_state in ("cooling", "recalling", "leased"):
             continue
         if account.id in live:
-            continue
-        if account.id in unusable:
-            continue
-        # 창을 읽었는데 pct 를 하나도 못 건진 계정은 미상이다. 미상을 0% 로 접으면
-        # 그 계정이 "가장 여유 있는 후보"가 되어 제일 먼저 뽑힌다.
-        if _all_pct_unknown(windows.get(account.id, [])):
             continue
         # Codex 는 서버당 1개 제한이라, 이미 뭔가 붙어 있는 서버에는 얹지 않는다.
         # 다만 대체 상대를 찾는 중이면 이 필터를 걸지 않는다(§8 — 나가는 계정의
@@ -817,6 +848,25 @@ def _desired_recommendation(
     def _fresh(account: Account) -> float | None:
         return _max_fresh_pct(windows.get(account.id, []), now, stale_after)
 
+    def _gap_note(target_account: Account) -> str:
+        """이 교체가 무자격 공백을 만들면 그 사실을 권고 문장에 적는다.
+
+        Codex 는 호스트당 자격증명이 하나라(에이전트 bridge 의 identity sidecar가
+        두 번째 email 을 거부한다) 새 계정을 미리 올려 둘 수 없다. 그래서 이
+        조합만 회수부터 하고, 그 사이 서버는 잠깐 아무 계정도 갖지 않는다.
+        운영자가 버튼을 누르기 전에 알아야 하는 대가다.
+        """
+        if target_account.id in {a.id for a in leased}:
+            return ""
+        if target_account.provider != "codex":
+            return ""
+        if not any(a.provider == "codex" for a in leased):
+            return ""
+        return (
+            " Codex 는 호스트당 계정이 하나뿐이라 먼저 거두고 나서 올린다 — "
+            "그 사이 이 서버에는 활성 계정이 없다."
+        )
+
     def _handover_target(exclude: set[uuid.UUID]) -> Account | None:
         """넘겨받을 계정. 이미 서버에 올라와 있는 여유분이 1순위다.
 
@@ -849,6 +899,7 @@ def _desired_recommendation(
             "reason": (
                 f"{worst.email}이 사용 불가(unusable) 상태다 — 격리됐거나 자격증명이 "
                 f"죽었다. {target_account.email}로 전환하고 거둔다."
+                + _gap_note(target_account)
             ),
         }
 
@@ -872,6 +923,7 @@ def _desired_recommendation(
             "reason": (
                 f"{worst.email}이 {pct:.0f}%로 교체 임계({swap_at:.0f}%)를 넘겼다. "
                 f"{target_account.email}로 전환한다."
+                + _gap_note(target_account)
             ),
         }
 
@@ -921,7 +973,6 @@ def build_recommendations(
     caller 가 커밋한다. 반환값은 새로 만든 권고 수.
     """
     stamp = _aware(now) or _now()
-    tenant = db.get(Tenant, tenant_id)
     servers = list(
         db.scalars(select(Server).where(Server.tenant_id == tenant_id).order_by(Server.id)).all()
     )
@@ -932,7 +983,6 @@ def build_recommendations(
     live = _live_assignments(db, tenant_id)
     windows = _windows_by_account(db, tenant_id)
     unusable = _unusable_account_ids(db, tenant_id)
-    paused = bool(tenant is not None and tenant.pool_automation_paused)
     # 체인이 도는 서버에는 권고를 만들지 않는다. 실행 중인 계획과 "지금이라면
     # 이렇게 하겠다"가 나란히 보이면 운영자는 실행할 수 없는 버튼을 누르게 된다.
     busy = _servers_with_active_chain(db, tenant_id)
@@ -943,15 +993,15 @@ def build_recommendations(
         policy = resolve_policy(server)
         server_live = [a for a in live.values() if a.server_id == server.id]
         desired: dict | None = None
-        # 오프라인 서버에는 권고를 만들지 않는다. 명령은 큐에 쌓일 뿐 전달되지 않고,
-        # 그 사이 운영자에게는 "누르면 된다"처럼 보이는 버튼이 떠 있게 된다. 이미
-        # 도는 체인은 여기서 건드리지 않는다 — 단계 타임아웃이 접는다.
-        if (
-            policy["mode"] == "auto"
-            and not paused
-            and server.id not in busy
-            and server.status != "offline"
-        ):
+        # 관측과 권고는 **항상** 한다. mode=manual 이든 테넌트가 일시정지 중이든
+        # "지금이라면 이렇게 하겠다"는 여전히 참이고, 오히려 자동 실행이 꺼져 있을
+        # 때야말로 운영자가 그 판단을 손으로 실행할 수 있어야 한다. mode/paused 는
+        # 실행 게이트(start_auto_chains)에서만 본다.
+        #
+        # 오프라인 서버만 예외다. 명령은 큐에 쌓일 뿐 전달되지 않는데 운영자에게는
+        # "누르면 된다"처럼 보이는 버튼이 떠 있게 된다. 이미 도는 체인은 여기서
+        # 건드리지 않는다 — 단계 타임아웃이 접는다.
+        if server.id not in busy and server.status != "offline":
             in_flight = any(a.state in _IN_FLIGHT_STATES for a in server_live)
             if not in_flight:
                 leased = [
@@ -1261,14 +1311,34 @@ def _expired(chain: PoolChain, now: datetime) -> bool:
     return now - (_aware(chain.updated_at) or now) >= _chain_timeout()
 
 
-def _started_only(chain: PoolChain) -> bool:
-    """아직 이 체인이 아무 명령도 내지 않았는가.
+def _deliver_already_issued(db: Session, chain: PoolChain) -> bool:
+    """이 체인의 대상 계정에 전달 명령이 이미 나간 적이 있는가.
 
-    ``_touch`` 만 ``updated_at`` 을 움직이므로, 시작 시각과 같다는 것은 곧
-    "명령 발행 이전"이라는 뜻이다. 배정이 없을 때 그것이 *아직 안 만든* 것인지
-    *만들었다가 사라진* 것인지를 가르는 유일한 증거다.
+    배정이 없을 때 그것이 *아직 안 만든* 것인지 *만들었다가 사라진* 것인지를
+    가르는 증거다. 시각 비교로는 못 가른다 — Codex 변형은 회수를 끝낸 **뒤에**
+    전달 단계로 들어오므로 "체인이 막 시작했는가"가 답이 되지 않는다. 발행된
+    명령 행은 배정이 detached 로 지워져도 남으므로 이 질문에 정확히 답한다.
     """
-    return _aware(chain.updated_at) == _aware(chain.started_at)
+    assignment_ids = list(
+        db.scalars(
+            select(Assignment.id).where(
+                Assignment.tenant_id == chain.tenant_id,
+                Assignment.server_id == chain.server_id,
+                Assignment.account_id == chain.to_account_id,
+            )
+        ).all()
+    )
+    if not assignment_ids:
+        return False
+    return (
+        db.scalars(
+            select(AgentCommand.id).where(
+                AgentCommand.assignment_id.in_(assignment_ids),
+                AgentCommand.command_type == "deliver",
+            )
+        ).first()
+        is not None
+    )
 
 
 # -- 단계별 전진 --------------------------------------------------------------
@@ -1276,7 +1346,7 @@ def _advance_deliver(db: Session, chain: PoolChain, now: datetime) -> bool:
     assignment = _live_assignment(db, chain.tenant_id, chain.to_account_id)
 
     if assignment is None:
-        if not _started_only(chain):
+        if _deliver_already_issued(db, chain):
             return _fail(db, chain, "전달한 배정이 사라졌다(회수 또는 삭제).", now=now)
         try:
             assignment = inventory.create_assignment(
@@ -1345,8 +1415,12 @@ def _advance_switch(db: Session, chain: PoolChain, now: datetime) -> bool:
     if command is None:
         return _fail(db, chain, "발행한 switch_now 명령이 사라졌다.", now=now)
     if command.status == "acked":
-        # lease 는 여기서 끝이고, swap 은 이제 이전 계정을 거둔다.
-        if chain.kind == "swap":
+        # lease 는 여기서 끝이고, swap 은 이제 이전 계정을 거둔다 — 다만 회수부터
+        # 시작한 변형에서는 이미 거둔 뒤이므로 여기서 끝난다.
+        if (
+            chain.kind == "swap"
+            and _live_assignment(db, chain.tenant_id, chain.from_account_id) is not None
+        ):
             return _touch(db, chain, step="recall", now=now, command_id=command.command_id)
         return _finish(db, chain, now=now, command_id=command.command_id)
     if command.status == "failed":
@@ -1365,6 +1439,10 @@ def _advance_recall(db: Session, chain: PoolChain, now: datetime) -> bool:
         if account is not None and account.tenant_id == chain.tenant_id:
             account.last_lease_ended_at = now
             account.updated_at = now
+        # 회수부터 시작한 swap(Codex 변형)이면 이제서야 자리가 비었다 — 올린다.
+        # 대상이 이미 설치돼 있으면 이 회수가 마지막 단계였다는 뜻이라 끝난다.
+        if chain.kind == "swap" and _live_assignment(db, chain.tenant_id, chain.to_account_id) is None:
+            return _touch(db, chain, step="deliver", now=now, after="recall_first")
         return _finish(db, chain, now=now)
 
     if assignment.state == "recalling":
@@ -1473,17 +1551,36 @@ def start_chain(
         raise conflict("pool.recommendation_invalid", f"{kind} 권고에 대상 계정이 없다.")
     if kind in ("swap", "recall_idle") and recommendation.from_account_id is None:
         raise conflict("pool.recommendation_invalid", f"{kind} 권고에 회수 계정이 없다.")
+    swap_first_step = "switch"
     if kind == "swap":
         target = live.get(recommendation.to_account_id)
-        if (
-            target is None
-            or target.server_id != server_id
-            or target.state not in _INSTALLED_STATES
-        ):
+        if target is not None and target.server_id != server_id:
+            raise conflict(
+                "pool.swap_target_elsewhere",
+                "교체 대상 계정이 다른 서버에 배정돼 있다. 그 배정을 먼저 회수하라.",
+            )
+        if target is None:
+            # 아직 서버에 없는 계정으로 넘긴다 — 먼저 올려야 한다. Codex 만 예외로
+            # 자리를 비우고 나서 올린다(호스트당 자격증명 하나). 그 순서에서는
+            # 서버가 잠깐 무자격이 되는데, 대안이 "영영 못 바꾼다"이므로 감수한다.
+            to_account = db.get(Account, recommendation.to_account_id)
+            held_accounts = [db.get(Account, a.account_id) for a in server_live]
+            server_has_codex = any(
+                acc is not None and acc.provider == "codex" for acc in held_accounts
+            )
+            if (
+                to_account is not None
+                and to_account.provider == "codex"
+                and server_has_codex
+            ):
+                swap_first_step = "recall"
+            else:
+                swap_first_step = "deliver"
+        elif target.state not in _INSTALLED_STATES:
             raise conflict(
                 "pool.swap_target_not_installed",
-                "swap 은 이 서버에 이미 설치된 계정으로만 전환할 수 있다. "
-                "먼저 prefetch 로 올려라.",
+                f"교체 대상 배정이 아직 설치되지 않았다(state={target.state}). "
+                "전달이 끝난 뒤에 다시 실행하라.",
             )
     if kind == "recall_idle":
         source = live.get(recommendation.from_account_id)
@@ -1493,7 +1590,7 @@ def start_chain(
                 "회수 대상 계정이 이 서버에 배정돼 있지 않다.",
             )
 
-    first_step = {"lease": "deliver", "prefetch": "deliver", "swap": "switch"}.get(
+    first_step = {"lease": "deliver", "prefetch": "deliver", "swap": swap_first_step}.get(
         kind, "recall"
     )
     chain = PoolChain(

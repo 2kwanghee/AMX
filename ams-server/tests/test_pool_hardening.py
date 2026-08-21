@@ -20,6 +20,7 @@ from app.db import get_sessionmaker
 from app.models import (
     Account,
     AccountUsageWindow,
+    AgentCommand,
     Alert,
     Assignment,
     PoolEvent,
@@ -48,9 +49,15 @@ CODEX_SECRET = '{"tokens": {"refresh_token": "rt-test"}}'
 
 def _account(tenant_id, email, **over) -> uuid.UUID:
     secret = CODEX_SECRET if over.get("provider") == "codex" else "k"
+    credential_type = over.pop("credential_type", "oauth")
     with _db() as db:
         account = inventory.create_account(
-            db, tenant_id, email=email, credential_type="api_key", secret=secret, **over
+            db,
+            tenant_id,
+            email=email,
+            credential_type=credential_type,
+            secret=secret,
+            **over,
         )
         db.commit()
         return account.id
@@ -548,3 +555,134 @@ def test_codex_single_slot_still_allows_a_replacement_candidate(app_env):
     assert [r.kind for r in recs] == ["swap"]
     assert recs[0].from_account_id == hot_id
     assert recs[0].to_account_id == spare_id
+
+
+# -- B) 자동화 부적격 사유가 응답에 드러난다 ----------------------------------
+def test_api_key_accounts_are_out_of_automation_and_say_why(app_env, client):
+    """창 개념이 없는 자격증명은 자동화 밖이다(기획서 §4.7).
+
+    사용률을 물어볼 수 없으니 언제 거둘지 판단할 근거가 없고, 창이 없으면 pct 가
+    미상이라 정렬에서도 의미가 없다. 화면이 그 이유를 말해 주지 않으면 운영자는
+    "왜 이 계정만 안 뽑히지"를 로그에서 찾게 된다.
+    """
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", {"mode": "auto"})
+    key_id = _account(tenant_id, "apikey@x.example.com", credential_type="api_key")
+    oauth_id = _account(tenant_id, "oauth@x.example.com")
+    excluded_id = _account(tenant_id, "excluded@x.example.com", assignment_excluded=True)
+    _ingest(tenant_id, server_id, _std("apikey@x.example.com", five=0, seven=0))
+    _ingest(tenant_id, server_id, _std("oauth@x.example.com", five=40, seven=40))
+    _ingest(tenant_id, server_id, _std("excluded@x.example.com", five=0, seven=0))
+
+    # 잔여량만 보면 api_key 와 excluded 가 앞서지만 둘 다 후보가 아니다.
+    recs = _build(tenant_id)
+    assert [r.to_account_id for r in recs] == [oauth_id]
+
+    body = client.get(f"/api/v1/tenants/{tenant_id}/pool").json()
+    by_id = {a["accountId"]: a for a in body["accounts"]}
+    assert by_id[str(key_id)]["autoEligible"] is False
+    assert by_id[str(key_id)]["ineligibleReason"] == "api_key"
+    assert by_id[str(excluded_id)]["ineligibleReason"] == "excluded"
+    assert by_id[str(oauth_id)]["autoEligible"] is True
+    assert by_id[str(oauth_id)]["ineligibleReason"] is None
+
+    # 관측을 못 읽은 계정도 이유를 말한다.
+    murky_id = _account(tenant_id, "murky2@x.example.com")
+    _ingest(
+        tenant_id,
+        server_id,
+        _payload("murky2@x.example.com", {"windows": [{"id": "five_hour", "pct": "??"}]}),
+    )
+    body = client.get(f"/api/v1/tenants/{tenant_id}/pool").json()
+    murky = next(a for a in body["accounts"] if a["accountId"] == str(murky_id))
+    assert murky["ineligibleReason"] == "no_observation"
+    # 미상은 0.0 이 아니라 null 로 나간다 — 0% 를 그리면 여유가 가득해 보인다.
+    assert murky["windows"][0]["pct"] is None
+
+
+# -- C) Codex 는 자리를 비우고 나서 올린다 -------------------------------------
+def test_codex_swap_recalls_before_delivering(app_env):
+    """Codex 호스트는 자격증명을 하나만 갖는다 — 핸드오프를 만들 수 없다.
+
+    그래서 이 조합만 recall → deliver → switch 순서로 돈다. 그 사이 서버에는 활성
+    계정이 없고, 그 대가는 권고 문장에 적힌다. 대안은 "소진된 Codex 서버를 영영
+    못 바꾼다"이므로 공백을 감수한다.
+    """
+    from app.models import PoolChain
+
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "codex", {"mode": "auto"})
+    hot_id = _account(tenant_id, "cxhot@x.example.com", provider="codex")
+    next_id = _account(tenant_id, "cxnext@x.example.com", provider="codex")
+    hot_assignment = _assign(tenant_id, hot_id, server_id)
+    _ingest(tenant_id, server_id, _std("cxhot@x.example.com", five=95, seven=30))
+    _ingest(tenant_id, server_id, _std("cxnext@x.example.com", five=3, seven=3))
+
+    recs = _build(tenant_id)
+    assert [r.kind for r in recs] == ["swap"]
+    assert "Codex 는 호스트당 계정이 하나뿐" in recs[0].reason
+
+    with _db() as db:
+        chain = pool.start_chain(
+            db, db.get(PoolRecommendation, recs[0].id), actor="op@x.example.com"
+        )
+        chain_id = chain.id
+    # 전달이 아니라 회수부터다.
+    with _db() as db:
+        assert db.get(PoolChain, chain_id).step == "recall"
+        assert db.get(Assignment, hot_assignment).state == "recalling"
+        assert (
+            db.scalars(
+                select(Assignment).where(
+                    Assignment.account_id == next_id, Assignment.state != "detached"
+                )
+            ).first()
+            is None
+        )
+
+    # 자리가 비면 그때 올린다.
+    with _db() as db:
+        db.get(Assignment, hot_assignment).state = "detached"
+        db.commit()
+    with _db() as db:
+        assert pool.advance_chains(db) == 1
+    with _db() as db:
+        assert db.get(PoolChain, chain_id).step == "deliver"
+    with _db() as db:
+        assert pool.advance_chains(db) == 1
+    incoming = _assignment_of(tenant_id, next_id)
+    assert incoming is not None
+    assert incoming.state == "delivering"
+
+    # 설치가 끝나면 전환하고, 회수는 이미 끝났으므로 그대로 완료된다.
+    with _db() as db:
+        db.get(Assignment, incoming.id).state = "active"
+        db.commit()
+    with _db() as db:
+        assert pool.advance_chains(db) == 1
+        assert db.get(PoolChain, chain_id).step == "switch"
+    with _db() as db:
+        pool.advance_chains(db)
+        command_id = db.get(PoolChain, chain_id).command_id
+    assert command_id is not None
+    with _db() as db:
+        command = db.scalars(
+            select(AgentCommand).where(AgentCommand.command_id == command_id)
+        ).one()
+        assert command.command_type == "switch_now"
+        command.status = "acked"
+        db.commit()
+    with _db() as db:
+        assert pool.advance_chains(db) == 1
+        assert db.get(PoolChain, chain_id).step == "done"
+
+
+def _assignment_of(tenant_id, account_id):
+    with _db() as db:
+        return db.scalars(
+            select(Assignment).where(
+                Assignment.tenant_id == tenant_id,
+                Assignment.account_id == account_id,
+                Assignment.state != "detached",
+            )
+        ).first()

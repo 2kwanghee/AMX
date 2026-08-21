@@ -51,7 +51,7 @@ def _tenant() -> uuid.UUID:
 def _account(tenant_id: uuid.UUID, email: str) -> uuid.UUID:
     with _db() as db:
         account = inventory.create_account(
-            db, tenant_id, email=email, credential_type="api_key", secret="k"
+            db, tenant_id, email=email, credential_type="oauth", secret="k"
         )
         db.commit()
         return account.id

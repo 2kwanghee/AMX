@@ -267,7 +267,9 @@ class PoolPolicyUpdate(Wire):
 
 class WindowState(Wire):
     window_id: str
-    pct: float
+    # 계약은 pct 를 number 로 적었지만 NULL 이 필요하다: 값을 못 읽은 창을 0.0 으로
+    # 보내면 콘솔이 "여유 100%"를 그린다. 미상은 미상으로 보낸다(마이그레이션 0030).
+    pct: float | None = None
     resets_at: datetime | None = None
     usage_fetched_at: datetime | None = None
     reported_at: datetime
@@ -286,6 +288,11 @@ class PoolAccount(Wire):
     last_lease_ended_at: datetime | None = None
     windows: list[WindowState] = Field(default_factory=list)
     pool_state_changed_at: datetime | None = None
+    # 계약 밖 추가분. 이 계정을 컨트롤러가 다룰 수 있는가와, 못 다룬다면 그 이유.
+    # 콘솔이 "왜 이 계정은 한 번도 안 뽑히지"에 화면에서 답할 수 있어야 한다 —
+    # 서버의 후보 필터와 같은 함수(services.pool.ineligible_reason)가 낸 값이다.
+    auto_eligible: bool = True
+    ineligible_reason: str | None = None
 
 
 class PoolServer(Wire):

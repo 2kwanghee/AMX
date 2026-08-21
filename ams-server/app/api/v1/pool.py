@@ -95,9 +95,13 @@ def get_pool(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
     ).all():
         windows.setdefault(row.account_id, []).append(row)
 
+    unusable = pool._unusable_account_ids(db, tenant_id)
     pool_accounts = []
     for account in accounts:
         assignment = by_account.get(account.id)
+        reason = pool.ineligible_reason(
+            account, unusable=unusable, windows=windows.get(account.id, [])
+        )
         pool_accounts.append(
             schemas.PoolAccount(
                 account_id=account.id,
@@ -112,6 +116,8 @@ def get_pool(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
                 ),
                 last_lease_ended_at=account.last_lease_ended_at,
                 pool_state_changed_at=account.pool_state_changed_at,
+                auto_eligible=reason is None,
+                ineligible_reason=reason,
                 windows=[
                     schemas.WindowState(
                         window_id=w.window_id,
@@ -148,8 +154,13 @@ def get_pool(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
                 ),
             )
             active_account_id = best.account_id
+        # 미상 창은 최댓값 계산에서 뺀다 — None 은 비교할 수 없고, 0 으로 접으면
+        # 서버가 한가해 보인다.
         pcts = [
-            w.pct for a in held for w in windows.get(a.account_id, [])
+            w.pct
+            for a in held
+            for w in windows.get(a.account_id, [])
+            if w.pct is not None
         ]
         pool_servers.append(
             schemas.PoolServer(

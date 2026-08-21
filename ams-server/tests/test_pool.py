@@ -46,7 +46,7 @@ def _account(tenant_id: uuid.UUID, email: str, **over) -> uuid.UUID:
             db,
             tenant_id,
             email=email,
-            credential_type="api_key",
+            credential_type="oauth",
             secret="k",
             **over,
         )
@@ -362,12 +362,24 @@ def test_recommendation_disappears_when_the_condition_clears(app_env):
     assert _recs(tenant_id) == []
 
 
-def test_manual_server_gets_no_recommendation(app_env):
+def test_manual_server_still_gets_a_recommendation(app_env):
+    """관측과 권고는 항상, 실행만 게이트한다.
+
+    mode=manual 이라고 권고까지 숨기면 P2 의 "운영자 원클릭"이 정작 수동 서버에서
+    쓸 수 없다 — 자동 실행이 꺼져 있을 때야말로 사람이 그 판단을 손으로 실행할 수
+    있어야 한다. mode/paused 는 ``start_auto_chains`` 만 본다.
+    """
     tenant_id = _tenant()
-    _server(tenant_id, "s1")  # 기본 정책 = manual
-    _account(tenant_id, "free@x.example.com")
-    assert _build(tenant_id) == 0
-    assert _recs(tenant_id) == []
+    server_id = _server(tenant_id, "s1")  # 기본 정책 = manual
+    account_id = _account(tenant_id, "free@x.example.com")
+    _ingest(tenant_id, server_id, _report("free@x.example.com", five=1, seven=1))
+    assert _build(tenant_id) == 1
+    recs = _recs(tenant_id)
+    assert [r.kind for r in recs] == ["lease"]
+    assert recs[0].to_account_id == account_id
+    # 그러나 자동 실행은 되지 않는다.
+    with _db() as db:
+        assert pool.start_auto_chains(db) == 0
 
 
 def test_in_flight_assignment_suppresses_recommendations(app_env):
@@ -381,16 +393,24 @@ def test_in_flight_assignment_suppresses_recommendations(app_env):
     assert _recs(tenant_id) == []
 
 
-def test_paused_tenant_gets_no_recommendation(app_env):
+def test_paused_tenant_keeps_recommendations_but_runs_nothing(app_env):
+    """일시정지는 실행을 멈추는 스위치이지 관측을 끄는 스위치가 아니다.
+
+    멈춰 있는 동안에도 무엇이 필요한지는 계속 보여야 하고, 운영자는 그중 하나를
+    골라 손으로 실행할 수 있어야 한다.
+    """
     tenant_id = _tenant()
-    _server(tenant_id, "s1", _auto())
+    server_id = _server(tenant_id, "s1", _auto())
     _account(tenant_id, "free@x.example.com")
+    _ingest(tenant_id, server_id, _report("free@x.example.com", five=1, seven=1))
     with _db() as db:
         from app.models import Tenant
 
         db.get(Tenant, tenant_id).pool_automation_paused = True
         db.commit()
-    assert _build(tenant_id) == 0
+    assert _build(tenant_id) == 1
+    with _db() as db:
+        assert pool.start_auto_chains(db) == 0
 
 
 def test_swap_recommendation_and_candidate_exclusions(app_env):
