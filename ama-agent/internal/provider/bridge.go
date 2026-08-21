@@ -115,7 +115,11 @@ type AccountRow struct {
 	Disabled         bool   `json:"disabled"`
 	UsageStatus      string `json:"usageStatus"`
 	Usage            *Usage `json:"usage"`
-	Alias            string `json:"alias"`
+	// UsageFetchedAt is the RFC3339 fetch time of the served usage measurement
+	// (tsamx json_output `usageFetchedAt`, emitted only alongside a non-null usage).
+	// Carried into proto AccountUsage.usage_fetched_at so AMS sees cache freshness.
+	UsageFetchedAt string `json:"usageFetchedAt,omitempty"`
+	Alias          string `json:"alias"`
 }
 
 // Usage is the per-account usage projection (pool usage_to_json).

@@ -427,6 +427,14 @@ func run() error {
 			log.Printf("AMX_REPORT_INTERVAL %q: invalid (using default)", v)
 		}
 	}
+	// hbStatus caches the latest pool status the report ticker observed, so the
+	// heartbeat can carry active_account/tsamx_healthy without spawning a fresh
+	// tsamx process on every beat. Before the first report it stays zero-valued
+	// (have=false) and the beat simply omits those fields.
+	var (
+		hbMu     sync.Mutex
+		hbStatus heartbeatStatus
+	)
 	go func() {
 		t := time.NewTicker(repInterval)
 		defer t.Stop()
@@ -443,9 +451,20 @@ func run() error {
 				}
 				r, rerr := rep.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
 				if rerr != nil {
+					// tsamx could not be read this tick; record it so the heartbeat
+					// reports the pool as unhealthy (last-known active account kept).
+					hbMu.Lock()
+					hbStatus.tsamxHealthy = false
+					hbStatus.have = true
+					hbMu.Unlock()
 					log.Printf("usage report: %v", rerr)
 					continue
 				}
+				hbMu.Lock()
+				hbStatus.activeAccount = r.GetActiveAccount()
+				hbStatus.tsamxHealthy = true
+				hbStatus.have = true
+				hbMu.Unlock()
 				client.TrySend(&amxv1.AmaMessage{Msg: &amxv1.AmaMessage_Usage{Usage: r}})
 			}
 		}
@@ -477,11 +496,12 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				hb := &amxv1.Heartbeat{
-					AgentId:     agentID,
-					SwitchMode:  handler.SwitchMode(),
-					OutboxDepth: uint32(outbox.Depth()),
-				}
+				// active_account / tsamx_healthy come from the last report tick's cache
+				// (never a fresh tsamx spawn per beat); absent until the first report.
+				hbMu.Lock()
+				status := hbStatus
+				hbMu.Unlock()
+				hb := newHeartbeat(agentID, handler.SwitchMode(), outbox.Depth(), status, time.Now())
 				if s, serr := sampler.Sample(); serr == nil {
 					hb.Metrics = &amxv1.Heartbeat_SystemMetrics{
 						CpuPct:  s.CPUPct,
@@ -557,6 +577,36 @@ func env(key, def string) string {
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+// heartbeatStatus is the cached pool status the heartbeat draws from, refreshed
+// by the report ticker so a beat never spawns a fresh tsamx process. have is
+// false until the first report populates it, and the beat then omits
+// active_account/tsamx_healthy rather than reporting a false "unhealthy, no
+// active account".
+type heartbeatStatus struct {
+	activeAccount *amxv1.AccountRef
+	tsamxHealthy  bool
+	have          bool
+}
+
+// newHeartbeat builds a beat from the agent id, switch mode, outbox depth, the
+// cached pool status, and the send time. sent_at is always stamped;
+// active_account and tsamx_healthy are set only once a report has populated the
+// cache (status.have). Split out so the field-population is unit-testable without
+// standing up the daemon.
+func newHeartbeat(agentID string, mode amxv1.SwitchMode, outboxDepth int, status heartbeatStatus, sentAt time.Time) *amxv1.Heartbeat {
+	hb := &amxv1.Heartbeat{
+		AgentId:     agentID,
+		SentAt:      timestamppb.New(sentAt.UTC()),
+		SwitchMode:  mode,
+		OutboxDepth: uint32(outboxDepth),
+	}
+	if status.have {
+		hb.ActiveAccount = status.activeAccount
+		hb.TsamxHealthy = status.tsamxHealthy
+	}
+	return hb
 }
 
 // maybeRegisterCodex wires the codex provider into the bridge registry only when

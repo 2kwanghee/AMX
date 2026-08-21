@@ -49,11 +49,13 @@ type Fake struct {
 }
 
 type fakeAccount struct {
-	email    string
-	org      string
-	disabled bool
-	usage    *provider.Usage
-	cred     []byte
+	email          string
+	org            string
+	disabled       bool
+	usage          *provider.Usage
+	usageStatus    string // empty defaults to "ok" in List
+	usageFetchedAt string // RFC3339; empty leaves the row field unset
+	cred           []byte
 }
 
 // NewFake returns an empty Fake.
@@ -168,14 +170,19 @@ func (f *Fake) List(_ context.Context) (*provider.ListResult, error) {
 			u.Windows = claudeWindows(&u)
 			usage = &u
 		}
+		status := acc.usageStatus
+		if status == "" {
+			status = "ok"
+		}
 		row := provider.AccountRow{
 			Number:           num,
 			Email:            acc.email,
 			OrganizationName: acc.org,
 			Active:           f.active == e,
 			Disabled:         acc.disabled,
-			UsageStatus:      "ok",
+			UsageStatus:      status,
 			Usage:            usage,
+			UsageFetchedAt:   acc.usageFetchedAt,
 		}
 		if f.active == e {
 			n := num
@@ -339,6 +346,30 @@ func (f *Fake) SetUsage(email string, u *provider.Usage) {
 	defer f.mu.Unlock()
 	if acc, ok := f.accounts[email]; ok {
 		acc.usage = u
+	}
+}
+
+// SetUsageStatus overrides the list --json usageStatus for an account and, when
+// the status implies no measurement (e.g. relogin_required, token_expired),
+// clears any seeded usage so the row matches what tsamx emits (test seeding).
+func (f *Fake) SetUsageStatus(email, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if acc, ok := f.accounts[email]; ok {
+		acc.usageStatus = status
+		if status != "ok" {
+			acc.usage = nil
+		}
+	}
+}
+
+// SetUsageFetchedAt sets the RFC3339 usageFetchedAt freshness stamp for an
+// account (test seeding).
+func (f *Fake) SetUsageFetchedAt(email, ts string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if acc, ok := f.accounts[email]; ok {
+		acc.usageFetchedAt = ts
 	}
 }
 

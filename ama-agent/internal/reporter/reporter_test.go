@@ -429,6 +429,124 @@ func TestBuildUsageReportCarriesSpendAndScoped(t *testing.T) {
 	}
 }
 
+// TestBuildUsageReportQuarantineFromReloginRequired (defect 1): a quarantined
+// account surfaces in list --json as usageStatus == "relogin_required" (dead
+// refresh-token lineage), NOT the literal "quarantined" the reporter used to
+// match. It must count toward PoolSummary.quarantined and carry the QUARANTINED
+// allocation status, not be miscounted as an eligible active account.
+func TestBuildUsageReportQuarantineFromReloginRequired(t *testing.T) {
+	f := tsamx.NewFake()
+	ctx := context.Background()
+	_ = f.Add(ctx, provider.AddRequest{Email: "good@x.io", Enable: true})
+	_ = f.Add(ctx, provider.AddRequest{Email: "dead@x.io", Enable: true})
+	_ = f.Switch(ctx, "good@x.io")
+	f.SetUsage("good@x.io", &provider.Usage{FiveHour: &provider.Window{Pct: 10}})
+	// dead@x.io: quarantined -> relogin_required, no usage measurement.
+	f.SetUsageStatus("dead@x.io", "relogin_required")
+
+	r := New("ama_test", bridgeMap(f), func() time.Time { return time.Unix(1700000000, 0) })
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.PoolSummary.Quarantined != 1 {
+		t.Fatalf("quarantined = %d, want 1 (relogin_required must count)", rep.PoolSummary.Quarantined)
+	}
+	// Only the measured good account is eligible; the quarantined one is not.
+	if rep.PoolSummary.Eligible != 1 {
+		t.Fatalf("eligible = %d, want 1 (quarantined must not be eligible)", rep.PoolSummary.Eligible)
+	}
+	if rep.PoolSummary.Active != 1 {
+		t.Fatalf("active = %d, want 1 (quarantined is not an active candidate)", rep.PoolSummary.Active)
+	}
+	var dead *amxv1.AccountUsage
+	for _, au := range rep.GetAccounts() {
+		if au.GetAccount().GetEmail() == "dead@x.io" {
+			dead = au
+		}
+	}
+	if dead.GetAllocationStatus() != amxv1.AllocationStatus_ALLOCATION_STATUS_QUARANTINED {
+		t.Fatalf("dead allocation status = %v, want QUARANTINED", dead.GetAllocationStatus())
+	}
+}
+
+// TestBuildUsageReportUnmeasuredNotEligible (defect 2): an account with null usage
+// (unmeasured — token_expired here) has empty windows and thus pct 0, which used
+// to read as eligible and, on its own, keep all_exhausted false. It must be
+// excluded from eligible and must neither drive nor relieve all_exhausted; the
+// signal is decided over MEASURED accounts only.
+func TestBuildUsageReportUnmeasuredNotEligible(t *testing.T) {
+	f := tsamx.NewFake()
+	ctx := context.Background()
+	_ = f.Add(ctx, provider.AddRequest{Email: "hot@x.io", Enable: true})
+	_ = f.Add(ctx, provider.AddRequest{Email: "unknown@x.io", Enable: true})
+	_ = f.Switch(ctx, "hot@x.io")
+	// hot: measured and exhausted (>= threshold).
+	f.SetUsage("hot@x.io", &provider.Usage{FiveHour: &provider.Window{Pct: 99}})
+	// unknown: token expired, no measurement.
+	f.SetUsageStatus("unknown@x.io", "token_expired")
+
+	r := New("ama_test", bridgeMap(f), func() time.Time { return time.Unix(1700000000, 0) })
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.PoolSummary.Eligible != 0 {
+		t.Fatalf("eligible = %d, want 0 (unmeasured must not be eligible)", rep.PoolSummary.Eligible)
+	}
+	// One measured account, exhausted; the unmeasured one must not relieve it.
+	if !rep.PoolSummary.AllExhausted {
+		t.Fatal("allExhausted should be true: the sole measured account is exhausted")
+	}
+
+	// With NO measured account, all_exhausted must be false (nothing to conclude).
+	f.SetUsageStatus("hot@x.io", "unavailable")
+	rep2, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep2.PoolSummary.AllExhausted {
+		t.Fatal("allExhausted should be false when no account is measured")
+	}
+	if rep2.PoolSummary.Eligible != 0 {
+		t.Fatalf("eligible = %d, want 0 (all unmeasured)", rep2.PoolSummary.Eligible)
+	}
+}
+
+// TestBuildUsageReportUsageFetchedAt (defect 3): the tsamx usageFetchedAt freshness
+// stamp is carried into proto AccountUsage.usage_fetched_at; a row without it
+// leaves the field nil.
+func TestBuildUsageReportUsageFetchedAt(t *testing.T) {
+	f := tsamx.NewFake()
+	ctx := context.Background()
+	_ = f.Add(ctx, provider.AddRequest{Email: "a@x.io", Enable: true})
+	_ = f.Add(ctx, provider.AddRequest{Email: "b@x.io", Enable: true})
+	f.SetUsage("a@x.io", &provider.Usage{FiveHour: &provider.Window{Pct: 10}})
+	f.SetUsage("b@x.io", &provider.Usage{FiveHour: &provider.Window{Pct: 20}})
+	f.SetUsageFetchedAt("a@x.io", "2026-08-21T12:34:56Z")
+	// b@x.io left without a stamp.
+
+	r := New("ama_test", bridgeMap(f), func() time.Time { return time.Unix(1700000000, 0) })
+	rep, err := r.BuildUsageReport(ctx, amxv1.UsageReport_TRIGGER_SCHEDULE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byEmail := map[string]*amxv1.AccountUsage{}
+	for _, au := range rep.GetAccounts() {
+		byEmail[au.GetAccount().GetEmail()] = au
+	}
+	got := byEmail["a@x.io"].GetUsageFetchedAt()
+	if got == nil {
+		t.Fatal("a usage_fetched_at not populated from usageFetchedAt")
+	}
+	if want := time.Date(2026, 8, 21, 12, 34, 56, 0, time.UTC); !got.AsTime().Equal(want) {
+		t.Fatalf("a usage_fetched_at = %v, want %v", got.AsTime(), want)
+	}
+	if byEmail["b@x.io"].GetUsageFetchedAt() != nil {
+		t.Fatalf("b usage_fetched_at should be nil without a stamp, got %v", byEmail["b@x.io"].GetUsageFetchedAt())
+	}
+}
+
 func TestOutboxDedupeAndFlush(t *testing.T) {
 	o := NewOutbox()
 	o.Enqueue(&amxv1.AccountEvent{EventId: "e1"})
