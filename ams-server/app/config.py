@@ -157,6 +157,14 @@ class Settings:
     # 하위 소비자가 없으므로 audit처럼 opt-in(0=영구)으로 두지 않고 기본 90일로
     # 켜 둔다. 0 이하면 purge 비활성.
     session_usage_retention_days: int = 90
+    # 계정 풀 P1. 창 하나라도 이 % 에 닿으면 `account_window_high` 경고를 연다.
+    # 서버 범위 `all_exhausted`(전원 pct>=95)가 이미 막힌 뒤에야 울리는 것과 달리,
+    # 이건 아직 교체를 준비할 시간이 남아 있을 때 울리라고 기본값을 낮게 둔다.
+    pool_window_high_pct: float = 80.0
+    # 마지막 관측이 이 분 수보다 오래됐으면 "관측 없음"으로 본다. 충전소 복귀는
+    # 시각(cooling_until)과 관측(pct<=readyReturnPct)을 함께 요구하는데, 에이전트가
+    # 죽어 관측이 영영 안 오면 계정이 충전소에 갇힌다 — 그 유예 창이다.
+    pool_observation_grace_minutes: int = 15
 
     @property
     def ams_endpoint(self) -> str | None:
@@ -356,6 +364,10 @@ def load_settings() -> Settings:
         ),
         session_usage_retention_days=int(
             os.environ.get("AMX_SESSION_USAGE_RETENTION_DAYS", "90")
+        ),
+        pool_window_high_pct=float(os.environ.get("AMX_POOL_WINDOW_HIGH_PCT", "80")),
+        pool_observation_grace_minutes=int(
+            os.environ.get("AMX_POOL_OBSERVATION_GRACE_MINUTES", "15")
         ),
     )
 

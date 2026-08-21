@@ -116,6 +116,8 @@ def clean_tables(app_env, engine):
             text(
                 "TRUNCATE billing_events, billing_cursors, admin_audit_logs, "
                 "admin_sessions, admins, alert_webhook_outbox, alerts, "
+                "pool_events, pool_chains, pool_recommendations, "
+                "account_usage_windows, "
                 "usage_snapshots, assignments, accounts, servers, tenant_deks, "
                 "tenants RESTART IDENTITY CASCADE"
             )

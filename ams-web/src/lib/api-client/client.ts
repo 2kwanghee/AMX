@@ -218,6 +218,9 @@ const KR_API_ERROR: Record<string, string> = {
   'assignment.deliver_immediately_unsupported':
     'deliverImmediately는 지원하지 않습니다. 할당을 먼저 만들고 전달을 따로 실행하세요. 새 할당은 대기 상태로 남습니다.',
 
+  'pool.state_conflict':
+    '지금 상태에서는 적용할 수 없는 동작입니다. 대여 중인 계정은 먼저 회수하고, 고정 해제는 고정된 계정에만 씁니다.',
+
   'account.assigned':
     '이 계정은 아직 서버에 연결돼 있습니다. 할당을 회수하고 삭제한 뒤 계정을 지우세요.',
   'account.duplicate_email':
