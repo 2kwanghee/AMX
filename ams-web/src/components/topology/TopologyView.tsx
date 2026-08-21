@@ -13,6 +13,7 @@ import type {
   ServerPage,
   TenantPage,
 } from '@/lib/api-client/types';
+import { accountWindows } from '@/lib/usage-format';
 import { currentActiveByServer } from '../AssignmentsPanel';
 import { Icon, krLabel, markDataArrived, Modal, useAction } from '../common';
 import { AccountNode } from './AccountNode';
@@ -135,10 +136,11 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const providerOf = new Map(accounts.map((a) => [a.id, a.provider]));
   const activeByServer = currentActiveByServer(assignments, accounts);
 
-  // 계정 5h 소진율 배선 — 각 온라인 서버의 usage payload(accounts[].usage.fiveHour,
-  // 없으면 windowMinutes=300 창)를 계정 이메일로 모아 계정 노드 서브라인에 전달한다.
-  // 계정은 서버당 유일 할당이라 이메일→pct 는 충돌 없이 결정된다. 값이 없으면
-  // undefined 그대로 두어 서브라인은 프로바이더·상태만 표시(기존 degrade 유지).
+  // 계정 5h 소진율 배선 — 각 온라인 서버의 usage payload(accounts[].windows 중
+  // window_minutes=300, 없으면 five_hour 폴백)를 계정 이메일로 모아 계정 노드
+  // 서브라인에 전달한다. 계정은 서버당 유일 할당이라 이메일→pct 는 충돌 없이
+  // 결정된다. 값이 없으면 undefined 그대로 두어 서브라인은 프로바이더·상태만
+  // 표시(기존 degrade 유지).
   const onlineIds = orderedServers.filter((s) => s.status === 'online').map((s) => s.id);
   const { data: usageSnaps } = useSWR(
     onlineIds.length ? ['topo-usage', tenantId, onlineIds.join(',')] : null,
@@ -148,8 +150,9 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const usagePctByEmail = new Map<string, number>();
   for (const snap of usageSnaps ?? []) {
     for (const acc of snap?.payload?.accounts ?? []) {
-      const pct = acc.usage?.fiveHour?.pct ?? acc.usage?.windows?.find((w) => w.windowMinutes === 300)?.pct;
-      if (acc.email && pct != null) usagePctByEmail.set(acc.email, pct);
+      const email = acc.account?.email;
+      const pct = accountWindows(acc).find((w) => w.windowMinutes === 300)?.pct;
+      if (email && pct != null) usagePctByEmail.set(email, pct);
     }
   }
 

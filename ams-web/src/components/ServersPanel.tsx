@@ -16,6 +16,11 @@ import type {
   UsageSnapshot,
 } from '@/lib/api-client/types';
 import { formatEventRow } from '@/lib/event-format';
+import {
+  poolAllExhausted,
+  poolMaxUtilization,
+  usageAccountView,
+} from '@/lib/usage-format';
 import { currentActiveByServer } from './AssignmentsPanel';
 import {
   AvatarStack,
@@ -726,31 +731,31 @@ function UsageModal({
       {p && (
         <>
           <p>
-            풀 최대 사용률: <b>{p.poolSummary?.maxUtilizationPct ?? '—'}%</b>{' '}
-            {p.poolSummary?.allExhausted && <Badge value="critical" />}
+            풀 최대 사용률: <b>{poolMaxUtilization(p) ?? 0}%</b>{' '}
+            {poolAllExhausted(p) && <Badge value="critical" />}
           </p>
           <p className="muted">보고 {fmtTime(data?.reportedAt)}</p>
           <div className="table-wrap">
             <table>
               <thead><tr><th>이메일</th><th>상태</th><th>현재</th></tr></thead>
               <tbody>
-                {(p.accounts ?? []).map((a) => {
-                  const windows = a.usage?.windows;
+                {(p.accounts ?? []).map((a, i) => {
+                  const acct = usageAccountView(a);
                   return (
-                    <Fragment key={a.amsAccountId}>
+                    <Fragment key={acct.amsAccountId ?? i}>
                       <tr>
-                        <td>{a.email}</td>
-                        <td><Badge value={a.allocationStatus} /></td>
-                        <td>{a.isCurrent ? '★' : ''}</td>
+                        <td>{acct.email ?? '—'}</td>
+                        <td>{acct.allocationStatus && <Badge value={acct.allocationStatus} />}</td>
+                        <td>{acct.isCurrent ? '★' : ''}</td>
                       </tr>
-                      {windows && windows.length > 0 && (
+                      {acct.windows.length > 0 && (
                         <tr className="usage-windows-row">
                           <td colSpan={3}>
                             <div className="usage-windows">
-                              {windows.map((w) => {
+                              {acct.windows.map((w) => {
                                 const prov = windowProvider(w.id);
                                 return (
-                                  <div className="usage-window" key={w.id}>
+                                  <div className="usage-window" key={w.key}>
                                     {prov && (
                                       <span className={`uw-prov ${prov}`} title={`${krLabel(prov)} 창 ${w.id}`}>
                                         <Icon name={providerIcon(prov)} size={10} />
@@ -758,7 +763,7 @@ function UsageModal({
                                       </span>
                                     )}
                                     <span className="uw-label">{windowLabel(w.windowMinutes, w.id)}</span>
-                                    <span className="uw-pct">{w.pct}%</span>
+                                    <span className="uw-pct">{w.pct ?? 0}%</span>
                                   </div>
                                 );
                               })}
@@ -772,12 +777,6 @@ function UsageModal({
               </tbody>
             </table>
           </div>
-          {p.drift && p.drift.length > 0 && (
-            <>
-              <h3 style={{ marginTop: 12 }}>불일치</h3>
-              <ul>{p.drift.map((d, i) => <li key={i} className="err">{d.email || d.amsAccountId}: {d.detail}</li>)}</ul>
-            </>
-          )}
         </>
       )}
     </Modal>

@@ -213,33 +213,73 @@ export interface UsageSnapshot {
   payload: UsagePayload;
 }
 
-// Mirrors contracts/schemas/usage-report.schema.json (§6.5).
+// GET …/servers/{sid}/usage 의 payload 는 amx.v1.UsageReport proto 를 서버가
+// MessageToDict(preserving_proto_field_name=True) 로 저장한 것이라 키가 전부
+// snake_case 다(ams-server/app/grpc/server.py:841). 스냅샷 껍데기(serverId 등)는
+// Wire alias_generator 로 camelCase 지만 payload dict 내부는 변환되지 않는다.
+// enum 은 이름 문자열로 온다: allocation_status="ALLOCATION_STATUS_ACTIVE",
+// trigger="TRIGGER_SCHEDULE". MessageToDict 는 기본값(0·false·빈)을 생략하므로
+// pct 0·is_current false 등은 키 자체가 없을 수 있다. 근거 proto:
+// AccountUsage(:170)·AccountRef(:85)·PoolSummary(:195)·QuotaWindow(:147).
+// drift 는 UsageSnapshot 응답 스키마(schemas.py:457 payload dict)에 실리지 않아
+// 여기서 뺐다(별도 DB 컬럼이며 REST 로 노출되지 않음).
+export interface UsageAccountRef {
+  ams_account_id?: string;
+  email?: string;
+  account_uuid?: string;
+  provider?: string;
+}
+
+export interface UsageQuotaWindow {
+  id?: string;
+  pct?: number;
+  resets_at?: string;
+  window_minutes?: number;
+  model?: string;
+}
+
+// 위치형 legacy 창(five_hour/seven_day). P2b 이중 기록 이전 보고 호환용.
+export interface UsagePositionalWindow {
+  pct?: number;
+  resets_at?: string;
+}
+
+export interface UsageSpend {
+  used?: number;
+  limit?: number;
+  pct?: number;
+  currency?: string;
+  resets_at?: string;
+}
+
+export interface UsageAccount {
+  account?: UsageAccountRef;
+  allocation_status?: string;
+  is_current?: boolean;
+  five_hour?: UsagePositionalWindow;
+  seven_day?: UsagePositionalWindow;
+  usage_fetched_at?: string;
+  windows?: UsageQuotaWindow[];
+  spend?: UsageSpend;
+  scoped_windows?: UsageQuotaWindow[];
+}
+
 export interface UsagePayload {
-  schemaVersion?: number;
-  reportType?: string;
-  agentId?: string;
-  generatedAt?: string;
-  trigger?: 'schedule' | 'ams_query' | 'switch';
-  activeAccount?: { amsAccountId: string; email: string };
-  poolSummary?: {
+  schema_version?: number;
+  agent_id?: string;
+  generated_at?: string;
+  trigger?: string;
+  active_account?: UsageAccountRef;
+  pool_summary?: {
     total?: number;
-    allExhausted?: boolean;
-    maxUtilizationPct?: number;
+    active?: number;
+    eligible?: number;
+    quarantined?: number;
+    all_exhausted?: boolean;
+    max_utilization_pct?: number;
   };
-  accounts?: Array<{
-    amsAccountId: string;
-    email: string;
-    allocationStatus: string;
-    isCurrent: boolean;
-    accountUuid?: string;
-    usage?: {
-      fiveHour?: { pct: number };
-      sevenDay?: { pct: number };
-      windows?: Array<{ id: string; pct: number; windowMinutes?: number; resetsAt?: string }>;
-    };
-  }>;
-  // Reconcile drift, surfaced by ams-server (design §2, §5.4).
-  drift?: Array<{ email?: string; amsAccountId?: string; detail?: string }>;
+  accounts?: UsageAccount[];
+  in_response_to_command_id?: string;
 }
 
 // -- Switch/quarantine/all_exhausted events (E2 timeline). ------------------
