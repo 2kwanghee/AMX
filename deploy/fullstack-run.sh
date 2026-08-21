@@ -11,8 +11,9 @@
 #     web     관리자 화면(:3000, 운영 빌드로만 — next dev 금지)
 #     all     위 전부 (기본값)
 #
-#   플래그:
-#     --lan             REST·web을 0.0.0.0에 바인딩하고 감지한 LAN IP를 출력.
+#   플래그 (up/restart 에 주면 .amx-dev/run.env 에 기억되어, 다음부터는
+#   `deploy/fullstack-run.sh up` 만 쳐도 같은 플래그로 뜬다):
+#     --lan            REST·web을 0.0.0.0에 바인딩하고 감지한 LAN IP를 출력.
 #                       (gRPC는 소스가 항상 모든 인터페이스에 바인딩한다 — 아래 참고)
 #     --insecure-grpc   gRPC를 평문으로 (AMX_GRPC_ALLOW_INSECURE=1). 첫 시험 전용, 경고 출력.
 #                       미지정 시: dev.env에 TLS 인증서가 있으면 TLS 사용, 없으면 기동 거부(fail-loud).
@@ -352,6 +353,28 @@ for a in "$@"; do
     *) POS+=("$a") ;;
   esac
 done
+
+# 기동 플래그 기억: up/restart 에 플래그를 주면 .amx-dev/run.env 에 적어 두고,
+# 다음부터 플래그 없이 `up` 만 쳐도 같은 플래그로 띄운다. 플래그를 다시 주면 덮어쓴다.
+# (dev.env 는 시크릿 전용이라 섞지 않는다.)
+RUN_ENV="$DEV_DIR/run.env"
+case "$ACTION" in
+  up|restart)
+    if [ "$LAN" = 1 ] || [ "$INSECURE_GRPC" = 1 ]; then
+      mkdir -p "$DEV_DIR"
+      { printf '# fullstack-run.sh 가 기억한 마지막 기동 플래그. 플래그 없이 up 하면 이 값을 쓴다.\n'
+        printf 'AMX_RUN_LAN=%s\nAMX_RUN_INSECURE_GRPC=%s\n' "$LAN" "$INSECURE_GRPC"; } > "$RUN_ENV"
+    elif [ -f "$RUN_ENV" ]; then
+      AMX_RUN_LAN=0; AMX_RUN_INSECURE_GRPC=0
+      # shellcheck disable=SC1090
+      . "$RUN_ENV"
+      LAN="$AMX_RUN_LAN"; INSECURE_GRPC="$AMX_RUN_INSECURE_GRPC"
+      restored_flags=""
+      [ "$LAN" = 1 ] && restored_flags="$restored_flags --lan"
+      [ "$INSECURE_GRPC" = 1 ] && restored_flags="$restored_flags --insecure-grpc"
+      [ -n "$restored_flags" ] && ok "기동 플래그 복원($RUN_ENV):$restored_flags"
+    fi ;;
+esac
 
 do_up()   { case "$1" in db) db_up;; server) server_up;; web) web_up;; all) server_up; web_up;; esac; }
 

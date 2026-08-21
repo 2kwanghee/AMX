@@ -37,6 +37,8 @@ bash deploy/fullstack-run.sh up all --insecure-grpc --lan
 이 한 줄이 DB 컨테이너 → 마이그레이션 → REST → gRPC → 웹 빌드·기동을 순서대로
 처리하고, 끝나면 db/server/gRPC/web 네 줄의 ✔ 판정을 찍어 준다. 첫 실행 때는
 암호화 키·관리자 토큰 같은 비밀값을 자동 생성해 `.amx-dev/dev.env`(0600)에 넣는다.
+플래그(`--insecure-grpc --lan`)는 `.amx-dev/run.env`에 기억되어, 다음부터는
+`bash deploy/fullstack-run.sh up`만 쳐도 같은 설정으로 뜬다.
 
 플래그 두 개의 뜻:
 

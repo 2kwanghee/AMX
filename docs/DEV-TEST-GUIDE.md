@@ -24,9 +24,11 @@
 TLS 인증서 발급(PROD §2)을 건너뛰고 평문으로 한 줄에 띄운다:
 
 ```sh
-bash deploy/fullstack-run.sh up all --insecure-grpc --lan
+bash deploy/fullstack-run.sh up all --insecure-grpc --lan   # 최초 1회
+bash deploy/fullstack-run.sh up                              # 이후 재기동은 이것만
 ```
 
+- 플래그는 `.amx-dev/run.env`에 기억되므로 두 번째부터는 `up`만 치면 같은 플래그(`--insecure-grpc --lan`)로 뜬다. 플래그를 다시 주면 그 값으로 덮어쓴다.
 - 첫 실행 때 비밀값(암호화 키·관리자 토큰 등)을 자동 생성해 `.amx-dev/dev.env`(0600)에 보관한다.
 - `--insecure-grpc` = gRPC 평문. **첫 시험 전용**이라 기동 로그에 경고가 뜬다. 운영은 이 플래그 없이 TLS로 띄운다(PROD §2~§3).
 - `--lan` = 웹·REST를 모든 인터페이스에 바인딩. **브라우저나 노트북이 다른 기기라면 필수**다(빼먹으면 다른 기기에서 `ERR_CONNECTION_RESET` — 실측).

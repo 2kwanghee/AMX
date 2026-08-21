@@ -368,9 +368,13 @@ bash deploy/agent-setup.sh install \
 bash deploy/agent-setup.sh status     # 실행 여부 + 최근 로그
 bash deploy/agent-run.sh logs         # 로그 follow
 bash deploy/agent-run.sh down         # 종료
-bash deploy/agent-run.sh up --ca ./ca.crt   # 재기동 (등록은 이미 됐으므로 토큰 불필요 —
-                                            # 저장된 자격증명(.amx-agent/state)으로 재접속)
+bash deploy/agent-run.sh up           # 재기동 — 플래그 없이 부르면 설치 때 인자를 자동 복원
 ```
+
+`agent-setup.sh install`이 설치 인자를 `.amx-agent/setup.env`에 적어 두고, `up`을 플래그 없이
+부르면 그 값(`--ams`·`--pubkey`·TLS·`--config-dir`·`--tsamx-bin`)을 그대로 다시 쓴다. 등록은
+이미 됐으므로 `--token`은 복원하지 않고 저장된 자격증명(`.amx-agent/state`)으로 재접속한다.
+플래그를 하나라도 직접 주면 `setup.env`는 무시되므로, 값을 바꿀 때는 필요한 인자를 전부 적는다.
 
 코드 업데이트 반영: `cd ~/AMX && git pull` 후 `agent-run.sh down` → `up ...`
 (up이 매번 다시 빌드한다).
@@ -403,9 +407,9 @@ bash deploy/agent-setup.sh uninstall --purge-tsamx --purge-config
 
 ```sh
 bash deploy/fullstack-run.sh down server web    # 앱만 종료, DB 컨테이너는 유지
-bash deploy/fullstack-run.sh up all --lan       # 다시 켜기
+bash deploy/fullstack-run.sh up                 # 다시 켜기 (마지막에 쓴 플래그를 .amx-dev/run.env에서 복원)
 # 또는 그냥:
-bash deploy/fullstack-run.sh restart all --lan
+bash deploy/fullstack-run.sh restart
 ```
 
 ### 7-2. `down all`은 초기화 명령이다
