@@ -109,4 +109,21 @@ describe('계정 풀 프록시', () => {
     expect(events.status).toBe(200);
     expect((await events.json())[0].kind).toBe('state_changed');
   });
+
+  it('실패 체인 확인(:ack) 경로가 열려 있다', async () => {
+    const cookie = await login();
+    const ack = await proxyPost(
+      new Request(`${ORIGIN}/bff/api/tenants/ten-1/pool/chains/chn-2:ack`, {
+        method: 'POST',
+        headers: { cookie },
+      }),
+    );
+    expect(ack.status).toBe(200);
+    await assertNoLeak(ack);
+    const body = await ack.json();
+    expect(body.step).toBe('failed');
+    expect(body.ackedAt).toBeTruthy();
+    const hit = captured.find((c) => c.path === 'tenants/ten-1/pool/chains/chn-2:ack');
+    expect(hit?.authorization).toBe(`Bearer ${GLOBAL_ADMIN.sessionToken}`);
+  });
 });

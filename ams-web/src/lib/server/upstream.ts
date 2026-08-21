@@ -41,6 +41,7 @@ const ALLOWLIST: RegExp[] = [
   new RegExp(`^tenants/${ID}/pool:(pause|resume)$`),
   new RegExp(`^tenants/${ID}/pool/(recommendations|chains|events)$`),
   new RegExp(`^tenants/${ID}/pool/recommendations/${ID}:apply$`),
+  new RegExp(`^tenants/${ID}/pool/chains/${ID}:ack$`),
   new RegExp(`^tenants/${ID}/servers/${ID}/pool-policy$`),
   new RegExp(`^tenants/${ID}/accounts/${ID}/pool:(pin|unpin|hold|release)$`),
 ];

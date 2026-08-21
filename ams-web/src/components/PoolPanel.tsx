@@ -32,14 +32,13 @@ import {
   coolingRemainingMs,
   fmtRemaining,
   groupAccountsByLane,
+  ineligibleReasonLabel,
   isChainActive,
   poolCounts,
   poolEventKindLabel,
-  poolStateLabel,
   poolVerbLabel,
   recommendationKindLabel,
   windowLabel,
-  windowPct,
 } from '@/lib/pool';
 
 const POLL = 30000;
@@ -73,9 +72,11 @@ export function PoolPanel({ tenantId }: { tenantId: string }) {
     () => api.getPoolOverview(tenantId),
     { refreshInterval: POLL },
   );
+  // all로 받아 진행 중과 실패(미확인)를 한 목록에서 나눈다. 실패 체인은 운영자가
+  // 확인해야 그 서버의 자동 실행이 다시 열린다.
   const { data: chains, mutate: mutateChains } = useSWR<Chain[]>(
     ['pool-chains', tenantId],
-    () => api.listPoolChains(tenantId, 'active'),
+    () => api.listPoolChains(tenantId, 'all'),
     { refreshInterval: POLL },
   );
   const { data: events, mutate: mutateEvents } = useSWR<PoolEvent[]>(
@@ -164,7 +165,7 @@ export function PoolPanel({ tenantId }: { tenantId: string }) {
           serverNameOf={serverNameOf}
           onApplied={refreshAll}
         />
-        <ChainList chains={chains ?? []} serverNameOf={serverNameOf} />
+        <ChainList tenantId={tenantId} chains={chains ?? []} serverNameOf={serverNameOf} onAcked={refreshAll} />
       </div>
 
       <EventTimeline events={events ?? []} serverNameOf={serverNameOf} emailOf={emailOf} />
@@ -233,6 +234,7 @@ function PoolCard({
   const serverName = a.leasedServerId ? serverNameOf.get(a.leasedServerId) : undefined;
   const observedAt = lastObservedAt(a);
   // 표준 두 창을 먼저, 그 밖의 관측 창을 뒤에 붙여 중복 없이 나열한다.
+  const winById = new Map(a.windows.map((w) => [w.windowId, w]));
   const extraWindows = a.windows.map((w) => w.windowId).filter((id) => !CANON_WINDOWS.includes(id));
   const windowIds = [...CANON_WINDOWS, ...Array.from(new Set(extraWindows))];
   const coolMs = coolingRemainingMs(a.coolingUntil, now);
@@ -243,6 +245,11 @@ function PoolCard({
         <span className="pool-card-email" title={a.email}>{a.email}</span>
         <ProviderTag value={a.provider} />
       </div>
+      {!a.autoEligible && (
+        <div className="pool-badge-off" title="자동화 후보에서 제외된 계정">
+          부적격{a.ineligibleReason ? ` · ${ineligibleReasonLabel(a.ineligibleReason)}` : ''}
+        </div>
+      )}
       {serverName && <div className="pool-card-server">{serverName}</div>}
       {a.poolState === 'cooling' && (
         <div className="pool-cool">
@@ -252,8 +259,18 @@ function PoolCard({
       )}
       <div className="pool-win">
         {windowIds.map((id) => {
-          const pct = windowPct(a, id);
-          if (pct === null) return null;
+          const w = winById.get(id);
+          if (!w) return null; // 창 자체가 없으면 줄을 그리지 않는다
+          const pct = w.pct;
+          // 관측을 못 읽은 창(pct null)은 막대 대신 "미상"만 적는다.
+          if (pct === null) {
+            return (
+              <div className="pool-win-row" key={id}>
+                <span className="pool-win-name">{windowLabel(id)}</span>
+                <span className="pool-win-unknown muted">미상</span>
+              </div>
+            );
+          }
           const tone = pctTone(pct);
           return (
             <div className="pool-win-row" key={id}>
@@ -369,27 +386,62 @@ function RecommendationList({
   );
 }
 
-// -- 진행 중 체인 ------------------------------------------------------------
-function ChainList({ chains, serverNameOf }: { chains: Chain[]; serverNameOf: Map<string, string> }) {
+// -- 진행 중·실패 체인 -------------------------------------------------------
+function ChainList({
+  tenantId,
+  chains,
+  serverNameOf,
+  onAcked,
+}: {
+  tenantId: string;
+  chains: Chain[];
+  serverNameOf: Map<string, string>;
+  onAcked: () => void;
+}) {
+  const act = useAction();
   const active = chains.filter((c) => isChainActive(c.step));
+  // 실패했고 아직 확인하지 않은 체인만 확인 대상으로 남긴다.
+  const failed = chains.filter((c) => c.step === 'failed' && !c.ackedAt);
+  const srvName = (id: string) => serverNameOf.get(id) ?? id.slice(0, 8);
   return (
     <div>
       <h2>진행 중 체인<LiveDot /></h2>
-      {active.length === 0 && <p className="muted">진행 중인 체인이 없습니다.</p>}
+      {active.length === 0 && failed.length === 0 && (
+        <p className="muted">진행 중인 체인이 없습니다.</p>
+      )}
       <div className="pool-reco">
         {active.map((c) => (
           <div className="pool-reco-item" key={c.id}>
             <div style={{ minWidth: 0 }}>
               <div>
-                <b>{serverNameOf.get(c.serverId) ?? c.serverId.slice(0, 8)}</b>
-                <span className={`pool-chain-step ${c.step === 'failed' ? 'failed' : ''}`}> · {chainStepLabel(c.step)}</span>
+                <b>{srvName(c.serverId)}</b>
+                <span className="pool-chain-step"> · {recommendationKindLabel(c.kind)} · {chainStepLabel(c.step)}</span>
               </div>
               {c.error && <div className="err">{c.error}</div>}
             </div>
             <TimeCell iso={c.updatedAt} />
           </div>
         ))}
+        {failed.map((c) => (
+          <div className="pool-reco-item" key={c.id}>
+            <div style={{ minWidth: 0 }}>
+              <div>
+                <b>{srvName(c.serverId)}</b>
+                <span className="pool-chain-step failed"> · {recommendationKindLabel(c.kind)} · 실패</span>
+              </div>
+              {c.error && <div className="err">{c.error}</div>}
+            </div>
+            <button
+              className="vbtn"
+              disabled={act.busy}
+              onClick={() => act.run(() => api.ackPoolChain(tenantId, c.id), onAcked)}
+            >
+              확인
+            </button>
+          </div>
+        ))}
       </div>
+      {act.error && <p className="err">{act.error}</p>}
     </div>
   );
 }

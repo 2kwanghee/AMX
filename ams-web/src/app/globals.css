@@ -1112,6 +1112,12 @@ tbody tr.usage-detail-row:hover > td { background: var(--surface-2); }
 .pool-win-fill.warn { background: var(--warn); }
 .pool-win-fill.crit { background: var(--crit); }
 .pool-win-pct { font-size: 11px; color: var(--ink); width: 40px; text-align: right; flex: none; }
+.pool-win-unknown { flex: 1; font-size: 11px; }
+.pool-badge-off {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 6px;
+  padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-soft);
+}
 .pool-obs { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .pool-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .pool-aside { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }

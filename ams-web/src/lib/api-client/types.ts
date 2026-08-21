@@ -475,6 +475,7 @@ export type ChainStep = 'deliver' | 'switch' | 'recall' | 'done' | 'failed';
 export type PoolEventKind =
   | 'state_changed'
   | 'recommendation_created'
+  | 'recommendation_dropped'
   | 'chain_started'
   | 'chain_step'
   | 'chain_done'
@@ -496,9 +497,20 @@ export interface PoolPolicy {
 
 // 한 사용량 창의 마지막 관측치. windowId는 five_hour·seven_day 등 프로바이더 로컬
 // 식별자이며, resetsAt은 소진분이 풀리는 시각(없으면 null).
+// 부적격 사유(서버 services.pool.ineligible_reason와 같은 값). 적격이면 null.
+export type IneligibleReason =
+  | 'api_key'
+  | 'excluded'
+  | 'unusable'
+  | 'pinned'
+  | 'held'
+  | 'no_observation';
+
 export interface WindowState {
   windowId: string;
-  pct: number;
+  // 관측을 못 읽은 창은 null이다(0으로 보내면 화면이 "여유 100%"로 오독한다).
+  // null이면 카드는 "미상"으로 적고 막대를 그리지 않는다.
+  pct: number | null;
   resetsAt?: string | null;
   usageFetchedAt?: string | null;
   reportedAt: string;
@@ -518,6 +530,10 @@ export interface PoolAccount {
   lastLeaseEndedAt?: string | null;
   windows: WindowState[];
   poolStateChangedAt?: string | null;
+  // 이 계정을 컨트롤러가 다룰 수 있는가와, 못 다룬다면 그 이유(지속적 사유만).
+  // 대여·충전 같은 순환의 정상 국면은 부적격이 아니라 상태 열이 이미 보여준다.
+  autoEligible: boolean;
+  ineligibleReason?: IneligibleReason | null;
 }
 
 export interface PoolServer {
@@ -549,10 +565,14 @@ export interface Chain {
   recommendationId?: string | null;
   fromAccountId?: string | null;
   toAccountId?: string | null;
+  // 체인 종류. from·to만으로는 prefetch와 swap을 구분할 수 없어 서버가 함께 싣는다.
+  kind: RecommendationKind;
   step: ChainStep;
   error?: string | null;
   startedAt: string;
   updatedAt: string;
+  // 실패한 체인을 운영자가 확인(:ack)한 시각. 확인 전이면 null.
+  ackedAt?: string | null;
   // 'pool-controller' 또는 실행한 관리자 이메일.
   actor: string;
 }

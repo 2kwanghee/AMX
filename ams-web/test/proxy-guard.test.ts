@@ -32,6 +32,7 @@ describe('isAllowedPath', () => {
       'tenants/ten-1/pool/chains',
       'tenants/ten-1/pool/events',
       'tenants/ten-1/pool/recommendations/rec-1:apply',
+      'tenants/ten-1/pool/chains/chn-1:ack',
       'tenants/ten-1/servers/srv-1/pool-policy',
       'tenants/ten-1/accounts/acc-1/pool:pin',
       'tenants/ten-1/accounts/acc-1/pool:unpin',
@@ -53,6 +54,7 @@ describe('isAllowedPath', () => {
       'tenants/ten-1/accounts/acc-1/pool:drop',
       'tenants/ten-1/pool:halt',
       'tenants/ten-1/pool/secrets',
+      'tenants/ten-1/pool/chains/chn-1:cancel',
       'http://evil.test/',
       'tenants//servers',
     ]) {

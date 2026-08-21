@@ -190,10 +190,14 @@ async function resolver({ request }: { request: Request }) {
         {
           accountId: 'acc-1', email: 'a@acme.io', provider: 'claude', poolState: 'cooling',
           coolingUntil: new Date(Date.now() + 3600_000).toISOString(), coolingWindowId: 'five_hour',
-          leasedServerId: null, windows: [
+          leasedServerId: null, autoEligible: true, ineligibleReason: null, windows: [
             { windowId: 'five_hour', pct: 92, resetsAt: iso(), reportedAt: iso(), serverId: 'srv-1' },
-            { windowId: 'seven_day', pct: 40, reportedAt: iso(), serverId: 'srv-1' },
+            { windowId: 'seven_day', pct: null, reportedAt: iso(), serverId: 'srv-1' },
           ],
+        },
+        {
+          accountId: 'acc-2', email: 'k@acme.io', provider: 'codex', poolState: 'pinned',
+          leasedServerId: null, autoEligible: false, ineligibleReason: 'api_key', windows: [],
         },
       ],
       servers: [
@@ -221,8 +225,12 @@ async function resolver({ request }: { request: Request }) {
   }
   if (path === 'tenants/ten-1/pool/chains' && m === 'GET') {
     return HttpResponse.json([
-      { id: 'chn-1', serverId: 'srv-1', step: 'switch', startedAt: iso(), updatedAt: iso(), actor: 'pool-controller' },
+      { id: 'chn-1', serverId: 'srv-1', kind: 'swap', step: 'switch', startedAt: iso(), updatedAt: iso(), actor: 'pool-controller' },
+      { id: 'chn-2', serverId: 'srv-1', kind: 'prefetch', step: 'failed', error: '전달 시간 초과', startedAt: iso(), updatedAt: iso(), acked_at: null, actor: 'pool-controller' },
     ]);
+  }
+  if (path === 'tenants/ten-1/pool/chains/chn-2:ack' && m === 'POST') {
+    return HttpResponse.json({ id: 'chn-2', serverId: 'srv-1', kind: 'prefetch', step: 'failed', error: '전달 시간 초과', startedAt: iso(), updatedAt: iso(), ackedAt: iso(), actor: 'root@amx.test' });
   }
   if (path === 'tenants/ten-1/pool/events' && m === 'GET') {
     return HttpResponse.json([

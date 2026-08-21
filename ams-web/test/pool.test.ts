@@ -14,6 +14,7 @@ import {
   poolEventKindLabel,
   poolStateLabel,
   recommendationKindLabel,
+  ineligibleReasonLabel,
   windowLabel,
   windowPct,
 } from '@/lib/pool';
@@ -134,12 +135,27 @@ describe('창 사용률 조회', () => {
     windows: [
       { windowId: 'five_hour', pct: 82, reportedAt: '2026-08-21T00:00:00Z', serverId: 's1' },
       { windowId: 'seven_day', pct: 41, reportedAt: '2026-08-21T00:00:00Z', serverId: 's1' },
+      { windowId: 'monthly', pct: null, reportedAt: '2026-08-21T00:00:00Z', serverId: 's1' },
     ],
   });
   it('창이 있으면 pct, 없으면 null', () => {
     expect(windowPct(a, 'five_hour')).toBe(82);
     expect(windowPct(a, 'seven_day')).toBe(41);
+    expect(windowPct(a, 'absent')).toBeNull();
+  });
+  it('관측이 없는 창(pct null)은 null을 그대로 준다', () => {
     expect(windowPct(a, 'monthly')).toBeNull();
+  });
+});
+
+describe('부적격 사유 라벨', () => {
+  it('사유를 짧은 한글로 바꾼다', () => {
+    expect(ineligibleReasonLabel('api_key')).toBe('API 키');
+    expect(ineligibleReasonLabel('excluded')).toBe('배정 제외');
+    expect(ineligibleReasonLabel('no_observation')).toBe('관측 없음');
+  });
+  it('모르는 값은 원문으로 떨어진다', () => {
+    expect(ineligibleReasonLabel('mystery')).toBe('mystery');
   });
 });
 

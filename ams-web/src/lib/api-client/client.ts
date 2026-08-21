@@ -192,6 +192,9 @@ export const api = {
   // status는 active(진행 중만) 또는 all. 미지정이면 서버 기본(active).
   listPoolChains: (t: string, status?: 'active' | 'all') =>
     bff<Chain[]>('GET', `tenants/${t}/pool/chains${status ? `?status=${status}` : ''}`),
+  // 실패한 체인을 확인 처리한다. 그 서버의 자동 실행 빗장이 풀린다.
+  ackPoolChain: (t: string, id: string) =>
+    bff<Chain>('POST', `tenants/${t}/pool/chains/${id}:ack`),
   pausePool: (t: string) => bff<PoolPauseState>('POST', `tenants/${t}/pool:pause`),
   resumePool: (t: string) => bff<PoolPauseState>('POST', `tenants/${t}/pool:resume`),
   // limit은 서버가 검증한다(계약 기본 100).

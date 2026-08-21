@@ -2,6 +2,7 @@
 // 렌더와 분리해 여기서 단위 검증한다(패널은 이 함수들을 조립만 한다).
 import type {
   ChainStep,
+  IneligibleReason,
   PoolAccount,
   PoolEventKind,
   PoolState,
@@ -46,6 +47,7 @@ export function chainStepLabel(step: string): string {
 const POOL_EVENT_KIND_LABEL: Record<PoolEventKind, string> = {
   state_changed: '상태 변경',
   recommendation_created: '권고 생성',
+  recommendation_dropped: '권고 취소',
   chain_started: '체인 시작',
   chain_step: '체인 진행',
   chain_done: '체인 완료',
@@ -65,6 +67,19 @@ const WINDOW_LABEL: Record<string, string> = {
 };
 export function windowLabel(windowId: string): string {
   return WINDOW_LABEL[windowId] ?? windowId;
+}
+
+// 부적격 사유 → 짧은 한글. 카드 배지에 붙는다. 없는 값은 원문 폴백.
+const INELIGIBLE_REASON_LABEL: Record<IneligibleReason, string> = {
+  api_key: 'API 키',
+  excluded: '배정 제외',
+  unusable: '사용 불가',
+  pinned: '고정',
+  held: '보류',
+  no_observation: '관측 없음',
+};
+export function ineligibleReasonLabel(reason: string): string {
+  return INELIGIBLE_REASON_LABEL[reason as IneligibleReason] ?? reason;
 }
 
 // -- 타입 가드 ---------------------------------------------------------------
