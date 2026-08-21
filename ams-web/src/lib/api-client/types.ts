@@ -130,6 +130,10 @@ export interface Server {
   memPct?: number;
   diskPct?: number;
   metricsReportedAt?: string;
+  // 계정 풀 정책(설계: docs/design-notes/account-pool-automation-plan.md §2.2).
+  // 서버가 풀 정책을 아직 안 실은 응답이면 undefined이고, 이때 화면은 기본값으로
+  // 채운다. null은 서버가 정책 없음을 명시한 경우다.
+  poolPolicy?: PoolPolicy | null;
   createdAt?: string;
 }
 export interface ServerCreate {
@@ -458,4 +462,142 @@ export interface ApiError {
   status: number;
   detail?: string;
   code?: string;
+}
+
+// -- 계정 풀 자동 배분 (design-notes/account-pool-automation-plan.md §2·§3·§4) --
+// 계정만 "배급처(READY) → 대여중(LEASED) → 충전소(COOLING) → 배급처" 순환을 돌게
+// 하는 풀 컨트롤러의 관측·조작 표면. 값·필드는 pool-api-contract.md 기준이며,
+// 열거값이 늘어도 라벨 매핑(lib/pool.ts)이 원문 폴백을 하므로 화면은 죽지 않는다.
+export type PoolState = 'ready' | 'leased' | 'recalling' | 'cooling' | 'pinned' | 'held';
+export type PoolMode = 'manual' | 'auto';
+export type RecommendationKind = 'prefetch' | 'swap' | 'recall_idle' | 'lease';
+export type ChainStep = 'deliver' | 'switch' | 'recall' | 'done' | 'failed';
+export type PoolEventKind =
+  | 'state_changed'
+  | 'recommendation_created'
+  | 'recommendation_dropped'
+  | 'chain_started'
+  | 'chain_step'
+  | 'chain_done'
+  | 'chain_failed'
+  | 'policy_changed'
+  | 'automation_paused'
+  | 'automation_resumed';
+
+export interface PoolPolicy {
+  mode: PoolMode;
+  // 서버가 유지할 대여 계정 수(1~5). swap/prefetch는 소진 사용률 임계.
+  targetLeases: number;
+  swapAtPct: number;
+  prefetchAtPct: number;
+  minLeaseMinutes: number;
+  // 충전소에서 배급처로 되돌릴 관측 사용률 상한.
+  readyReturnPct: number;
+}
+
+// 한 사용량 창의 마지막 관측치. windowId는 five_hour·seven_day 등 프로바이더 로컬
+// 식별자이며, resetsAt은 소진분이 풀리는 시각(없으면 null).
+// 부적격 사유(서버 services.pool.ineligible_reason와 같은 값). 적격이면 null.
+export type IneligibleReason =
+  | 'api_key'
+  | 'excluded'
+  | 'unusable'
+  | 'pinned'
+  | 'held'
+  | 'no_observation';
+
+export interface WindowState {
+  windowId: string;
+  // 관측을 못 읽은 창은 null이다(0으로 보내면 화면이 "여유 100%"로 오독한다).
+  // null이면 카드는 "미상"으로 적고 막대를 그리지 않는다.
+  pct: number | null;
+  resetsAt?: string | null;
+  usageFetchedAt?: string | null;
+  reportedAt: string;
+  serverId: string;
+}
+
+export interface PoolAccount {
+  accountId: string;
+  email: string;
+  provider: Provider;
+  poolState: PoolState;
+  // COOLING일 때만 의미. 소진된 창들의 resetsAt 최댓값과 그 창.
+  coolingUntil?: string | null;
+  coolingWindowId?: string | null;
+  leasedServerId?: string | null;
+  leaseStartedAt?: string | null;
+  lastLeaseEndedAt?: string | null;
+  windows: WindowState[];
+  poolStateChangedAt?: string | null;
+  // 이 계정을 컨트롤러가 다룰 수 있는가와, 못 다룬다면 그 이유(지속적 사유만).
+  // 대여·충전 같은 순환의 정상 국면은 부적격이 아니라 상태 열이 이미 보여준다.
+  autoEligible: boolean;
+  ineligibleReason?: IneligibleReason | null;
+}
+
+export interface PoolServer {
+  serverId: string;
+  name: string;
+  status: ServerStatus;
+  poolPolicy: PoolPolicy;
+  leasedAccountIds: string[];
+  activeAccountId?: string | null;
+  // 전달·회수 명령이 아직 수렴 중이면 true. true인 서버엔 새 체인을 걸지 않는다.
+  inFlight: boolean;
+  maxPct?: number | null;
+}
+
+export interface Recommendation {
+  id: string;
+  serverId: string;
+  kind: RecommendationKind;
+  fromAccountId?: string | null;
+  toAccountId?: string | null;
+  reason: string;
+  createdAt: string;
+  triggerPct?: number | null;
+}
+
+export interface Chain {
+  id: string;
+  serverId: string;
+  recommendationId?: string | null;
+  fromAccountId?: string | null;
+  toAccountId?: string | null;
+  // 체인 종류. from·to만으로는 prefetch와 swap을 구분할 수 없어 서버가 함께 싣는다.
+  kind: RecommendationKind;
+  step: ChainStep;
+  error?: string | null;
+  startedAt: string;
+  // 지금 단계가 시작된 시각. updatedAt은 같은 단계의 재발행에도 움직이므로
+  // 단계 경과 시간은 이 값으로 잰다. 서버가 안 실으면 null.
+  stepStartedAt?: string | null;
+  updatedAt: string;
+  // 실패한 체인을 운영자가 확인(:ack)한 시각. 확인 전이면 null.
+  ackedAt?: string | null;
+  // 'pool-controller' 또는 실행한 관리자 이메일.
+  actor: string;
+}
+
+export interface PoolEvent {
+  id: string;
+  kind: PoolEventKind;
+  accountId?: string | null;
+  serverId?: string | null;
+  detail: Record<string, unknown>;
+  createdAt: string;
+  actor: string;
+}
+
+export interface PoolOverview {
+  automationPaused: boolean;
+  accounts: PoolAccount[];
+  servers: PoolServer[];
+  recommendations: Recommendation[];
+}
+
+// pool:pause · pool:resume 응답.
+export interface PoolPauseState {
+  automationPaused: boolean;
 }

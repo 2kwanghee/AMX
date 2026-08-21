@@ -18,9 +18,15 @@ import type {
   EnrollTokenResponse,
   EventPage,
   LangfuseUsage,
+  Chain,
   OauthCompleteRequest,
   OauthStartRequest,
   OauthStartResponse,
+  PoolOverview,
+  PoolPauseState,
+  PoolPolicy,
+  PoolEvent,
+  Recommendation,
   SelfUpdateStatus,
   SessionUsage,
   Server,
@@ -169,6 +175,31 @@ export const api = {
     const q = qs.toString();
     return bff<AuditLogPage>('GET', `tenants/${t}/audit-logs${q ? `?${q}` : ''}`);
   },
+
+  // -- 계정 풀 (design-notes/account-pool-automation-plan.md) --
+  // 관측 표면 하나(getPoolOverview)에 계정·서버·권고가 함께 실려 오고, 조작은
+  // 계정 행동·정책 편집·권고 적용·일시정지로 나뉜다. 경로는 pool-api-contract.md
+  // 기준이며 upstream.ts 허용목록에 같은 모양을 등록해 둔다.
+  getPoolOverview: (t: string) => bff<PoolOverview>('GET', `tenants/${t}/pool`),
+  updateServerPoolPolicy: (t: string, serverId: string, b: Partial<PoolPolicy>) =>
+    bff<Server>('PATCH', `tenants/${t}/servers/${serverId}/pool-policy`, b),
+  poolAccountAction: (t: string, accountId: string, verb: PoolAccountVerb) =>
+    bff<Account>('POST', `tenants/${t}/accounts/${accountId}/pool:${verb}`),
+  listPoolRecommendations: (t: string) =>
+    bff<Recommendation[]>('GET', `tenants/${t}/pool/recommendations`),
+  applyRecommendation: (t: string, id: string) =>
+    bff<Chain>('POST', `tenants/${t}/pool/recommendations/${id}:apply`),
+  // status는 active(진행 중만) 또는 all. 미지정이면 서버 기본(active).
+  listPoolChains: (t: string, status?: 'active' | 'all') =>
+    bff<Chain[]>('GET', `tenants/${t}/pool/chains${status ? `?status=${status}` : ''}`),
+  // 실패한 체인을 확인 처리한다. 그 서버의 자동 실행 빗장이 풀린다.
+  ackPoolChain: (t: string, id: string) =>
+    bff<Chain>('POST', `tenants/${t}/pool/chains/${id}:ack`),
+  pausePool: (t: string) => bff<PoolPauseState>('POST', `tenants/${t}/pool:pause`),
+  resumePool: (t: string) => bff<PoolPauseState>('POST', `tenants/${t}/pool:resume`),
+  // limit은 서버가 검증한다(계약 기본 100).
+  listPoolEvents: (t: string, limit = 100) =>
+    bff<PoolEvent[]>('GET', `tenants/${t}/pool/events?limit=${limit}`),
 };
 
 // -- 오류 코드 한글화 ---------------------------------------------------------
@@ -322,6 +353,10 @@ export type AssignmentActionVerb =
   | 'deactivate'
   | 'recover'
   | 'switch-now';
+
+// 계정 풀 수동 조작 동사. pin/unpin은 자동화 제외 고정, hold/release는 격리와
+// 해제. 상태별로 허용되는 것은 lib/pool.ts allowedPoolActions가 가린다.
+export type PoolAccountVerb = 'pin' | 'unpin' | 'hold' | 'release';
 
 // §5.2 transition rules — which action verbs are legal from a given state, so
 // the UI can disable illegal buttons.

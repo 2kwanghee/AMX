@@ -16,6 +16,7 @@ import { AccountsPanel } from '@/components/AccountsPanel';
 import { AlertsBadge, AlertsPanel } from '@/components/AlertsPanel';
 import { AssignmentsPanel, currentActiveByServer } from '@/components/AssignmentsPanel';
 import { ServersPanel } from '@/components/ServersPanel';
+import { PoolPanel } from '@/components/PoolPanel';
 import { SetupGuidePanel } from '@/components/SetupGuidePanel';
 import { UsageCostPanel } from '@/components/UsageCostPanel';
 import { LangfuseUsagePanel } from '@/components/LangfuseUsagePanel';
@@ -42,6 +43,7 @@ type Tab =
   | 'servers'
   | 'accounts'
   | 'assignments'
+  | 'pool'
   | 'alerts'
   | 'usage'
   | 'audit'
@@ -53,6 +55,7 @@ const MENU: { id: Tab; label: string; icon: IconName }[] = [
   { id: 'servers', label: '서버', icon: 'server' },
   { id: 'accounts', label: '계정', icon: 'user' },
   { id: 'assignments', label: '할당', icon: 'link' },
+  { id: 'pool', label: '계정 풀', icon: 'rotate' },
   { id: 'alerts', label: '알림', icon: 'bell' },
   { id: 'usage', label: '사용량', icon: 'gauge' },
   { id: 'audit', label: '감사', icon: 'activity' },
@@ -65,6 +68,7 @@ const TITLES: Record<Tab, string> = {
   servers: '서버',
   accounts: '계정',
   assignments: '할당',
+  pool: '계정 풀',
   alerts: '알림',
   usage: '사용량',
   audit: '감사 로그',
@@ -159,6 +163,7 @@ export default function Dashboard() {
         {active && tab === 'servers' && <ServersPanel tenantId={active} />}
         {active && tab === 'accounts' && <AccountsPanel tenantId={active} />}
         {active && tab === 'assignments' && <AssignmentsPanel tenantId={active} />}
+        {active && tab === 'pool' && <PoolPanel tenantId={active} />}
         {active && tab === 'alerts' && <AlertsPanel tenantId={active} />}
         {active && tab === 'usage' && (
           <>

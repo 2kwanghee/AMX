@@ -36,6 +36,14 @@ const ALLOWLIST: RegExp[] = [
   new RegExp(`^tenants/${ID}/alerts$`),
   new RegExp(`^tenants/${ID}/alerts/${ID}:ack$`),
   new RegExp(`^tenants/${ID}/audit-logs$`),
+  // 계정 풀(design-notes/account-pool-automation-plan.md, pool-api-contract.md).
+  new RegExp(`^tenants/${ID}/pool$`),
+  new RegExp(`^tenants/${ID}/pool:(pause|resume)$`),
+  new RegExp(`^tenants/${ID}/pool/(recommendations|chains|events)$`),
+  new RegExp(`^tenants/${ID}/pool/recommendations/${ID}:apply$`),
+  new RegExp(`^tenants/${ID}/pool/chains/${ID}:ack$`),
+  new RegExp(`^tenants/${ID}/servers/${ID}/pool-policy$`),
+  new RegExp(`^tenants/${ID}/accounts/${ID}/pool:(pin|unpin|hold|release)$`),
 ];
 
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PATCH', 'DELETE']);
