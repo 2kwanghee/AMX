@@ -94,7 +94,14 @@ type Bridge interface {
 	// scheduler. Distinct from the engine lock (which serializes AMA-internal
 	// mutations); the flock coordinates AMA with the separate runner processes and
 	// is process-associated, so an AMA crash releases it automatically.
-	DeliverLock(ctx context.Context) func() error
+	//
+	// The second return reports fail-open: true means the bounded acquisition gave
+	// up (the lock was held past the wait bound, or an unexpected lock error) and
+	// the deliver is proceeding WITHOUT the cross-process lock — the over-charge
+	// window B1a only narrows is left open. false means the lock was taken, or
+	// locking is not applicable (no config home). The caller surfaces the fail-open
+	// so the server can see the deliver ran unprotected.
+	DeliverLock(ctx context.Context) (release func() error, failOpen bool)
 }
 
 // ListResult mirrors the pool `list --json` payload (json_output schema v1).

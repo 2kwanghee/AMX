@@ -490,7 +490,7 @@ type blockingLockBridge struct {
 	once        sync.Once
 }
 
-func (b *blockingLockBridge) DeliverLock(ctx context.Context) func() error {
+func (b *blockingLockBridge) DeliverLock(ctx context.Context) (func() error, bool) {
 	b.once.Do(func() { close(b.lockStarted) })
 	<-b.lockRelease
 	return b.Fake.DeliverLock(ctx)

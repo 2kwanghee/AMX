@@ -204,31 +204,31 @@ func (b *ExecBridge) lockConfigHome() string {
 // a no-op release so the deliver proceeds WITHOUT it (fail-open, availability
 // first). It therefore never blocks the engine, and every path returns a usable
 // release (never nil), so the caller can always defer it.
-func (b *ExecBridge) DeliverLock(ctx context.Context) func() error {
+func (b *ExecBridge) DeliverLock(ctx context.Context) (func() error, bool) {
 	noop := func() error { return nil }
 	configDir := b.lockConfigHome()
 	if configDir == "" {
-		return noop
+		return noop, false // no lock configured: not a contention fail-open
 	}
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return noop // fail-open: cannot create the home, proceed unlocked
+		return noop, false // cannot create the home: setup failure, not a timeout
 	}
 	lockPath := filepath.Join(configDir, deliverLockName)
 	deadline := time.Now().Add(b.lockMaxWait())
 	for {
 		lock, lockErr := fslock.TryLock(lockPath)
 		if lockErr == nil {
-			return lock.Unlock
+			return lock.Unlock, false
 		}
 		if !errors.Is(lockErr, fslock.ErrWouldBlock) {
-			return noop // unexpected lock failure: fail-open
+			return noop, true // unexpected lock failure: fail-open, unprotected
 		}
 		if time.Now().After(deadline) {
-			return noop // could not acquire within the bound: fail-open
+			return noop, true // held past the bound: fail-open, unprotected
 		}
 		select {
 		case <-ctx.Done():
-			return noop
+			return noop, false // cancelled, not a contention timeout
 		case <-time.After(deliverLockRetryInterval):
 		}
 	}

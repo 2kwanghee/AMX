@@ -338,9 +338,12 @@ func TestDeliverLockExclusive(t *testing.T) {
 	b := newTestBridge(t)
 	ctx := context.Background()
 
-	release := b.DeliverLock(ctx)
+	release, failOpen := b.DeliverLock(ctx)
 	if release == nil {
 		t.Fatal("DeliverLock must always return a non-nil release")
+	}
+	if failOpen {
+		t.Fatal("uncontended acquire: failOpen must be false")
 	}
 	// Independently probe the same lock file with a non-blocking attempt: it must
 	// currently be held (ErrWouldBlock).

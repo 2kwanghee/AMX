@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/crypto"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
@@ -102,8 +103,18 @@ func (h *Handler) handleDeliver(ctx context.Context, cmd *amxv1.AmsCommand, d *a
 	// scheduler tick plus every other command keep running (the engine can never
 	// freeze). The lock wraps the engine-locked swap below and, because it is
 	// deferred first, is released AFTER h.engine.Unlock on return.
-	releaseLock := br.DeliverLock(ctx)
+	releaseLock, lockFailOpen := br.DeliverLock(ctx)
 	defer func() { _ = releaseLock() }()
+	if lockFailOpen {
+		// Proceeding WITHOUT the cross-process deliver lock: a runner may read a
+		// half-swapped/momentarily-new credential (over-charge window B1a only
+		// narrows). Warn locally and mark the ack so the server sees the deliver ran
+		// unprotected. Deferred so the marker survives whatever final ack (converged
+		// or a later diverged/reject) handleDeliver builds — the same ack pointer is
+		// always returned.
+		log.Printf("deliver %s: proceeding WITHOUT cross-process deliver lock (fail-open); over-charge window left open", amsID)
+		defer markDeliverLockTimeout(ack)
+	}
 
 	// Engine lock (R3): the whole deliver critical section is serialized against
 	// the scheduler tick and other mutating commands (design decision 4).

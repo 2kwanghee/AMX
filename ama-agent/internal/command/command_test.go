@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,6 +162,32 @@ func TestDeliverConverges(t *testing.T) {
 	}
 	if _, ok := hn.store.Get("acc-1"); !ok {
 		t.Fatal("manifest record missing after deliver")
+	}
+}
+
+// TestDeliverLockFailOpenMarksAck: when the cross-process deliver lock fails open
+// (bounded acquisition gives up), the deliver still converges, but the ack carries
+// the deliver_lock_timeout marker in detail so the server can see it ran without
+// the lock. Convergence is unaffected — the marker is diagnostic only.
+func TestDeliverLockFailOpenMarksAck(t *testing.T) {
+	hn := newHarness(t)
+	hn.fake.DeliverLockFailOpen = true
+	ack := hn.apply(t, hn.deliverCmd(t, "d1", "acc-1", "a@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if ack.Convergence != amxv1.CommandAck_CONVERGENCE_CONVERGED {
+		t.Fatalf("deliver convergence = %v detail=%q, want CONVERGED", ack.Convergence, ack.Detail)
+	}
+	if !strings.Contains(ack.Detail, deliverLockTimeoutMarker) {
+		t.Fatalf("ack detail = %q, want it to carry %q", ack.Detail, deliverLockTimeoutMarker)
+	}
+	if !hn.fake.Has("a@x.io") {
+		t.Fatal("account not added despite fail-open (deliver must still proceed)")
+	}
+
+	// Control: with the lock acquired normally, no marker leaks into the ack.
+	hn.fake.DeliverLockFailOpen = false
+	ack2 := hn.apply(t, hn.deliverCmd(t, "d2", "acc-2", "b@x.io", amxv1.AllocationStatus_ALLOCATION_STATUS_ACTIVE, ""))
+	if strings.Contains(ack2.Detail, deliverLockTimeoutMarker) {
+		t.Fatalf("marker leaked with lock held: detail = %q", ack2.Detail)
 	}
 }
 

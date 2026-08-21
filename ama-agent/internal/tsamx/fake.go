@@ -44,6 +44,10 @@ type Fake struct {
 	ConfigErr error
 	// StatePath is returned by AutoStatePath (test seeding for the watcher).
 	StatePath string
+	// DeliverLockFailOpen, when set, makes DeliverLock report fail-open (the
+	// bounded acquisition gave up), so tests can exercise the handler's fail-open
+	// warning + ack marker without a real contended flock.
+	DeliverLockFailOpen bool
 	// quarantine is number->email, returned by ReadQuarantine.
 	quarantine map[string]string
 }
@@ -301,17 +305,20 @@ func (f *Fake) ReadQuarantine(_ context.Context) (map[string]string, error) {
 
 // DeliverLock records the call and returns a no-op release. The Fake models no
 // real config home, so there is no cross-process lock to take; tests assert the
-// call ordering (lock is taken around the swap) via the call log.
-func (f *Fake) DeliverLock(_ context.Context) func() error {
+// call ordering (lock is taken around the swap) via the call log. The second
+// return echoes DeliverLockFailOpen so a test can drive the handler's fail-open
+// path (warning + ack marker) without a real contended flock.
+func (f *Fake) DeliverLock(_ context.Context) (func() error, bool) {
 	f.mu.Lock()
 	f.log("deliver_lock")
+	failOpen := f.DeliverLockFailOpen
 	f.mu.Unlock()
 	return func() error {
 		f.mu.Lock()
 		f.log("deliver_unlock")
 		f.mu.Unlock()
 		return nil
-	}
+	}, failOpen
 }
 
 // --- test helpers -----------------------------------------------------------

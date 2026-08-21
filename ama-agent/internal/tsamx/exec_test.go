@@ -21,7 +21,10 @@ func TestDeliverLockExclusive(t *testing.T) {
 	dir := t.TempDir()
 	b := &ExecBridge{ConfigDir: dir}
 
-	release := b.DeliverLock(context.Background())
+	release, failOpen := b.DeliverLock(context.Background())
+	if failOpen {
+		t.Fatal("lock was acquired uncontended; failOpen must be false")
+	}
 	lockPath := filepath.Join(dir, deliverLockName)
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("lock file not created: %v", err)
@@ -64,11 +67,14 @@ func TestDeliverLockFailOpen(t *testing.T) {
 
 	b := &ExecBridge{ConfigDir: dir, LockMaxWait: 150 * time.Millisecond}
 	start := time.Now()
-	release := b.DeliverLock(context.Background())
+	release, failOpen := b.DeliverLock(context.Background())
 	elapsed := time.Since(start)
 
 	if release == nil {
 		t.Fatal("DeliverLock returned a nil release (must always be usable)")
+	}
+	if !failOpen {
+		t.Fatal("held past the bound: DeliverLock must report failOpen=true")
 	}
 	if elapsed < 100*time.Millisecond {
 		t.Fatalf("DeliverLock returned too fast (%v) — did it wait out the bound?", elapsed)
@@ -98,8 +104,11 @@ func TestDeliverLockDefaultsToClaudeHome(t *testing.T) {
 	// ConfigDir empty -> must fall back to the driver's conventional home
 	// (claude: ~/.claude). Fallback now lives in Driver.DefaultConfigHome.
 	b := &ExecBridge{Driver: claude.New()}
-	release := b.DeliverLock(context.Background())
+	release, failOpen := b.DeliverLock(context.Background())
 	defer release()
+	if failOpen {
+		t.Fatal("uncontended acquire under ~/.claude: failOpen must be false")
+	}
 
 	lockPath := filepath.Join(home, ".claude", deliverLockName)
 	if _, err := os.Stat(lockPath); err != nil {
@@ -112,9 +121,12 @@ func TestDeliverLockDefaultsToClaudeHome(t *testing.T) {
 func TestDeliverLockNoHomeIsNoop(t *testing.T) {
 	t.Setenv("HOME", "")
 	b := &ExecBridge{}
-	release := b.DeliverLock(context.Background())
+	release, failOpen := b.DeliverLock(context.Background())
 	if release == nil {
 		t.Fatal("release must never be nil")
+	}
+	if failOpen {
+		t.Fatal("no lock configured is not a contention fail-open; failOpen must be false")
 	}
 	if err := release(); err != nil {
 		t.Fatalf("no-op release err: %v", err)
