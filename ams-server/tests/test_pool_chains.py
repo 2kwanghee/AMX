@@ -681,3 +681,144 @@ def test_chain_tenant_isolation(app_env, client):
     with _db() as db:
         assert db.get(Server, server_a).tenant_id == tenant_a
     assert _chain(chain.id).step == "deliver"
+
+
+# -- 단계 시계는 재발행으로 되감기지 않는다 -----------------------------------
+def test_redelivery_does_not_rewind_the_step_clock(app_env):
+    """명령 outbox 의 되돌림 주기가 단계 제한 시간보다 짧아도 무한 재발행이 아니다.
+
+    ack 없는 ``sent`` 는 최대 5회 재큐잉되다 실패로 접히고 배정이 ``pending`` 으로
+    되돌아온다. 컨트롤러는 그 ``pending`` 을 보고 전달을 다시 내는데, 그때 단계
+    시계까지 되감기면 그 단계는 만료에 영영 닿지 못하고 계속 재발행만 한다.
+    """
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", AUTO)
+    account_id = _account(tenant_id, "redeliver@x.example.com")
+    _observe(tenant_id, server_id, "redeliver@x.example.com", five=1, seven=1)
+
+    chain = _start(_build(tenant_id)[0].id)
+    first_clock = _chain(chain.id).step_started_at
+    assignment = _assignment_of(tenant_id, account_id)
+    assert assignment.state == "delivering"
+
+    # outbox 가 명령을 접고 배정을 pending 으로 되돌린 상태를 만든다.
+    with _db() as db:
+        command = db.scalars(
+            select(AgentCommand).where(AgentCommand.command_type == "deliver")
+        ).one()
+        command.status = "failed"
+        target = db.get(Assignment, assignment.id)
+        target.state = "pending"
+        target.pending_command_id = None
+        db.commit()
+
+    assert _advance() == 1  # 전달을 다시 낸다
+    assert len(_commands(tenant_id, "deliver")) == 2
+    assert _chain(chain.id).step == "deliver"
+    # 단계 시계는 그대로다. updated_at 은 감사용이라 움직인다.
+    assert _chain(chain.id).step_started_at == first_clock
+    assert _chain(chain.id).updated_at > first_clock
+
+    # 그래서 제한 시간이 지나면 확실히 접힌다.
+    assert _advance(now=_now() + timedelta(minutes=11)) == 1
+    assert _chain(chain.id).step == "failed"
+    assert "제한 시간" in _chain(chain.id).error
+
+
+def test_chain_lifetime_cap_fails_a_slow_walker(app_env):
+    """단계마다 조금씩 전진하며 몇 시간을 사는 체인도 결국 접힌다."""
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", AUTO)
+    _account(tenant_id, "slowwalk@x.example.com")
+    _observe(tenant_id, server_id, "slowwalk@x.example.com", five=1, seven=1)
+
+    chain = _start(_build(tenant_id)[0].id)
+    # 단계는 방금 시작했지만 체인 자체는 두 시간째다.
+    with _db() as db:
+        row = db.get(PoolChain, chain.id)
+        row.started_at = _now() - timedelta(hours=2)
+        row.step_started_at = _now()
+        db.commit()
+
+    assert _advance() == 1
+    failed = _chain(chain.id)
+    assert failed.step == "failed"
+    assert "수명 상한" in failed.error
+
+
+def test_switch_is_never_issued_twice(app_env):
+    """command_id 를 못 적은 창에서도 전환은 한 번만 나간다.
+
+    ``request_switch_now`` 가 스스로 커밋하므로 "명령은 나갔는데 체인이 그
+    command_id 를 적기 전"이라는 창이 원리적으로 있다. 다음 틱은 새로 내는 대신
+    이미 나간 것을 채택해야 한다 — 전환을 두 번 실행하면 계정이 왕복한다.
+    """
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", AUTO)
+    account_id = _account(tenant_id, "once@x.example.com")
+    _observe(tenant_id, server_id, "once@x.example.com", five=1, seven=1)
+
+    chain = _start(_build(tenant_id)[0].id)
+    _set_assignment_state(_assignment_of(tenant_id, account_id).id, "active")
+    _advance()  # deliver -> switch
+    _advance()  # switch_now 발행
+    assert len(_commands(tenant_id, "switch_now")) == 1
+
+    # 커밋 직후 프로세스가 죽어 command_id 를 못 적은 상태를 만든다.
+    with _db() as db:
+        db.get(PoolChain, chain.id).command_id = None
+        db.commit()
+
+    assert _advance() == 1
+    assert len(_commands(tenant_id, "switch_now")) == 1  # 두 번째는 없다
+    assert _chain(chain.id).command_id == _commands(tenant_id, "switch_now")[0].command_id
+
+
+def test_database_refuses_a_second_active_chain_on_one_server(app_env):
+    """서버당 1체인은 코드 판단이 아니라 스키마가 보장한다."""
+    from sqlalchemy.exc import IntegrityError
+
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", AUTO)
+    _account(tenant_id, "dup@x.example.com")
+    _observe(tenant_id, server_id, "dup@x.example.com", five=1, seven=1)
+    _start(_build(tenant_id)[0].id)
+
+    with _db() as db:
+        db.add(
+            PoolChain(
+                tenant_id=tenant_id,
+                server_id=server_id,
+                kind="lease",
+                step="deliver",
+                actor="op@x.example.com",
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError("두 번째 활성 체인이 삽입됐다")
+
+    # 끝난 체인은 몇 개가 쌓여도 막지 않는다.
+    with _db() as db:
+        db.add(
+            PoolChain(
+                tenant_id=tenant_id,
+                server_id=server_id,
+                kind="lease",
+                step="done",
+                actor="op@x.example.com",
+            )
+        )
+        db.add(
+            PoolChain(
+                tenant_id=tenant_id,
+                server_id=server_id,
+                kind="lease",
+                step="failed",
+                actor="op@x.example.com",
+            )
+        )
+        db.commit()

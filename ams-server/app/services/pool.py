@@ -32,6 +32,7 @@ from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -1342,12 +1343,16 @@ def _chain_detail(chain: PoolChain, **extra) -> dict:
 def _touch(db: Session, chain: PoolChain, *, step: str, now: datetime, **detail) -> bool:
     """체인을 다음 단계로 옮기고 감사 한 줄을 남긴다. 항상 True(무언가 일어났다).
 
-    ``updated_at`` 은 **단계가 실제로 바뀔 때만** 움직인다. 그래야 단계 타임아웃이
-    "이 단계에 들어온 뒤 흐른 시간"을 뜻한다 — 같은 단계 안에서 명령을 발행할 때마다
-    시계를 다시 감으면, 한 단계가 제한 시간의 두 배를 쓰고도 만료되지 않는다.
+    ``step_started_at`` 은 **단계가 실제로 바뀔 때만** 움직인다. 그래야 단계
+    타임아웃이 "이 단계에 들어온 뒤 흐른 시간"을 뜻한다. 같은 단계 안의 재발행이
+    시계를 되감으면 그 단계는 만료에 영영 닿지 못한다 — 명령 outbox 가 ack 없는
+    ``sent`` 를 재큐잉하다 실패로 접고 배정을 ``pending`` 으로 되돌리면 컨트롤러가
+    전달을 다시 내므로, 그 되돌림 주기가 단계 제한 시간보다 짧으면 무한 재발행이다.
+    ``updated_at`` 은 감사용이라 매번 움직인다.
     """
     if chain.step != step:
-        chain.updated_at = now
+        chain.step_started_at = now
+    chain.updated_at = now
     chain.step = step
     record_event(
         db,
@@ -1480,7 +1485,24 @@ def _fail(db: Session, chain: PoolChain, reason: str, *, now: datetime, **detail
 
 
 def _expired(chain: PoolChain, now: datetime) -> bool:
-    return now - (_aware(chain.updated_at) or now) >= _chain_timeout()
+    """지금 단계가 제한 시간을 넘겼는가."""
+    started = _aware(chain.step_started_at) or _aware(chain.updated_at) or now
+    return now - started >= _chain_timeout()
+
+
+def _over_lifetime(chain: PoolChain, now: datetime) -> bool:
+    """체인 전체가 절대 수명을 넘겼는가.
+
+    단계 타임아웃은 "한 단계가 멈췄다"를 잡는다. 단계 사이를 느리게 오가며 계속
+    살아 있는 체인 — 전달이 재큐잉되고, 전환이 늦게 붙고, 회수가 또 늦는 식으로
+    매번 시계를 갱신하는 체인 — 은 그 그물을 빠져나가면서 그 서버를 몇 시간씩
+    점유한다. 총 시간에도 상한을 둔다.
+    """
+    minutes = get_settings().pool_chain_max_minutes
+    if minutes <= 0:
+        return False
+    started = _aware(chain.started_at) or now
+    return now - started >= timedelta(minutes=minutes)
 
 
 def _deliver_already_issued(db: Session, chain: PoolChain) -> bool:
@@ -1574,6 +1596,18 @@ def _advance_switch(db: Session, chain: PoolChain, now: datetime) -> bool:
         return _fail(db, chain, f"전환 대상 배정이 설치 상태가 아니다: {state}", now=now)
 
     if chain.command_id is None:
+        # 이 단계에 들어온 뒤 이미 나간 switch_now 가 있으면 그것을 채택한다.
+        # ``request_switch_now`` 가 스스로 커밋하므로 "명령은 나갔는데 체인이 그
+        # command_id 를 못 적은" 창이 원리적으로 존재한다 — 다음 틱이 그 창을 보고
+        # 또 내면 전환이 두 번 실행된다. 발행 전에 먼저 찾아보는 것으로 그 창을 닫는다.
+        existing = _newest_switch_command(db, assignment.id)
+        if existing is not None and _aware(existing.created_at) >= (
+            _aware(chain.step_started_at) or _aware(chain.started_at) or now
+        ):
+            chain.command_id = existing.command_id
+            return _touch(
+                db, chain, step="switch", now=now, command_id=existing.command_id, adopted=True
+            )
         commands.request_switch_now(db, chain.tenant_id, assignment.id)
         issued = _newest_switch_command(db, assignment.id)
         if issued is None:  # pragma: no cover - enqueue 가 항상 한 줄을 남긴다
@@ -1651,6 +1685,13 @@ def advance_chain(db: Session, chain: PoolChain, *, now: datetime | None = None)
     handler = _STEP_HANDLERS.get(chain.step)
     if handler is None:
         return False
+    if _over_lifetime(chain, stamp):
+        return _fail(
+            db,
+            chain,
+            f"체인 수명 상한({get_settings().pool_chain_max_minutes}분) 초과",
+            now=stamp,
+        )
     return handler(db, chain, stamp)
 
 
@@ -1704,6 +1745,16 @@ def start_chain(
     stamp = _aware(now) or _now()
     tenant_id = recommendation.tenant_id
     server_id = recommendation.server_id
+
+    # 착수 판단(조회)과 삽입은 같은 락 아래에 있어야 한다. 스윕이 이미 이 락을 들고
+    # 있으면 같은 트랜잭션에서 재획득되므로 자동 경로는 그대로 통과한다. 사람이 누른
+    # 요청이 스윕과 겹치면 잠깐 물러나게 하는 편이, 두 계획이 같은 서버에서 엇갈리는
+    # 것보다 낫다 — 최종 보장은 uq_pool_chains_active_server 가 한다.
+    if not _try_advisory_xact_lock(db, _POOL_CHAIN_LOCK_KEY):
+        raise conflict(
+            "pool.controller_busy",
+            "풀 컨트롤러가 지금 이 테넌트를 처리 중이다. 잠시 뒤 다시 실행하라.",
+        )
 
     if active_chain_for_server(db, server_id) is not None:
         raise conflict(
@@ -1790,10 +1841,20 @@ def start_chain(
         step=first_step,
         actor=actor,
         started_at=stamp,
+        step_started_at=stamp,
         updated_at=stamp,
     )
     db.add(chain)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # uq_pool_chains_active_server: 조회와 삽입 사이에 다른 인스턴스가 먼저
+        # 잡았다. 협조적 락이 놓친 경합을 스키마가 잡은 것이므로 평범한 409 다.
+        db.rollback()
+        raise conflict(
+            "pool.chain_active",
+            "이 서버에는 이미 실행 중인 체인이 있다. 끝나기를 기다려라.",
+        ) from exc
     record_event(
         db,
         tenant_id=tenant_id,
@@ -1915,6 +1976,13 @@ def start_auto_chains(db: Session, *, now: datetime | None = None) -> int:
             if fresh is None or not _auto_eligible(db, fresh, tenant_id):
                 db.commit()
                 continue
+            # 상한은 착수 직전에 DB 로 다시 센다. 루프 변수 ``running`` 은 이
+            # 인스턴스가 이번 틱에 만든 것만 알고, 그 사이 다른 인스턴스나 운영자
+            # 요청이 체인을 더 열었을 수 있다 — 상한은 사고 반경을 묶는 장치라
+            # 낙관적으로 세면 의미가 없다.
+            if _auto_chain_count(db, tenant_id) >= cap:
+                db.commit()
+                break
             try:
                 start_chain(db, fresh, actor=POOL_CONTROLLER_ACTOR, now=stamp)
             except ApiError:

@@ -176,6 +176,10 @@ class Settings:
     # 보고 지운다. 0 이하면 purge 비활성(영구 보존).
     pool_event_retention_days: int = 90
     pool_chain_step_timeout_minutes: int = 10
+    # 체인 하나의 절대 수명. 단계 타임아웃은 "한 단계가 멈췄다"를 잡지만, 단계 사이를
+    # 느리게 오가며 계속 살아 있는 체인은 잡지 못한다. 그런 체인은 그 서버를 계속
+    # 점유하므로 총 시간으로도 상한을 둔다.
+    pool_chain_max_minutes: int = 60
     # 한 테넌트에서 컨트롤러가 동시에 돌릴 수 있는 자동 체인 수. 관측이 한꺼번에
     # 틀렸을 때 피해 범위를 묶는 상한이다(운영자가 여는 체인은 세지 않는다).
     pool_max_concurrent_chains: int = 3
@@ -392,6 +396,7 @@ def load_settings() -> Settings:
         pool_chain_step_timeout_minutes=int(
             os.environ.get("AMX_POOL_CHAIN_STEP_TIMEOUT_MINUTES", "10")
         ),
+        pool_chain_max_minutes=int(os.environ.get("AMX_POOL_CHAIN_MAX_MINUTES", "60")),
         pool_max_concurrent_chains=int(
             os.environ.get("AMX_POOL_MAX_CONCURRENT_CHAINS", "3")
         ),

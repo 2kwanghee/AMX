@@ -331,6 +331,9 @@ class PoolChain(Wire):
     step: PoolChainStep
     error: str | None = None
     started_at: datetime
+    # 지금 단계가 시작된 때 — 단계 타임아웃까지 얼마나 남았는지를 콘솔이 그리려면
+    # updated_at 으로는 안 된다(같은 단계의 재발행에도 움직인다). 계약 밖 추가분.
+    step_started_at: datetime | None = None
     updated_at: datetime
     # 실패한 체인을 운영자가 확인한 시각(:ack). 이것도 계약 밖 추가분이다.
     acked_at: datetime | None = None

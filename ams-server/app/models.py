@@ -1116,6 +1116,14 @@ class PoolChain(Base):
         ),
         Index("ix_pool_chains_tenant_step", "tenant_id", "step"),
         Index("ix_pool_chains_server_step", "server_id", "step"),
+        # 서버당 활성 체인은 하나. 조회 후 판단만으로는 조회와 삽입 사이의 경합을
+        # 막지 못한다 — advisory lock 은 협조적이고 이 인덱스는 그렇지 않다.
+        Index(
+            "uq_pool_chains_active_server",
+            "server_id",
+            unique=True,
+            postgresql_where=text("step NOT IN ('done','failed')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -1147,6 +1155,12 @@ class PoolChain(Base):
         DateTime(timezone=True), nullable=True
     )
     started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # 지금 단계가 시작된 때. 단계 타임아웃의 기준이며 단계가 실제로 바뀔 때만
+    # 움직인다 — updated_at 은 같은 단계 안의 재발행에도 움직이므로 기준이 될 수
+    # 없다(그러면 재발행이 시계를 되감아 그 단계가 영영 만료되지 않는다).
+    step_started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
