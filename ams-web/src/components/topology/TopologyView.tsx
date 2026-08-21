@@ -10,13 +10,16 @@ import type {
   AlertPage,
   Assignment,
   AssignmentPage,
+  PoolOverview,
   ServerPage,
   TenantPage,
 } from '@/lib/api-client/types';
 import { accountWindows } from '@/lib/usage-format';
+import { groupAccountsByLane } from '@/lib/pool';
 import { currentActiveByServer } from '../AssignmentsPanel';
 import { Icon, krLabel, markDataArrived, Modal, useAction } from '../common';
 import { AccountNode } from './AccountNode';
+import { PoolLanes } from './PoolLaneChip';
 import { ServerNode } from './ServerNode';
 import { StatBar, type StatKey } from './StatBar';
 import { TenantNode } from './TenantNode';
@@ -47,6 +50,13 @@ const BAND_TOP = 2 * GRID; // 밴드 라벨 아래 첫 노드 y
 const SERV_STEP = 7 * GRID; // 서버 노드 세로 간격(168px)
 const ACC_STEP = 3 * GRID; // 계정 노드 세로 간격(72px)
 const CANVAS_PAD = 2 * GRID; // 캔버스 하단 여백
+// 계정 풀 레인 — 계정 열 오른쪽에 세로 박스 2개(충전중·배급처). POOL_X는 계정 열
+// 오른쪽 96px. LANE_GAP은 PoolLaneChip.tsx의 .topo-pool-lanes gap과 같아야 한다.
+const POOL_X = ACCOUNT_X + NODE_W + 4 * GRID; // 744
+const LANE_W = 9 * GRID; // 216 (≈ NODE_W)
+const LANE_GAP = 2 * GRID; // 48
+const LANE_TOP = 8; // 밴드 라벨과 대략 정렬
+const POOL_RIGHT = POOL_X + 2 * LANE_W + LANE_GAP + CANVAS_PAD; // 레인 포함 캔버스 우측 끝
 const FREE_MIN = 900; // 이 폭 미만이면 자동 배치(현행 grid) 폴백
 const LAYOUT_VERSION = 1;
 // 미측정 노드 기본 크기(높이 추정) — 첫 렌더/드롭 겹침 검사 폴백.
@@ -122,6 +132,13 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     refreshInterval: 7000,
     onSuccess: () => markDataArrived(),
   });
+  // 계정 풀 개요 — PoolPanel과 SWR 키·주기를 공유해 캐시를 재사용한다. 첫 로딩
+  // 전에는 레인을 그리지 않고, 이후 폴링 실패 시엔 마지막 데이터로 유지한다.
+  const { data: poolData } = useSWR<PoolOverview>(
+    ['pool', tenantId],
+    () => api.getPoolOverview(tenantId),
+    { refreshInterval: 30000 },
+  );
 
   const servers = serversData?.items ?? [];
   const accounts = accountsData?.items ?? [];
@@ -198,6 +215,10 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const [dragging, setDragging] = useState<Dragging>(null);
   const [freeMode, setFreeMode] = useState(false);
   const [canvasH, setCanvasH] = useState(0);
+  // 레인 영역 높이 측정 — 노드 높이(canvasH)와 별개로 캔버스 최소 높이에 반영해
+  // 레인이 노드보다 길어도 하단이 잘리지 않게 한다.
+  const laneRef = useRef<HTMLDivElement | null>(null);
+  const [laneBottom, setLaneBottom] = useState(0);
   const draggingRef = useRef<Dragging>(null);
   const suppressClickRef = useRef(false);
   // 측정된 노드 크기(px) — 겹침 검사·캔버스 높이 계산에 사용. measure()에서 갱신.
@@ -517,12 +538,35 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
     setConnect({ accountId, serverId });
   }
 
+  // 레인 데이터 — 개요가 한 번이라도 로드됐고 자유 배치일 때 그린다. 이후 폴링이
+  // 일시 실패해도 SWR이 쥔 마지막 데이터로 유지해, 30초마다 레인이 깜빡이지 않는다.
+  const poolLanes = poolData ? groupAccountsByLane(poolData.accounts) : null;
+  const showLanes = freeMode && poolLanes !== null;
+  const poolKey = poolLanes
+    ? poolLanes.cooling.map((a) => a.accountId).join(',') + '#' + poolLanes.ready.map((a) => a.accountId).join(',')
+    : '';
+
+  // 레인 컨테이너 하단(offsetTop+높이)을 측정해 캔버스 최소 높이에 더한다.
+  useLayoutEffect(() => {
+    const el = laneRef.current;
+    if (!el) {
+      setLaneBottom(0);
+      return;
+    }
+    const update = () => setLaneBottom(el.offsetTop + el.offsetHeight + CANVAS_PAD);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showLanes, poolKey]);
+
   const hasContent = servers.length > 0 || accounts.length > 0;
   const selectedEdge = aEdges.find((e) => e.id === selected);
   const selectedAssignment = assignments.find((a) => a.id === selected);
 
   return (
-    <div className="topo-canvas" onPointerDown={() => setSelected(null)}>
+    <div className={`topo-canvas${showLanes ? ' topo-has-lanes' : ''}`} onPointerDown={() => setSelected(null)}>
       <StatBar
         onlineServers={servers.filter((s) => s.status === 'online').length}
         totalServers={servers.length}
@@ -583,9 +627,21 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
 
           {freeMode ? (
             // 자유 배치: 서버·계정 노드를 캔버스에 absolute로 배치. 좌표는 JS 상태 소유.
-            <div className="topo-canvas-area" ref={canvasRef} style={{ minHeight: canvasH || undefined }}>
+            <div
+              className="topo-canvas-area"
+              ref={canvasRef}
+              style={{
+                minHeight: Math.max(canvasH, showLanes ? laneBottom : 0) || undefined,
+                minWidth: showLanes ? POOL_RIGHT : undefined,
+              }}
+            >
               <div className="topo-band-label" style={{ left: SERVER_X }}>서버 <span className="topo-col-count">{orderedServers.length}</span></div>
               <div className="topo-band-label" style={{ left: ACCOUNT_X }}>계정 <span className="topo-col-count">{orderedAccounts.length}</span></div>
+              {showLanes && poolLanes && (
+                <div className="topo-pool-lanes" ref={laneRef} style={{ left: POOL_X, top: LANE_TOP }}>
+                  <PoolLanes cooling={poolLanes.cooling} ready={poolLanes.ready} laneWidth={LANE_W} />
+                </div>
+              )}
               {orderedServers.map((s) => {
                 const key = `srv:${s.id}`;
                 const p = effectivePos(key);
