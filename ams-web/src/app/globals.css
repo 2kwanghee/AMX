@@ -804,25 +804,108 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-srv-active { border-top: 1px solid var(--canvas-border); padding-top: 9px; min-height: 20px; }
 .topo-srv-idle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--canvas-muted); }
 
-/* 대기 풀 */
-.topo-pool {
-  margin-top: 18px; padding: 14px 14px 15px;
-  background: var(--canvas-bg-3); border: 1px dashed var(--canvas-border); border-radius: 13px;
+/* 계정 풀 레인 — 계정 열 오른쪽 세로 박스 2개(충전중·배급처). 자유 배치 캔버스에
+   absolute 배치되며 좌표는 TopologyView가 인라인으로 준다. gap은 LANE_GAP과 일치. */
+.topo-pool-lanes { position: absolute; display: flex; gap: 48px; z-index: 1; }
+.topo-pool-lane {
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 10px 11px 12px; border-radius: 13px;
+  background: color-mix(in srgb, var(--canvas-bg-3) 82%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--canvas-accent) 40%, var(--canvas-border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--canvas-accent) 8%, transparent);
 }
-.topo-pool-head {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 11px;
-  font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--canvas-muted);
+.topo-pool-lane-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 2px;
 }
-.topo-pool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 9px; }
+.topo-pool-lane-title {
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--canvas-ink-strong); font-weight: 700;
+}
+.topo-pool-cards { display: flex; flex-direction: column; gap: 8px; }
+.topo-pool-empty { font-size: 11px; color: var(--canvas-muted); padding: 6px 2px; }
+
+/* 계정 칩 — 로봇 아바타 + 이메일 / 서브텍스트. 충전중 칩은 하단 게이지·맥동 점·툴팁. */
+.topo-pool-chip {
+  position: relative; display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px 9px; border-radius: 10px; overflow: visible;
+  background: var(--canvas-bg-2); border: 1px solid var(--canvas-border);
+  cursor: default; transition: border-color .12s, box-shadow .12s;
+}
+.topo-pool-chip:hover, .topo-pool-chip:focus-visible {
+  border-color: var(--canvas-accent); box-shadow: 0 4px 16px rgb(0 0 0 / .28); outline: none; z-index: 8;
+}
+.topo-pool-chip-avatar {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 999px;
+  background: var(--canvas-bg-3); box-shadow: inset 0 0 0 1px var(--canvas-border); color: var(--canvas-muted);
+}
+.topo-pool-chip.claude .topo-pool-chip-avatar { color: var(--canvas-accent); }
+.topo-pool-chip.codex .topo-pool-chip-avatar { color: var(--canvas-indigo); }
+.topo-pool-chip-body { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.topo-pool-chip-email {
+  font-size: 12px; font-weight: 600; color: var(--canvas-ink-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topo-pool-chip-sub {
+  font-size: 10px; letter-spacing: .02em; color: var(--canvas-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 우상단 맥동 점 — 충전중만. reduced-motion 시 정지(아래 블록). */
+.topo-pool-chip-pulse {
+  position: absolute; top: -3px; right: -3px; width: 9px; height: 9px;
+  border-radius: 999px; background: var(--canvas-warn); color: var(--canvas-warn);
+  animation: topo-pulse 1.8s ease-in-out infinite;
+}
+/* 하단 충전 게이지 — 흐르는 그라데이션. 완료(done)면 ok 톤 고정. */
+.topo-pool-gauge {
+  position: absolute; left: 8px; right: 8px; bottom: 3px; height: 3px;
+  border-radius: 999px; background: var(--canvas-bg-3); overflow: hidden;
+}
+.topo-pool-gauge-fill {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--canvas-warn) 35%, transparent),
+    var(--canvas-warn),
+    color-mix(in srgb, var(--canvas-warn) 35%, transparent));
+  background-size: 200% 100%;
+  animation: topo-pool-flow 1.8s linear infinite;
+  transition: width var(--m-base) var(--ease-out);
+}
+.topo-pool-gauge.done .topo-pool-gauge-fill { background: var(--canvas-ok); animation: none; }
+@keyframes topo-pool-flow { from { background-position: 200% 0; } to { background-position: 0 0; } }
+
+/* 호버·포커스 툴팁 — .topo-srv-detail 패턴. 칩 아래(기본)·위(flip) 표출. */
+.topo-pool-tip {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 9;
+  padding: 8px 10px; background: var(--canvas-bg-2);
+  border: 1px solid var(--canvas-accent); border-radius: 9px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / .45);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity .12s, transform .12s, visibility .12s; pointer-events: none;
+}
+.topo-pool-chip.flip .topo-pool-tip { top: auto; bottom: calc(100% + 6px); transform: translateY(4px); }
+.topo-pool-chip:hover .topo-pool-tip, .topo-pool-chip:focus-visible .topo-pool-tip {
+  opacity: 1; visibility: visible; transform: translateY(0);
+}
+.topo-pool-tip-head { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--canvas-muted); margin-bottom: 6px; }
+.topo-pool-tip-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11.5px; color: var(--canvas-ink); }
+.topo-pool-tip-row + .topo-pool-tip-row { margin-top: 3px; }
+.topo-pool-tip-row .mono { font-family: var(--mono); color: var(--canvas-ink-strong); font-variant-numeric: tabular-nums; }
+.topo-pool-tip-row.muted { color: var(--canvas-muted); }
+
+/* 레인이 있으면 캔버스를 가로 스크롤 허용(세로는 기존대로 잘림 없음). */
+.topo-canvas.topo-has-lanes { overflow: auto hidden; }
 
 @media (prefers-reduced-motion: reduce) {
   .topo-flow { animation: none; opacity: 0; }
   .topo-edge.pending { animation: none; }
   .topo-canvas .topo-stat:hover, .topo-canvas .topo-node:hover { transform: none; }
   /* 맥동 정지 — 애니메이션이 그리던 링을 정적 링으로 대체해 상태 표시는 유지. */
-  .topo-srv-led.online, .topo-acc-live {
+  .topo-srv-led.online, .topo-acc-live, .topo-pool-chip-pulse {
     animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent);
   }
+  /* 흐르는 충전 게이지 정지 — 채움 폭은 그대로 유지. */
+  .topo-pool-gauge-fill { animation: none; }
 }
 @media (max-width: 720px) {
   .topo-grid { gap: 48px; }
