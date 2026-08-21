@@ -63,6 +63,11 @@ PROD-GUIDE의 TLS 절로 부족할 때, 인증서를 직접 다루는 사람이 
   DEK·KEK) 설계(P5 S3).
 - **[recovery-architecture.md](design-notes/recovery-architecture.md)** — 운영 안정화 회복 설계
   (D1·D2·C1, 명령 재큐·타임아웃 경보·이벤트 무손실).
+- **[account-pool-automation-plan.md](design-notes/account-pool-automation-plan.md)**: 계정 풀
+  자동 배분(배급처·대여중·충전소) 기획. 상태 머신·스윕·단계별 강도의 배경. 현행 사양은
+  AMX-DESIGN.md §5.8.
+- **[account-pool-api.md](design-notes/account-pool-api.md)**: 계정 풀 REST 계약(개요·권고·
+  체인·정책·상태 조작 엔드포인트).
 
 ## archive/ — 이력 스냅샷
 
