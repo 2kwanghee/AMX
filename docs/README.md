@@ -74,8 +74,6 @@ PROD-GUIDE의 TLS 절로 부족할 때, 인증서를 직접 다루는 사람이 
 완료된 실행 계획과 종료된 인수인계를 보존한다. 현행 작업 지침이 아니라 "그때 이렇게
 정했다"는 기록이라, 새 작업은 BACKLOG.md·AMX-DESIGN.md에서 출발한다.
 
-- **[archive/HANDOFF-langfuse-monitoring.md](archive/HANDOFF-langfuse-monitoring.md)** — Langfuse
-  모니터링 트랙 인수인계(2026-08-15). 관측 기능이 어떤 전제로 넘어왔는지 되짚을 때 본다.
 - **[archive/todo/](archive/todo/)** — 2026-08-09 확정한 잔여 작업 실행 계획의 스냅샷.
   [README](archive/todo/README.md)가 우선순위 ①~④와 완료 판정을 담고, 딸린
   [01-deploy-critical](archive/todo/01-deploy-critical.md)·[02-billing-hardening](archive/todo/02-billing-hardening.md)·[03-ops-stabilization](archive/todo/03-ops-stabilization.md)·[04-low-cost-misc](archive/todo/04-low-cost-misc.md)가
@@ -93,4 +91,5 @@ PROD-GUIDE의 TLS 절로 부족할 때, 인증서를 직접 다루는 사람이 
   발표 자료(정적 HTML, 오프라인 단일 파일, 16장). 구독 한도가 5시간·7일 롤링 윈도우이고 미사용
   용량이 소멸한다는 착안에서 출발해, 실측·라우팅·귀속이라는 설계 결론과 각 서비스를 잇는다.
   `amx-process.html`의 후속 버전이며 최근 강화(자격증명 무효화 방어 체인·경보 14종)까지 반영한다.
-- **cswapGitRepo.txt** — tsamx 원본(claude-swap) 저장소 주소를 적어 둔 한 줄 메모.
+- **claude-swap 원본 저장소** — tsamx의 upstream. `git clone https://github.com/realiti4/claude-swap.git`.
+  개조 내역은 TSAMX-GUIDE, 업스트림 반영 절차는 UPSTREAM-SYNC가 담는다.
