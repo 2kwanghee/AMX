@@ -4,6 +4,7 @@ import type { PointerEvent as ReactPointerEvent, Ref } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import type { Server, UsageSnapshot } from '@/lib/api-client/types';
+import { poolMaxUtilization } from '@/lib/usage-format';
 import { EmailChip, Icon, krLabel, RackGlyph, SwitchModePill } from '../common';
 
 // 게이지 색 임계: 90%↑ crit, 70%↑ warn, 그 외 accent.
@@ -65,7 +66,7 @@ export function ServerNode({
     () => api.getUsage(tenantId, server.id),
     { refreshInterval: 30000, shouldRetryOnError: false },
   );
-  const tokenPct = usage?.payload?.poolSummary?.maxUtilizationPct;
+  const tokenPct = poolMaxUtilization(usage?.payload);
 
   return (
     <button

@@ -39,3 +39,85 @@ export function fmtTokens(n: number): string {
 export function fmtCalls(n: number): string {
   return Number.isFinite(n) ? `${fmtExact(n)}회` : '—';
 }
+
+// -- 사용량 스냅샷 payload 선택 로직 --------------------------------------------
+// GET …/servers/{sid}/usage 의 payload 는 proto UsageReport 를
+// MessageToDict(preserving_proto_field_name=True) 로 저장한 snake_case dict 다
+// (types.ts UsagePayload 주석 참조). 모달 JSX 에 박히면 테스트가 어려워서 키를
+// 읽는 순수 함수를 여기로 뺀다. event-format.ts·fmt* 와 같은 이유다.
+
+import type { UsageAccount, UsagePayload } from '@/lib/api-client/types';
+
+/** 풀 최대 사용률(%). 값이 없으면 undefined 이며 호출부가 표기 폴백을 정한다. */
+export function poolMaxUtilization(p: UsagePayload | undefined): number | undefined {
+  return p?.pool_summary?.max_utilization_pct;
+}
+
+/** 전 계정 소진 여부. MessageToDict 는 false 를 생략하므로 명시적 true 만 참. */
+export function poolAllExhausted(p: UsagePayload | undefined): boolean {
+  return p?.pool_summary?.all_exhausted === true;
+}
+
+/**
+ * proto AllocationStatus enum 이름("ALLOCATION_STATUS_ACTIVE")을 Badge·krLabel 이
+ * 아는 소문자 상태어("active")로 줄인다. 접두어가 없으면 그대로 소문자화한다.
+ */
+export function allocationStatusLabel(raw: string | undefined): string {
+  if (!raw) return '';
+  return raw.replace(/^ALLOCATION_STATUS_/, '').toLowerCase();
+}
+
+// 모달 한 행이 그리는 창. id 는 프로바이더 태그용, windowMinutes 는 라벨용.
+export interface UsageWindowView {
+  key: string;
+  id: string;
+  pct: number | undefined;
+  windowMinutes: number | undefined;
+}
+
+/**
+ * 계정별 표시 창 목록. windows[] 를 우선 쓰고, 비어 있으면 legacy 위치형
+ * five_hour/seven_day 로 폴백한다(P2b 이중 기록 이전 보고 호환). 위치형은 창
+ * 길이가 고정이라 windowMinutes 를 300·10080 으로 채워 라벨이 "5시간"·"7일"로
+ * 떨어지게 한다.
+ */
+export function accountWindows(a: UsageAccount): UsageWindowView[] {
+  const ws = a.windows;
+  if (ws && ws.length > 0) {
+    return ws.map((w, i) => ({
+      key: w.id ?? String(i),
+      id: w.id ?? '',
+      pct: w.pct,
+      windowMinutes: w.window_minutes,
+    }));
+  }
+  const fallback: UsageWindowView[] = [];
+  if (a.five_hour) {
+    fallback.push({ key: 'five_hour', id: 'five_hour', pct: a.five_hour.pct, windowMinutes: 300 });
+  }
+  if (a.seven_day) {
+    fallback.push({ key: 'seven_day', id: 'seven_day', pct: a.seven_day.pct, windowMinutes: 10080 });
+  }
+  return fallback;
+}
+
+// 모달 표의 한 계정 행. 실제 payload 키(account.ams_account_id 등)를 읽어 채운다.
+export interface UsageAccountView {
+  amsAccountId: string | undefined;
+  email: string | undefined;
+  allocationStatus: string;
+  isCurrent: boolean;
+  windows: UsageWindowView[];
+}
+
+/** 계정 항목을 모달 표가 쓰는 형태로 정규화한다. 식별자는 중첩된
+ * account.ams_account_id 에 있다(proto AccountUsage.account = AccountRef). */
+export function usageAccountView(a: UsageAccount): UsageAccountView {
+  return {
+    amsAccountId: a.account?.ams_account_id,
+    email: a.account?.email,
+    allocationStatus: allocationStatusLabel(a.allocation_status),
+    isCurrent: a.is_current === true,
+    windows: accountWindows(a),
+  };
+}
