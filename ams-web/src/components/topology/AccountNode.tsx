@@ -39,7 +39,7 @@ export function AccountNode({
   const sub =
     `${krLabel(provider)} · ${krLabel(status)}` +
     (fiveHourPct != null && !Number.isNaN(fiveHourPct)
-      ? ` · 5h 잔여 ${Math.round(100 - fiveHourPct)}%`
+      ? ` · 5h 잔여 ${Math.max(0, Math.min(100, Math.round(100 - fiveHourPct)))}%`
       : '');
 
   return (
