@@ -159,7 +159,7 @@ export default function Dashboard() {
             <ActivityFeed tenantId={active} />
           </>
         )}
-        {active && tab === 'console' && <TopologyView tenantId={active} onGo={setTab} />}
+        {active && tab === 'console' && <TopologyView tenantId={active} />}
         {active && tab === 'servers' && <ServersPanel tenantId={active} />}
         {active && tab === 'accounts' && <AccountsPanel tenantId={active} />}
         {active && tab === 'assignments' && <AssignmentsPanel tenantId={active} />}

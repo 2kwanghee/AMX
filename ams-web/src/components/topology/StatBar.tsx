@@ -13,22 +13,21 @@ type Stat = {
 };
 
 // 상단 스탯 바 — 온라인 서버 n/m · 활성 할당 n · 최근 1시간 전환 k · 미확인 알림 n.
-// 각 스탯 클릭 시 해당 표 탭으로 이동한다. 우측에 LIVE 펄스 + 마지막 갱신 시각
-// (ConsoleHeader 자산 재사용: useLastDataAt/fmtClock).
+// 통계 표시 전용(클릭해도 이동하지 않는다) — 상황판 안에서 노드·선을 눌러 바로
+// 조작하는 콘솔 모델이라 다른 탭으로 나가는 진입점을 두지 않는다. 우측에
+// LIVE 펄스 + 마지막 갱신 시각(ConsoleHeader 자산 재사용: useLastDataAt/fmtClock).
 export function StatBar({
   onlineServers,
   totalServers,
   activeAssignments,
   switchesLastHour,
   openAlerts,
-  onGo,
 }: {
   onlineServers: number;
   totalServers: number;
   activeAssignments: number;
   switchesLastHour: number;
   openAlerts: number;
-  onGo: (k: StatKey) => void;
 }) {
   const now = useNow(1000);
   const updatedAt = useLastDataAt();
@@ -56,13 +55,13 @@ export function StatBar({
     <div className="topo-statbar">
       <div className="topo-stats">
         {stats.map((s) => (
-          <button key={s.key} className={`topo-stat ${s.tone ?? ''}`.trim()} onClick={() => onGo(s.key)}>
+          <div key={s.key} className={`topo-stat ${s.tone ?? ''}`.trim()}>
             <span className="topo-stat-icon"><Icon name={s.icon} size={16} /></span>
             <span className="topo-stat-body">
               <span className="topo-stat-label">{s.label}</span>
               <span className="topo-stat-value">{s.value}</span>
             </span>
-          </button>
+          </div>
         ))}
       </div>
       <div className="topo-live" aria-live="off">

@@ -6,22 +6,33 @@ import useSWR, { useSWRConfig } from 'swr';
 import { allowedAssignmentActions, api, krApiError } from '@/lib/api-client/client';
 import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
 import type {
+  Account,
   AccountPage,
   AlertPage,
   Assignment,
   AssignmentPage,
+  EnrollTokenResponse,
   PoolOverview,
+  Server,
   ServerPage,
   TenantPage,
 } from '@/lib/api-client/types';
 import { accountWindows } from '@/lib/usage-format';
 import { groupAccountsByLane } from '@/lib/pool';
+import { EditAccount } from '../accounts/EditAccountModal';
+import { RegisterModal } from '../accounts/RegisterModal';
 import { currentActiveByServer } from '../AssignmentsPanel';
 import { Icon, krLabel, markDataArrived, Modal, useAction } from '../common';
+import { CreateServer } from '../servers/CreateServerModal';
+import { EnrollTokenModal } from '../servers/EnrollTokenModal';
+import { EventsModal } from '../servers/EventsModal';
+import { PolicyModal } from '../servers/PolicyModal';
+import { SelfUpdateModal } from '../servers/SelfUpdateModal';
+import { UsageModal } from '../servers/UsageModal';
 import { AccountNode } from './AccountNode';
 import { PoolLanes } from './PoolLaneChip';
 import { ServerNode } from './ServerNode';
-import { StatBar, type StatKey } from './StatBar';
+import { StatBar } from './StatBar';
 import { TenantNode } from './TenantNode';
 import { VERB_ICON, VERB_LABEL, VERB_STYLE } from './verbs';
 
@@ -114,13 +125,13 @@ function overlaps(ap: Pos, as: { w: number; h: number }, bp: Pos, bs: { w: numbe
 // 마스터 콘솔 토폴로지 편집기. 좌 테넌트 · 중 서버 · 우 계정 3열. 테넌트→서버는
 // 정적 소속선, 서버↔계정은 편집 가능한 할당선. 포트 드래그로 연결 생성, 선 클릭으로
 // 동작 팝오버. 데이터는 각 표 패널과 동일한 SWR 키/주기를 재사용한다.
-export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: StatKey) => void }) {
+export function TopologyView({ tenantId }: { tenantId: string }) {
   const { data: tenantsData } = useSWR<TenantPage>('tenants', () => api.listTenants());
-  const { data: serversData } = useSWR<ServerPage>(['servers', tenantId], () => api.listServers(tenantId), {
+  const { data: serversData, mutate: mutateServers } = useSWR<ServerPage>(['servers', tenantId], () => api.listServers(tenantId), {
     refreshInterval: 7000,
     onSuccess: () => markDataArrived(),
   });
-  const { data: accountsData } = useSWR<AccountPage>(['accounts', tenantId], () => api.listAccounts(tenantId), {
+  const { data: accountsData, mutate: mutateAccounts } = useSWR<AccountPage>(['accounts', tenantId], () => api.listAccounts(tenantId), {
     refreshInterval: 8000,
     onSuccess: () => markDataArrived(),
   });
@@ -204,6 +215,36 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   // 멎어야 하는 게이트라 connect(ConnectModal)와 별도 상태로 둔다 — recall이
   // 나가는 move()로 흘러들지 않게 handleDrop에서 여기서 끊는다.
   const [excludedNotice, setExcludedNotice] = useState<string | null>(null);
+
+  // -- 콘솔 통합 액션(서버·계정 노드 클릭) -----------------------------------
+  // 메뉴 이동 없이 노드 클릭 → 액션 팝오버 → (필요 시) 패널과 같은 추출 모달.
+  // 위치는 nodeAnchors(측정된 노드 하단 중심)를 그대로 쓴다.
+  const [srvActionId, setSrvActionId] = useState<string | null>(null);
+  const [accActionId, setAccActionId] = useState<string | null>(null);
+  const [usageOf, setUsageOf] = useState<Server | null>(null);
+  const [eventsOf, setEventsOf] = useState<Server | null>(null);
+  const [policyOf, setPolicyOf] = useState<Server | null>(null);
+  const [tokenOf, setTokenOf] = useState<EnrollTokenResponse | null>(null);
+  const [updateOf, setUpdateOf] = useState<Server | null>(null);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [creatingServer, setCreatingServer] = useState(false);
+  const [creatingAccount, setCreatingAccount] = useState(false);
+  const [nodeAnchors, setNodeAnchors] = useState<Record<string, Pos>>({});
+
+  function openSrvAction(id: string) {
+    setSelected(null);
+    setAccActionId(null);
+    setSrvActionId(id);
+  }
+  function openAccAction(id: string) {
+    setSelected(null);
+    setSrvActionId(null);
+    setAccActionId(id);
+  }
+  function closeNodeActions() {
+    setSrvActionId(null);
+    setAccActionId(null);
+  }
 
   const setNode = useCallback((id: string) => (el: HTMLElement | null) => {
     if (el) nodeRefs.current.set(id, el);
@@ -446,6 +487,22 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
       const r = el.getBoundingClientRect();
       if (r.width && r.height) nodeSize.current.set(k, { w: r.width, h: r.height });
     }
+    // 노드 액션 팝오버 앵커(하단 중심 + 여백) — 자유 배치·그리드 폴백 모두 동일하게
+    // nodeRefs의 실측 DOM 위치에서 뽑으므로 두 모드에서 팝오버가 그대로 동작한다.
+    const nextAnchors: Layout = {};
+    for (const s of orderedServers) {
+      const el = nodeRefs.current.get(`srv:${s.id}`);
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      nextAnchors[`srv:${s.id}`] = { x: r.left - base.left + r.width / 2, y: r.bottom - base.top + 10 };
+    }
+    for (const a of orderedAccounts) {
+      const el = nodeRefs.current.get(`acc:${a.id}`);
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      nextAnchors[`acc:${a.id}`] = { x: r.left - base.left + r.width / 2, y: r.bottom - base.top + 10 };
+    }
+    setNodeAnchors(nextAnchors);
     const wide = grid.offsetWidth >= FREE_MIN;
     setFreeMode(wide);
     // 자유 배치는 absolute라 컨테이너가 붕괴 — 노드 최하단 + 여백으로 높이 산정.
@@ -564,27 +621,39 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
   const hasContent = servers.length > 0 || accounts.length > 0;
   const selectedEdge = aEdges.find((e) => e.id === selected);
   const selectedAssignment = assignments.find((a) => a.id === selected);
+  const srvActionServer = srvActionId ? servers.find((s) => s.id === srvActionId) : undefined;
+  const srvActionPos = srvActionId ? nodeAnchors[`srv:${srvActionId}`] : undefined;
+  const accActionAccount = accActionId ? accounts.find((a) => a.id === accActionId) : undefined;
+  const accActionPos = accActionId ? nodeAnchors[`acc:${accActionId}`] : undefined;
 
   return (
-    <div className={`topo-canvas${showLanes ? ' topo-has-lanes' : ''}`} onPointerDown={() => setSelected(null)}>
+    <div
+      className={`topo-canvas${showLanes ? ' topo-has-lanes' : ''}`}
+      onPointerDown={() => { setSelected(null); closeNodeActions(); }}
+    >
       <StatBar
         onlineServers={servers.filter((s) => s.status === 'online').length}
         totalServers={servers.length}
         activeAssignments={assignments.filter((a) => a.state === 'active').length}
         switchesLastHour={countSwitchesLastHour(accounts)}
         openAlerts={alertsData?.items?.length ?? 0}
-        onGo={onGo}
       />
 
-      {!hasContent && (
-        <p className="topo-empty">서버·계정이 없습니다. 서버를 등록하고 계정을 추가하면 여기서 연결을 편집할 수 있습니다.</p>
-      )}
-
-      {hasContent && freeMode && (
-        <div className="topo-toolbar">
+      {/* 등록 버튼은 콘텐츠 유무와 무관하게 항상 노출한다 — 서버·계정이 하나도
+          없는 신규 테넌트도 여기서 첫 등록을 끝낼 수 있어야 한다. */}
+      <div className="topo-toolbar">
+        {hasContent && freeMode && (
           <span className="topo-toolbar-hint">노드를 끌어 배치 · 24px 격자 스냅</span>
+        )}
+        <button type="button" className="topo-reset" onClick={() => setCreatingServer(true)}>서버 등록</button>
+        <button type="button" className="topo-reset" onClick={() => setCreatingAccount(true)}>계정 등록</button>
+        {hasContent && freeMode && (
           <button type="button" className="topo-reset" title="자동 배치로 되돌립니다" onClick={resetLayout}>정렬 초기화</button>
-        </div>
+        )}
+      </div>
+
+      {!hasContent && (
+        <p className="topo-empty">서버·계정이 없습니다. 위 &apos;서버 등록&apos;·&apos;계정 등록&apos;으로 시작하세요.</p>
       )}
 
       {hasContent && (
@@ -608,7 +677,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                 <path
                   className="topo-hit"
                   d={e.d}
-                  onPointerDown={(ev) => { ev.stopPropagation(); setSelected(e.id); }}
+                  onPointerDown={(ev) => { ev.stopPropagation(); setSelected(e.id); closeNodeActions(); }}
                 />
               </g>
             ))}
@@ -661,7 +730,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                       server={s}
                       activeEmail={activeId ? emailOf.get(activeId) : undefined}
                       nodeRef={setNode(key)}
-                      onClick={guardClick(() => onGo('servers'))}
+                      onClick={guardClick(() => openSrvAction(s.id))}
                       onPortDown={startDrag('server', s.id)}
                     />
                   </div>
@@ -684,7 +753,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                       provider={a.provider}
                       usagePct={usagePctByEmail.get(a.email)}
                       nodeRef={setNode(key)}
-                      onClick={guardClick(() => onGo('accounts'))}
+                      onClick={guardClick(() => openAccAction(a.id))}
                       onPortDown={startDrag('account', a.id)}
                     />
                   </div>
@@ -705,7 +774,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                         server={s}
                         activeEmail={activeId ? emailOf.get(activeId) : undefined}
                         nodeRef={setNode(`srv:${s.id}`)}
-                        onClick={() => onGo('servers')}
+                        onClick={guardClick(() => openSrvAction(s.id))}
                         onPortDown={startDrag('server', s.id)}
                       />
                     );
@@ -726,7 +795,7 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
                       provider={a.provider}
                       usagePct={usagePctByEmail.get(a.email)}
                       nodeRef={setNode(`acc:${a.id}`)}
-                      onClick={() => onGo('accounts')}
+                      onClick={guardClick(() => openAccAction(a.id))}
                       onPortDown={startDrag('account', a.id)}
                     />
                   ))}
@@ -746,6 +815,34 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
               tenantId={tenantId}
               onBusy={setBusyEdge}
               onClose={() => setSelected(null)}
+            />
+          )}
+
+          {srvActionServer && srvActionPos && (
+            <ServerActionPopover
+              tenantId={tenantId}
+              server={srvActionServer}
+              x={srvActionPos.x}
+              y={srvActionPos.y}
+              onClose={closeNodeActions}
+              onMutate={() => mutateServers()}
+              onUsage={() => setUsageOf(srvActionServer)}
+              onEvents={() => setEventsOf(srvActionServer)}
+              onPolicy={() => setPolicyOf(srvActionServer)}
+              onToken={(t) => setTokenOf(t)}
+              onUpdate={() => setUpdateOf(srvActionServer)}
+            />
+          )}
+
+          {accActionAccount && accActionPos && (
+            <AccountActionPopover
+              tenantId={tenantId}
+              account={accActionAccount}
+              x={accActionPos.x}
+              y={accActionPos.y}
+              onClose={closeNodeActions}
+              onMutate={() => mutateAccounts()}
+              onEdit={() => setEditingAccount(accActionAccount)}
             />
           )}
         </div>
@@ -785,6 +882,50 @@ export function TopologyView({ tenantId, onGo }: { tenantId: string; onGo: (t: S
         <Modal title="배정 제외" onClose={() => setExcludedNotice(null)}>
           <p>{excludedNotice}</p>
         </Modal>
+      )}
+
+      {/* 서버 액션 팝오버가 여는 모달 — 서버·계정 패널과 동일한 추출 컴포넌트를
+          그대로 재사용한다(동작 동일, 진입점만 상황판). */}
+      {creatingServer && (
+        <CreateServer
+          tenantId={tenantId}
+          onClose={() => setCreatingServer(false)}
+          onDone={() => { setCreatingServer(false); mutateServers(); }}
+        />
+      )}
+      {usageOf && <UsageModal tenantId={tenantId} server={usageOf} onClose={() => setUsageOf(null)} />}
+      {eventsOf && <EventsModal tenantId={tenantId} server={eventsOf} onClose={() => setEventsOf(null)} />}
+      {policyOf && (
+        <PolicyModal
+          tenantId={tenantId}
+          server={policyOf}
+          onClose={() => setPolicyOf(null)}
+          onDone={() => { setPolicyOf(null); mutateServers(); }}
+        />
+      )}
+      {updateOf && (
+        <SelfUpdateModal
+          tenantId={tenantId}
+          server={servers.find((x) => x.id === updateOf.id) ?? updateOf}
+          onClose={() => setUpdateOf(null)}
+        />
+      )}
+      {tokenOf && <EnrollTokenModal token={tokenOf} onClose={() => setTokenOf(null)} />}
+
+      {creatingAccount && (
+        <RegisterModal
+          tenantId={tenantId}
+          onClose={() => setCreatingAccount(false)}
+          onDone={() => { setCreatingAccount(false); mutateAccounts(); }}
+        />
+      )}
+      {editingAccount && (
+        <EditAccount
+          tenantId={tenantId}
+          account={editingAccount}
+          onClose={() => setEditingAccount(null)}
+          onDone={() => { setEditingAccount(null); mutateAccounts(); }}
+        />
       )}
     </div>
   );
@@ -855,6 +996,142 @@ function EdgePopover({
             {VERB_LABEL[v]}
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// 서버 노드 액션 팝오버 — 서버 패널 타일의 동작 전부(전환 모드·사용량 갱신·사용량·
+// 이벤트·정책·등록 토큰·에이전트 업데이트·삭제)를 메뉴 이동 없이 여기서 낸다.
+// 모달을 여는 버튼은 팝오버를 먼저 닫는다(모달이 화면을 덮으므로). 전환 모드·
+// 삭제는 성공 시 목록을 재검증(onMutate)하고 팝오버를 닫는다. 사용량 갱신은
+// 원래 패널 타일과 동일하게 결과를 기다리지 않는 발사 후 잊는 동작이라 팝오버를 유지한다.
+function ServerActionPopover({
+  tenantId,
+  server,
+  x,
+  y,
+  onClose,
+  onMutate,
+  onUsage,
+  onEvents,
+  onPolicy,
+  onToken,
+  onUpdate,
+}: {
+  tenantId: string;
+  server: Server;
+  x: number;
+  y: number;
+  onClose: () => void;
+  onMutate: () => void;
+  onUsage: () => void;
+  onEvents: () => void;
+  onPolicy: () => void;
+  onToken: (t: EnrollTokenResponse) => void;
+  onUpdate: () => void;
+}) {
+  const act = useAction();
+
+  function toggleMode() {
+    act.run(
+      () => api.setSwitchMode(tenantId, server.id, server.switchMode === 'auto' ? 'manual' : 'auto'),
+      () => { onMutate(); onClose(); },
+    );
+  }
+
+  function issueToken() {
+    act.run(async () => {
+      const t = await api.issueEnrollToken(tenantId, server.id);
+      onToken(t);
+      onClose();
+    });
+  }
+
+  function remove() {
+    act.run(() => api.deleteServer(tenantId, server.id), () => { onMutate(); onClose(); });
+  }
+
+  return (
+    <div className="topo-popover node" style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
+      <div className="topo-popover-head">{server.name}</div>
+      {act.error && <div className="topo-popover-err">{act.error}</div>}
+      <div className="topo-popover-actions">
+        <button className="vbtn" disabled={act.busy} onClick={toggleMode}>
+          <span className="vbtn-icon"><Icon name={server.switchMode === 'auto' ? 'hand' : 'zap'} size={14} /></span>
+          {server.switchMode === 'auto' ? '수동 전환으로' : '자동 전환으로'}
+        </button>
+        <button className="vbtn" disabled={act.busy} onClick={() => act.run(() => api.refreshUsage(tenantId, server.id))}>
+          <span className="vbtn-icon"><Icon name="refresh" size={14} /></span>
+          사용량 갱신
+        </button>
+        <button className="vbtn" onClick={() => { onUsage(); onClose(); }}>
+          <span className="vbtn-icon"><Icon name="gauge" size={14} /></span>
+          사용량
+        </button>
+        <button className="vbtn" onClick={() => { onEvents(); onClose(); }}>
+          <span className="vbtn-icon"><Icon name="activity" size={14} /></span>
+          이벤트
+        </button>
+        <button className="vbtn" onClick={() => { onPolicy(); onClose(); }}>
+          <span className="vbtn-icon"><Icon name="sliders" size={14} /></span>
+          정책
+        </button>
+        <button className="vbtn" disabled={act.busy} onClick={issueToken}>
+          <span className="vbtn-icon"><Icon name="key" size={14} /></span>
+          등록 토큰
+        </button>
+        <button className="vbtn" onClick={() => { onUpdate(); onClose(); }}>
+          <span className="vbtn-icon"><Icon name="rotate" size={14} /></span>
+          에이전트 업데이트
+        </button>
+        <button className="vbtn danger" disabled={act.busy} onClick={remove}>
+          <span className="vbtn-icon"><Icon name="trash" size={14} /></span>
+          삭제
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// 계정 노드 액션 팝오버 — 계정 패널 행의 동작(수정·삭제)을 그대로 낸다. 삭제는
+// 패널과 같은 수준(확인 모달 없이 즉시 실행)을 유지한다.
+function AccountActionPopover({
+  tenantId,
+  account,
+  x,
+  y,
+  onClose,
+  onMutate,
+  onEdit,
+}: {
+  tenantId: string;
+  account: Account;
+  x: number;
+  y: number;
+  onClose: () => void;
+  onMutate: () => void;
+  onEdit: () => void;
+}) {
+  const act = useAction();
+
+  function remove() {
+    act.run(() => api.deleteAccount(tenantId, account.id), () => { onMutate(); onClose(); });
+  }
+
+  return (
+    <div className="topo-popover node" style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
+      <div className="topo-popover-head"><span className="mono">{account.email}</span></div>
+      {act.error && <div className="topo-popover-err">{act.error}</div>}
+      <div className="topo-popover-actions">
+        <button className="vbtn" onClick={() => { onEdit(); onClose(); }}>
+          <span className="vbtn-icon"><Icon name="user" size={14} /></span>
+          수정
+        </button>
+        <button className="vbtn danger" disabled={act.busy} onClick={remove}>
+          <span className="vbtn-icon"><Icon name="trash" size={14} /></span>
+          삭제
+        </button>
       </div>
     </div>
   );
