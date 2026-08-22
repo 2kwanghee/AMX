@@ -321,6 +321,14 @@ code {
 .vbtn.warn { background: var(--warn-soft); color: var(--warn); }
 .vbtn.warn .vbtn-icon { color: var(--warn); }
 .vbtn.warn:hover:not(:disabled) { background: #F7E6D0; }
+/* 삭제 — crit 계열 */
+.vbtn.danger { background: var(--crit-soft); color: var(--crit); }
+.vbtn.danger .vbtn-icon { color: var(--crit); }
+.vbtn.danger:hover:not(:disabled) { background: #FADBDB; }
+/* 삭제 2단계 확인 — 첫 클릭 이후 "정말 삭제" 상태를 꽉 찬 색으로 강조 */
+.vbtn.danger.confirm { background: var(--crit); color: #fff; }
+.vbtn.danger.confirm .vbtn-icon { color: #fff; }
+.vbtn.danger.confirm:hover:not(:disabled) { background: #C81E1E; }
 @media (prefers-reduced-motion: reduce) {
   .vbtn:hover:not(:disabled) { transform: none; }
 }
@@ -648,10 +656,8 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
   display: inline-flex; align-items: center; gap: 10px;
   padding: 9px 14px; border-radius: 11px;
   background: var(--canvas-bg-2); border: 1px solid var(--canvas-border);
-  color: var(--canvas-ink); cursor: pointer; transition: border-color .12s, transform .12s;
+  color: var(--canvas-ink); transition: border-color .12s;
 }
-.topo-canvas .topo-stat:hover { background: var(--canvas-bg-2); border-color: var(--canvas-accent); color: var(--canvas-ink); transform: translateY(-1px); }
-.topo-stat:focus-visible { outline: 2px solid var(--canvas-accent); outline-offset: 1px; }
 .topo-stat.warn { border-color: color-mix(in srgb, var(--canvas-warn) 55%, var(--canvas-border)); }
 .topo-stat.crit { border-color: color-mix(in srgb, var(--canvas-crit) 60%, var(--canvas-border)); }
 .topo-stat-icon { color: var(--canvas-accent); display: inline-flex; flex: 0 0 auto; }
@@ -1027,6 +1033,10 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-popover-err { color: var(--canvas-crit); font-size: 11px; margin-bottom: 6px; }
 .topo-popover-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 .topo-popover-none { font-size: 12px; color: var(--canvas-muted); }
+/* 노드(서버·계정) 액션 팝오버 — 앵커가 노드 하단 중심이라 아래로만 펼친다. */
+.topo-popover.node { transform: translate(-50%, 0); max-width: 220px; }
+/* flip — 캔버스 하단 clip을 피해 노드 위쪽으로 펼친다(상세 카드 flip과 같은 원리). */
+.topo-popover.node.flip { transform: translate(-50%, -100%); }
 
 /* 이동 경고(라이트 모달 내부) */
 .topo-move-note { color: var(--warn); font-size: 13px; background: var(--warn-soft); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
