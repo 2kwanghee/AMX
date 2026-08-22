@@ -51,6 +51,16 @@ Claude Code는 세션 트랜스크립트(``~/.claude*/projects/<프로젝트>/<�
 중복 제거는 **메시지 단위**다: 트랜스크립트는 한 API 응답을 content 블록마다 한 줄씩
 반복해 적으므로 ``message.id``로 접는다(제거하지 않으면 집계가 거의 2배 — 935줄 /
 477 메시지가 실측치다). 접히지 않은 메시지에 대해서만 iteration을 순회한다.
+
+지연 실행(자기 자신을 분리 프로세스로 재실행): Claude Code는 Stop 훅을 부른 **뒤에**
+트랜스크립트에 assistant 레코드를 쓴다(실측: Stop 시점 8줄·assistant 0건 → 세션 종료
+후 12줄·assistant 2건, ``-p`` 배치 모드). 그래서 Stop 훅이 그 자리에서 읽으면 매번
+빈 집계라 ``build_models``가 빈 리스트를 돌려주고 조용히 ``return 0``으로 끝난다 —
+서버 문제가 아니라 타이밍 문제다. ``AMX_SESSION_USAGE_DEFERRED``가 없는 1차 호출은
+url·token·payload만 파싱한 뒤 자기 자신을 ``AMX_SESSION_USAGE_DEFERRED=1``로 분리
+프로세스 실행하고 즉시 0을 반환한다(Stop 훅을 붙잡지 않는다). 분리된 자식은 트랜스
+크립트에 assistant 레코드가 나타날 때까지 최대 ``_DEFER_MAX_SECONDS`` 초를 폴링한
+뒤 기존 집계·전송 로직을 그대로 수행한다.
 """
 
 from __future__ import annotations
@@ -63,11 +73,18 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from datetime import datetime, timezone
 
 # 통보 HTTP 타임아웃(초). Claude를 붙잡지 않도록 짧게 고정한다.
 _HTTP_TIMEOUT_SECONDS = 2.0
+# 분리된 자식이 assistant 레코드가 나타날 때까지 기다리는 최대 시간·폴링 간격(초).
+# Claude Code가 Stop 훅 발화 뒤에 트랜스크립트를 쓰는 실측 지연을 흡수하기 위함이다
+# (위 모듈 docstring "지연 실행" 참조). 부모(1차 호출) 쪽은 이 대기를 절대 하지 않는다
+# — Stop 훅 자체가 이 시간만큼 느려지면 안 되므로 자식으로 넘긴다.
+_DEFER_MAX_SECONDS = 15.0
+_DEFER_POLL_INTERVAL_SECONDS = 0.5
 # tsamx 조회 타임아웃(초). 실패하면 계정 없이 보낸다(엔드포인트가 NULL을 받는다).
 _TSAMX_TIMEOUT_SECONDS = 2.0
 # 트랜스크립트 스캔 줄 수 상한. 병리적으로 긴 파일이 훅 실행 시간을 좌우하지 못하게
@@ -550,6 +567,30 @@ def _read_lines(path: str, state: dict | None = None):
         yield buffer.decode("utf-8", "replace")
 
 
+def _aggregate_with_deferred_wait(transcript_path: str) -> tuple[dict[str, dict], dict]:
+    """트랜스크립트에 assistant 레코드가 생길 때까지 폴링한 뒤 집계한다(자식 프로세스 전용).
+
+    파일이 존재하고 집계 결과가 비어 있지 않으면 그 즉시 반환한다(대기 없음). 그렇지
+    않으면 ``_DEFER_POLL_INTERVAL_SECONDS`` 간격으로 최대 ``_DEFER_MAX_SECONDS``까지
+    재시도한다. 매 시도마다 상태를 새로 만든다 — 실패한 시도의 라벨 예산이 다음 시도로
+    새면 정상적으로 채워질 예산이 폴링 횟수만큼 조기에 바닥난다. 끝까지 비면 마지막
+    시도의 (빈) 집계와 상태를 그대로 돌려준다 — 실패 기록은 남기지 않는다(assistant가
+    끝내 없는 세션은 정상 경로다).
+    """
+    deadline = time.monotonic() + _DEFER_MAX_SECONDS
+    by_model: dict[str, dict] = {}
+    state = _new_state()
+    while True:
+        if os.path.exists(transcript_path):
+            state = _new_state()
+            by_model = aggregate(_read_lines(transcript_path, state), state)
+            if by_model:
+                return by_model, state
+        if time.monotonic() >= deadline:
+            return by_model, state
+        time.sleep(_DEFER_POLL_INTERVAL_SECONDS)
+
+
 def _session_id(payload: dict, transcript_path: str) -> str | None:
     """세션 id: payload의 값이 우선, 없으면 트랜스크립트 파일명 stem."""
     for key in ("session_id", "sessionId"):
@@ -575,6 +616,26 @@ def main() -> int:
     except Exception:  # noqa: BLE001 - 깨진 stdin에도 exit 0.
         return 0
 
+    if not os.environ.get("AMX_SESSION_USAGE_DEFERRED"):
+        # 1차 호출(Stop 훅 본체): 트랜스크립트를 기다리지 않는다 — 자기 자신을 분리
+        # 프로세스로 재실행해 그쪽이 기다리게 하고 여기서는 즉시 반환한다(위 모듈
+        # docstring "지연 실행" 참조).
+        try:
+            child = subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env={**os.environ, "AMX_SESSION_USAGE_DEFERRED": "1"},
+            )
+            if child.stdin is not None:
+                child.stdin.write(raw.encode("utf-8"))
+                child.stdin.close()
+        except Exception as exc:  # noqa: BLE001 - 절대 밖으로 던지지 않는다.
+            _record_failure(f"defer spawn failed: {type(exc).__name__}")
+        return 0
+
     transcript_path = payload.get("transcript_path") or payload.get("transcriptPath")
     if not isinstance(transcript_path, str) or not transcript_path:
         return 0
@@ -583,8 +644,7 @@ def main() -> int:
         session_id = _session_id(payload, transcript_path)
         if not session_id:
             return 0
-        state = _new_state()
-        by_model = aggregate(_read_lines(transcript_path, state), state)
+        by_model, state = _aggregate_with_deferred_wait(transcript_path)
         models = build_models(by_model)
         if not models:
             return 0  # assistant 레코드가 없는 세션은 보낼 것이 없다.
