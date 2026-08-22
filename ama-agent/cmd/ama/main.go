@@ -384,6 +384,7 @@ func run() error {
 			ServerId:          serverID,
 			Hostname:          hostname(),
 			AgentVersion:      agentVersion(),
+			TsamxVersion:      tsamx.EngineVersion(ctx, drv.BinaryName()),
 			SwitchMode:        handler.SwitchMode(),
 			AppliedCommandIds: applied.RecentIDs(),
 			AgentPublicKey:    agentPub,
