@@ -368,6 +368,14 @@ code {
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 
+/* 잔여값이 낡았을 때(usage.stale) 값 옆에 붙는 "N분 전" 배지(F2, 08-22). 밝은
+   배경 전용 — 상황판 캔버스(어두운 배경)는 .topo-stale-badge를 쓴다. */
+.stale-badge {
+  display: inline-flex; align-items: center; margin-left: 6px; padding: 1px 7px;
+  border-radius: 999px; font-size: 10.5px; font-weight: 600; white-space: nowrap;
+  background: var(--warn-soft); color: var(--warn);
+}
+
 /* -- 동기화 셀 ------------------------------------------------------------ */
 .sync-cell {
   display: inline-flex; align-items: center; gap: 5px;
@@ -749,6 +757,14 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-acc-sub {
   font-size: 10.5px; letter-spacing: .02em; color: var(--canvas-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 캔버스(어두운 배경)용 stale 배지 — .stale-badge와 같은 자리, canvas 토큰만
+   다르다(F2, 08-22). */
+.topo-stale-badge {
+  display: inline-flex; align-items: center; margin-left: 6px; padding: 1px 6px;
+  border-radius: 999px; font-size: 9.5px; font-weight: 600; white-space: nowrap;
+  background: color-mix(in srgb, var(--canvas-warn) 22%, transparent);
+  color: var(--canvas-warn);
 }
 /* 우상단 맥동 점 — 활성(assigned)만. reduced-motion 시 정지(아래 블록). */
 .topo-acc-live {

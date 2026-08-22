@@ -3,15 +3,17 @@
 import type { PointerEvent as ReactPointerEvent, Ref } from 'react';
 import type { AccountUsageSummary } from '@/lib/api-client/types';
 import { fmtRemainingWindow } from '@/lib/usage-format';
-import { krLabel, relTime, RobotAvatar } from '../common';
+import { krLabel, relTime, RobotAvatar, StaleBadge } from '../common';
 
 // 계정 노드 — 에이전트 캡슐. 좌측 연결점(port)에서 드래그해 서버에 연결한다. 노드
 // 본문 클릭은 계정 탭 진입. data-node-* 는 드롭 히트테스트에 쓰인다.
 //
 // 상태 스타일(status-*): assigned=활성(실선+우상단 맥동 점), available=대기(점선),
 // quarantined/disabled=붉은 테두리+회색조. usage(계정 API 1단계 필드)는 값이
-// 있을 때만 라벨 끝에 "5h 잔여 n%"를 붙이고, 7일 창·리셋 시각·신선도는 호버
-// 상세 카드로 옮긴다(.topo-srv-detail 패턴).
+// 있을 때만 라벨 끝에 "5h 잔여 n%"를 붙이고, 7일 창·리셋 시각은 호버 상세 카드로
+// 옮긴다(.topo-srv-detail 패턴). 신선도만은 예외 — stale이면 동결된 pct가 표시
+// 없이 그대로 나가던 사고(F1/F2, 08-22)가 있어 노드 본문에도 "N분 전" 배지를
+// 바로 붙인다.
 export function AccountNode({
   id,
   email,
@@ -36,11 +38,11 @@ export function AccountNode({
   const statusClass = status ? `status-${status}` : '';
   const active = status === 'assigned';
   const fiveHourPct = usage?.fiveHour?.pct;
-  const sub =
-    `${krLabel(provider)} · ${krLabel(status)}` +
-    (fiveHourPct != null && !Number.isNaN(fiveHourPct)
-      ? ` · 5h 잔여 ${Math.max(0, Math.min(100, Math.round(100 - fiveHourPct)))}%`
-      : '');
+  const remainPct =
+    fiveHourPct != null && !Number.isNaN(fiveHourPct)
+      ? Math.max(0, Math.min(100, Math.round(100 - fiveHourPct)))
+      : null;
+  const sub = `${krLabel(provider)} · ${krLabel(status)}` + (remainPct != null ? ` · 5h 잔여 ${remainPct}%` : '');
 
   return (
     <button
@@ -57,7 +59,12 @@ export function AccountNode({
       </span>
       <span className="topo-acc-body">
         <span className="topo-acc-email">{email}</span>
-        <span className="topo-acc-sub">{sub}</span>
+        <span className="topo-acc-sub">
+          {sub}
+          {usage?.stale && remainPct != null && (
+            <StaleBadge fetchedAt={usage.fetchedAt} className="topo-stale-badge" />
+          )}
+        </span>
       </span>
       {/* 활성(assigned) 계정만 우상단 맥동 점. */}
       {active && <span className="topo-acc-live" aria-hidden="true" />}

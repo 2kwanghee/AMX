@@ -59,6 +59,12 @@ const KR_ALERT_REASON: Record<string, string> = {
   // 2026-08-17 사례에서 세운 가설이지 코드가 판정하는 조건이 아니다.
   credential_unusable:
     '이 계정의 자격증명 파일에 토큰이 남아 있지 않습니다. 파일이 비었다는 것만 감지되고 원인은 알 수 없습니다. 계정을 다시 인증해 자격증명을 새로 채우세요. 같은 계정을 개인 프로필에서 함께 쓰고 있다면 토큰 회전이 맞부딪친 것일 수 있으니, 계정 편집에서 배정 제외를 켜서 새 배정 대상에서 빼두세요.',
+  // app/services/pool.py compute_states: leased 계정의 창 관측이 전부 낡거나
+  // 미상이라 스왑 트리거((_fresh_pct or -1.0) >= swap_at)가 조용히 안 걸리는
+  // 상태. 관측을 올려야 할 서버가 offline이면 열지 않고(server_offline이 이미
+  // 원인), 신선한 관측이 돌아오면 스스로 닫힌다.
+  pool_usage_stale:
+    '대여 중인 계정의 사용량 관측이 한참 끊겨 있어 자동 교체가 걸리지 않습니다. 실제로는 한도에 닿았는데 화면 수치만 멈춰 있을 수 있으니, tsamx에서 이 계정을 다시 로그인하거나 배정 목록에서 수동으로 교체하세요. 관측이 다시 들어오면 알림은 저절로 사라집니다.',
 };
 
 export function AlertsBadge({ tenantId }: { tenantId: string }) {

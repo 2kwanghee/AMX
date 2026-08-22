@@ -19,6 +19,7 @@ from app.models import (
     Account,
     AccountUsageWindow,
     Alert,
+    PoolChain,
     PoolEvent,
     PoolRecommendation,
     Server,
@@ -346,6 +347,75 @@ def test_cooling_releases_without_observation_after_grace(app_env):
     assert account.cooling_until is None
 
 
+# -- F1 pool_usage_stale (08-22 modarra9 83% 동결 사고) -----------------------
+def test_pool_usage_stale_opens_and_resolves_for_leased_account(app_env):
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1")
+    account_id = _account(tenant_id, "frozen@x.example.com")
+    _assign(tenant_id, account_id, server_id)
+
+    # 관측이 stale_after(기본 30분)보다 오래된 채로 멈춰 있다 — 스왑 트리거가
+    # (_fresh_pct or -1.0) >= swap_at 로 읽는 값이 조용히 미상으로 빠지는 상황.
+    stale_stamp = _now() - timedelta(minutes=40)
+    _observe(
+        tenant_id,
+        server_id,
+        _report("frozen@x.example.com", five=83, seven=10),
+        reported_at=stale_stamp,
+    )
+    _compute(tenant_id)
+    with _db() as db:
+        alert = db.scalar(
+            select(Alert).where(
+                Alert.tenant_id == tenant_id, Alert.kind == "pool_usage_stale"
+            )
+        )
+    assert alert is not None
+    assert alert.status == "open"
+    assert alert.severity == "warning"
+    assert alert.account_id == account_id
+    assert alert.detail["pct"] == 83
+
+    # 신선한 관측이 돌아오면 같은 경보가 스스로 닫힌다.
+    _observe(tenant_id, server_id, _report("frozen@x.example.com", five=84, seven=10))
+    _compute(tenant_id)
+    with _db() as db:
+        alert = db.scalar(
+            select(Alert).where(
+                Alert.tenant_id == tenant_id, Alert.kind == "pool_usage_stale"
+            )
+        )
+    assert alert.status == "resolved"
+
+
+def test_pool_usage_stale_not_opened_when_reporting_server_offline(app_env):
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1")
+    account_id = _account(tenant_id, "offline-src@x.example.com")
+    _assign(tenant_id, account_id, server_id)
+
+    stale_stamp = _now() - timedelta(minutes=40)
+    _observe(
+        tenant_id,
+        server_id,
+        _report("offline-src@x.example.com", five=83, seven=10),
+        reported_at=stale_stamp,
+    )
+    with _db() as db:
+        db.get(Server, server_id).status = "offline"
+        db.commit()
+
+    _compute(tenant_id)
+    with _db() as db:
+        alert = db.scalar(
+            select(Alert).where(
+                Alert.tenant_id == tenant_id, Alert.kind == "pool_usage_stale"
+            )
+        )
+    # server_offline 이 이미 원인을 설명하므로 중복해 열지 않는다.
+    assert alert is None
+
+
 def test_pinned_and_held_survive_the_sweep(app_env):
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1")
@@ -530,6 +600,334 @@ def test_candidate_order_prefers_the_most_remaining_seven_day_window(app_env):
     # 7일 잔여가 1순위이므로 5시간이 더 나쁜 idle 이 뽑힌다.
     assert rec.to_account_id == idle_id
     assert rec.to_account_id != busy_id
+
+
+# -- F3 관측 두절 시 보수적 선제 교체 (08-22 modarra9 사고) -------------------
+def test_stale_observation_triggers_swap_recommendation_manual_mode(app_env):
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1")  # 기본 정책 = manual
+    stale_id = _account(tenant_id, "frozen@x.example.com")
+    _account(tenant_id, "spare@x.example.com")
+    _assign(tenant_id, stale_id, server_id)
+
+    stale_stamp = _now() - timedelta(minutes=45)
+    _observe(
+        tenant_id,
+        server_id,
+        _report("frozen@x.example.com", five=83, seven=10),
+        reported_at=stale_stamp,
+    )
+    _compute(tenant_id)
+
+    assert _build(tenant_id) == 1
+    recs = _recs(tenant_id)
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec.kind == "swap"
+    assert rec.from_account_id == stale_id
+    # trigger_pct는 지금 값이 아니라 마지막으로 알려진 관측값이다.
+    assert rec.trigger_pct == 83
+    assert "두절" in rec.reason and "선제 교체" in rec.reason
+
+    # manual 모드라 추천만 있고 실행은 되지 않는다.
+    with _db() as db:
+        assert pool.start_auto_chains(db) == 0
+
+    # 같은 조건이 계속 참이어도 다음 평가 턴에 중복으로 개시되지 않는다.
+    first_created = rec.created_at
+    assert _build(tenant_id) == 0
+    assert len(_recs(tenant_id)) == 1
+    assert _recs(tenant_id)[0].created_at == first_created
+
+
+def test_stale_observation_starts_a_chain_in_auto_mode(app_env):
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", _auto())
+    # deliver는 에이전트가 한 번도 접속하지 않은 서버(last_seen_at NULL)를 409로
+    # 거부한다(commands.request_deliver, D3) — 이 서버 헬퍼는 online만 세팅하므로
+    # 실제로 deliver까지 도는 이 테스트에서만 접속 이력을 채워 준다.
+    with _db() as db:
+        from app.models import Server as _Server
+
+        db.get(_Server, server_id).last_seen_at = _now()
+        db.commit()
+    stale_id = _account(tenant_id, "frozen@x.example.com")
+    _account(tenant_id, "spare@x.example.com")
+    _assign(tenant_id, stale_id, server_id)
+
+    stale_stamp = _now() - timedelta(minutes=45)
+    _observe(
+        tenant_id,
+        server_id,
+        _report("frozen@x.example.com", five=83, seven=10),
+        reported_at=stale_stamp,
+    )
+    _compute(tenant_id)
+    _build(tenant_id)
+
+    with _db() as db:
+        started = pool.start_auto_chains(db)
+    assert started == 1
+    with _db() as db:
+        chain = db.scalar(select(PoolChain).where(PoolChain.tenant_id == tenant_id))
+        event = db.scalar(
+            select(PoolEvent).where(
+                PoolEvent.tenant_id == tenant_id, PoolEvent.kind == "chain_started"
+            )
+        )
+    assert chain is not None
+    assert chain.kind == "swap"
+    assert chain.from_account_id == stale_id
+    assert event.detail["trigger_pct"] == 83
+    assert "두절" in event.detail["reason"] and "선제 교체" in event.detail["reason"]
+
+    # 이미 체인이 도는 서버에는 다음 평가 턴에서 새 권고도, 새 체인도 중복으로
+    # 생기지 않는다(busy 서버는 build_recommendations 가 건너뛴다).
+    assert _build(tenant_id) == 0
+    with _db() as db:
+        assert pool.start_auto_chains(db) == 0
+    with _db() as db:
+        chains = list(
+            db.scalars(select(PoolChain).where(PoolChain.tenant_id == tenant_id)).all()
+        )
+    assert len(chains) == 1
+
+
+def test_stale_swap_not_triggered_with_fresh_observation(app_env):
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", _auto())
+    account_id = _account(tenant_id, "fine@x.example.com")
+    _assign(tenant_id, account_id, server_id)
+    _observe(tenant_id, server_id, _report("fine@x.example.com", five=50, seven=10))
+    _compute(tenant_id)
+
+    _build(tenant_id)
+    assert _recs(tenant_id) == []
+
+
+def test_stale_swap_blocked_by_min_lease_minutes(app_env):
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", _auto(min_lease_minutes=30))
+    stale_id = _account(tenant_id, "frozen@x.example.com")
+    _account(tenant_id, "spare@x.example.com")
+    _assign(tenant_id, stale_id, server_id)
+    with _db() as db:
+        from app.models import Assignment
+
+        row = db.scalar(select(Assignment).where(Assignment.account_id == stale_id))
+        row.delivered_at = _now() - timedelta(minutes=5)
+        db.commit()
+
+    stale_stamp = _now() - timedelta(minutes=45)
+    _observe(
+        tenant_id,
+        server_id,
+        _report("frozen@x.example.com", five=83, seven=10),
+        reported_at=stale_stamp,
+    )
+    _compute(tenant_id)
+
+    _build(tenant_id)
+    # 방금 대여한 계정이라 min_lease_minutes 를 못 채웠다 — 선제 교체도 막힌다.
+    assert _recs(tenant_id) == []
+
+
+def test_pool_usage_stale_only_evaluated_for_leased_accounts(app_env):
+    """ready·cooling·held(격리 회수 후) 상태에서는 F1이 아예 평가되지 않는다 —
+    대여 중이 아닌 계정의 관측 두절은 스왑 트리거와 무관하다(리뷰 반영 08-22).
+    """
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1")
+    ready_id = _account(tenant_id, "ready@x.example.com")
+    held_id = _account(tenant_id, "held@x.example.com")
+    cooling_id = _account(tenant_id, "cooling@x.example.com")
+
+    stale_stamp = _now() - timedelta(minutes=45)
+    for email in ("ready@x.example.com", "held@x.example.com"):
+        _observe(
+            tenant_id, server_id, _report(email, five=83, seven=10), reported_at=stale_stamp
+        )
+    with _db() as db:
+        db.add(
+            Alert(
+                tenant_id=tenant_id,
+                server_id=server_id,
+                account_id=held_id,
+                kind="quarantine",
+                severity="warning",
+                status="open",
+                dedupe_key=f"{server_id}:quarantine:{held_id}",
+                detail={},
+            )
+        )
+        db.commit()
+
+    # cooling: 대여 중 소진돼 회수된 계정 — 신선한 관측으로 exhausted 판정만
+    # 만들면 되고, F1과는 무관하다.
+    resets_at = _now() + timedelta(hours=2)
+    cooling_assignment_id = _assign(tenant_id, cooling_id, server_id)
+    _observe(
+        tenant_id, server_id, _report("cooling@x.example.com", five=97, seven=30, resets_at=resets_at)
+    )
+    with _db() as db:
+        from app.models import Assignment
+
+        db.get(Assignment, cooling_assignment_id).state = "detached"
+        db.commit()
+
+    _compute(tenant_id)
+    assert _state(ready_id).pool_state == "ready"
+    assert _state(held_id).pool_state == "held"
+    assert _state(cooling_id).pool_state == "cooling"
+
+    with _db() as db:
+        alerts = list(
+            db.scalars(
+                select(Alert).where(
+                    Alert.tenant_id == tenant_id, Alert.kind == "pool_usage_stale"
+                )
+            ).all()
+        )
+    assert alerts == []
+
+
+def test_pool_usage_stale_grace_period_after_reassignment(app_env):
+    """재배정 직후에는 새 서버가 아직 한 번도 보고하지 않았어도, 창에 남은
+    이전 서버의 낡은 관측만으로 즉시 stale로 보지 않는다 — 리스 시작 시각부터
+    stale_after 만큼은 첫 보고를 기다려 준다(리뷰 반영 08-22).
+    """
+    tenant_id = _tenant()
+    old_server_id = _server(tenant_id, "old")  # online, 이전 서버.
+    new_server_id = _server(tenant_id, "new")  # online, 방금 넘겨받은 서버.
+    account_id = _account(tenant_id, "moved@x.example.com")
+
+    # 이전 서버가 마지막으로 올린 관측은 stale_after(기본 30분)를 넘겼다.
+    _observe(
+        tenant_id,
+        old_server_id,
+        _report("moved@x.example.com", five=83, seven=10),
+        reported_at=_now() - timedelta(minutes=45),
+    )
+    _assign(tenant_id, account_id, new_server_id)
+    with _db() as db:
+        from app.models import Assignment
+
+        row = db.scalar(select(Assignment).where(Assignment.account_id == account_id))
+        row.delivered_at = _now()  # 리스가 방금 시작됐다.
+        db.commit()
+
+    _compute(tenant_id)
+    with _db() as db:
+        alert = db.scalar(
+            select(Alert).where(
+                Alert.tenant_id == tenant_id, Alert.kind == "pool_usage_stale"
+            )
+        )
+    assert alert is None
+    assert _state(account_id).pool_state == "leased"
+
+
+def test_pipeline_wide_staleness_suppresses_swap_but_keeps_alert(app_env):
+    """관측 파이프라인 전체가 죽으면(스페어까지 관측이 낡음) 신선한 후보가
+    없어 F3는 자연히 침묵한다 — 경보(F1)만 뜨고 동시 교체 폭주로 이어지지
+    않는다(리뷰 반영 08-22, ineligible_reason=stale_observation).
+    """
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", _auto())
+    stale_id = _account(tenant_id, "frozen@x.example.com")
+    spare_id = _account(tenant_id, "spare@x.example.com")
+    _assign(tenant_id, stale_id, server_id)
+
+    stale_stamp = _now() - timedelta(minutes=45)
+    _observe(
+        tenant_id, server_id, _report("frozen@x.example.com", five=83, seven=10),
+        reported_at=stale_stamp,
+    )
+    # 스페어도 관측이 낡았다 — 파이프라인 전체 장애.
+    _observe(
+        tenant_id, server_id, _report("spare@x.example.com", five=5, seven=5),
+        reported_at=stale_stamp,
+    )
+    _compute(tenant_id)
+
+    assert _build(tenant_id) == 0
+    assert _recs(tenant_id) == []
+    with _db() as db:
+        ineligible = pool.ineligible_reason(
+            db.get(Account, spare_id),
+            unusable=set(),
+            windows=_windows(tenant_id, spare_id),
+            now=_now(),
+            stale_after=timedelta(minutes=30),
+        )
+    assert ineligible == "stale_observation"
+
+    with _db() as db:
+        alert = db.scalar(
+            select(Alert).where(
+                Alert.tenant_id == tenant_id, Alert.kind == "pool_usage_stale"
+            )
+        )
+    assert alert is not None
+    assert alert.status == "open"
+
+
+def test_stale_swap_picks_highest_last_known_pct_deterministically(app_env):
+    """대상이 여럿 두절이면 낮은 값이 아니라 마지막으로 알려진 pct가 더 높은
+    쪽부터 교체한다 — 소진에 더 가까웠을 가능성이 큰 쪽(리뷰 반영 08-22).
+    """
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", _auto(target_leases=2))
+    low_id = _account(tenant_id, "low@x.example.com")
+    high_id = _account(tenant_id, "high@x.example.com")
+    _account(tenant_id, "spare@x.example.com")
+    _assign(tenant_id, low_id, server_id)
+    _assign(tenant_id, high_id, server_id)
+
+    stale_stamp = _now() - timedelta(minutes=45)
+    _observe(
+        tenant_id, server_id, _report("low@x.example.com", five=10, seven=10),
+        reported_at=stale_stamp,
+    )
+    _observe(
+        tenant_id, server_id, _report("high@x.example.com", five=70, seven=10),
+        reported_at=stale_stamp,
+    )
+    _observe(tenant_id, server_id, _report("spare@x.example.com", five=1, seven=1))
+    _compute(tenant_id)
+
+    _build(tenant_id)
+    recs = _recs(tenant_id)
+    assert len(recs) == 1
+    assert recs[0].from_account_id == high_id
+    assert recs[0].trigger_pct == 70
+
+
+def test_stale_swap_tiebreaks_by_longer_stale_when_pct_ties(app_env):
+    """마지막 pct가 같으면 더 오래전에 끊긴 쪽을 먼저 교체한다(리뷰 반영 08-22)."""
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", _auto(target_leases=2))
+    older_id = _account(tenant_id, "older@x.example.com")
+    newer_id = _account(tenant_id, "newer@x.example.com")
+    _account(tenant_id, "spare@x.example.com")
+    _assign(tenant_id, older_id, server_id)
+    _assign(tenant_id, newer_id, server_id)
+
+    _observe(
+        tenant_id, server_id, _report("older@x.example.com", five=50, seven=10),
+        reported_at=_now() - timedelta(minutes=90),
+    )
+    _observe(
+        tenant_id, server_id, _report("newer@x.example.com", five=50, seven=10),
+        reported_at=_now() - timedelta(minutes=45),
+    )
+    _observe(tenant_id, server_id, _report("spare@x.example.com", five=1, seven=1))
+    _compute(tenant_id)
+
+    _build(tenant_id)
+    recs = _recs(tenant_id)
+    assert len(recs) == 1
+    assert recs[0].from_account_id == older_id
 
 
 # -- API ---------------------------------------------------------------------

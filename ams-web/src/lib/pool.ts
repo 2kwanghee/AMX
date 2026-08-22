@@ -104,6 +104,7 @@ const INELIGIBLE_REASON_LABEL: Record<IneligibleReason, string> = {
   pinned: '고정',
   held: '보류',
   no_observation: '관측 없음',
+  stale_observation: '관측 두절',
 };
 export function ineligibleReasonLabel(reason: string): string {
   return INELIGIBLE_REASON_LABEL[reason as IneligibleReason] ?? reason;

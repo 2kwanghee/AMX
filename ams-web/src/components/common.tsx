@@ -49,6 +49,7 @@ const KR_LABEL: Record<string, string> = {
   credential_unusable: '자격증명 사용 불가',
   account_window_high: '계정 사용률 임박',
   pool_chain_failed: '풀 교체 실패',
+  pool_usage_stale: '사용량 관측 끊김',
 };
 
 export function krLabel(value?: string): string {
@@ -425,6 +426,26 @@ export function relTime(iso?: string): string {
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}시간 전`;
   return d.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' });
+}
+
+// 값이 낡았을 때(usage.stale) 그 값 옆에 붙이는 배지. 신선하면 아무것도 그리지
+// 않는다 — 동결된 잔여율(pct)이 신선도 표시 없이 그대로 보여 스왑 트리거가
+// 조용히 안 걸린 사고(F1, 08-22 modarra9)의 재발을 막기 위한 표시다. 기본
+// className은 밝은 배경용(amber, --warn)이고, 상황판 캔버스(어두운 배경)에서는
+// 호출부가 className="topo-stale-badge"(--canvas-warn)를 넘긴다.
+export function StaleBadge({
+  fetchedAt,
+  className = 'stale-badge',
+}: {
+  fetchedAt?: string | null;
+  className?: string;
+}) {
+  if (!fetchedAt) return null;
+  return (
+    <span className={className} title={`${relTime(fetchedAt)} 관측`}>
+      {relTime(fetchedAt)}
+    </span>
+  );
 }
 
 // 시각 셀 — 시계 아이콘 + 상대시간, title에 절대시각.

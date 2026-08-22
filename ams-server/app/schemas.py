@@ -514,6 +514,7 @@ AlertKind = Literal[
     "credential_unusable",
     "account_window_high",
     "pool_chain_failed",
+    "pool_usage_stale",
 ]
 AlertSeverity = Literal["critical", "warning"]
 AlertStatus = Literal["open", "acked", "resolved"]

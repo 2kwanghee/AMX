@@ -119,6 +119,9 @@ DEFAULT_POLICY: dict[str, Any] = {
 }
 
 WINDOW_HIGH_KIND = "account_window_high"
+# F1(08-22 modarra9 사고): leased 계정의 관측이 전부 낡아 스왑 트리거가 조용히
+# 불발되는 상태를 알린다. compute_states 의 leased 분기에서만 연다.
+USAGE_STALE_KIND = "pool_usage_stale"
 
 
 def _now() -> datetime:
@@ -437,6 +440,90 @@ def _max_fresh_pct(
     return max(values) if values else None
 
 
+def _usage_stale(
+    windows: list[AccountUsageWindow],
+    *,
+    server: Server | None,
+    lease_started_at: datetime,
+    now: datetime,
+    stale_after: timedelta,
+) -> AccountUsageWindow | None:
+    """이 계정의 관측이 "있었는데 끊겼다"에 해당하면 최신 창을, 아니면 None을
+    돌려준다. F1 경보와 F3 선제 교체가 함께 쓰는 하나의 판정이다.
+
+    창이 하나도 없는 계정(아직 한 번도 보고되지 않음)은 다른 사유
+    (no_observation)이므로 여기서 다루지 않는다.
+
+    online 판정은 최신 창의 ``server_id`` 가 아니라 **지금 이 계정을 들고 있는
+    서버**(``server``, 라이브 배정 기준)로 한다 — 재배정 전 서버가 우연히
+    offline/online 이든, 지금 관측을 올려야 할 책임은 새 서버에 있다.
+
+    두절 시계에는 리스 시작 유예를 둔다: 재배정 직후에는 새 서버가 아직 한 번도
+    보고하지 않아 창에 남은 값이 이전 서버의 낡은 관측일 수 있다. 그 시각만 보고
+    바로 stale 로 판정하면 리스 초반부터 오탐이 난다 — 리스 시작 이후
+    ``stale_after`` 가 지나기 전까지는 최소한 첫 보고를 기다려 준다.
+    """
+    if not windows:
+        return None
+    if _max_fresh_pct(windows, now, stale_after) is not None:
+        return None
+    started = _aware(lease_started_at)
+    if started is not None and now - started <= stale_after:
+        return None
+    if server is None or server.status != "online":
+        return None
+    return max(
+        windows, key=lambda w: _aware(w.reported_at) or datetime.min.replace(tzinfo=UTC)
+    )
+
+
+def _sync_usage_stale_alert(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    account: Account,
+    server_id: uuid.UUID,
+    windows: list[AccountUsageWindow],
+    server: Server | None,
+    lease_started_at: datetime,
+    stamp: datetime,
+    stale_after: timedelta,
+) -> None:
+    """대여 중(leased)인 계정의 관측이 전부 낡아 스왑 트리거((_fresh_pct or -1.0)
+    >= swap_at)가 조용히 불발되는 상태를 알린다(F1, 08-22 modarra9 83% 동결 사고 —
+    85% 스왑이 안 걸려 실제로는 100% 까지 소진됐다).
+    """
+    latest = _usage_stale(
+        windows,
+        server=server,
+        lease_started_at=lease_started_at,
+        now=stamp,
+        stale_after=stale_after,
+    )
+    if latest is None:
+        alerts_service.resolve(
+            db, server_id=server_id, kind=USAGE_STALE_KIND, account_id=account.id
+        )
+        return
+    last_observed = _aware(latest.reported_at)
+    minutes_since = (
+        int((stamp - last_observed).total_seconds() // 60) if last_observed is not None else None
+    )
+    alerts_service.open_alert(
+        db,
+        tenant_id=tenant_id,
+        server_id=server_id,
+        account_id=account.id,
+        kind=USAGE_STALE_KIND,
+        severity="warning",
+        detail={
+            "last_observed_at": str(latest.reported_at) if latest.reported_at else None,
+            "pct": latest.pct,
+            "minutes_since_observed": minutes_since,
+        },
+    )
+
+
 # -- P1 상태 계산 -------------------------------------------------------------
 def record_event(
     db: Session,
@@ -591,6 +678,20 @@ def compute_states(
                 now=stamp,
             ):
                 changed += 1
+            # leased 동안에만 본다 — recalling은 곧 배정이 끊길 참이라 스왑
+            # 트리거가 어차피 이 계정을 겨냥하지 않는다.
+            if state == "leased":
+                _sync_usage_stale_alert(
+                    db,
+                    tenant_id=tenant_id,
+                    account=account,
+                    server_id=assignment.server_id,
+                    windows=account_windows,
+                    server=servers.get(assignment.server_id),
+                    lease_started_at=_lease_started_at(assignment),
+                    stamp=stamp,
+                    stale_after=stale_after,
+                )
             continue
 
         # 여기부터는 배정이 없는 계정. 방금 대여가 끝났으면 공평 순환의 기준점을 찍는다.
@@ -774,6 +875,8 @@ def ineligible_reason(
     *,
     unusable: set[uuid.UUID],
     windows: list[AccountUsageWindow],
+    now: datetime,
+    stale_after: timedelta,
 ) -> str | None:
     """이 계정이 자동화 대상이 **될 수 없는** 이유. 될 수 있으면 None.
 
@@ -782,6 +885,13 @@ def ineligible_reason(
 
     여기 담기는 것은 **지속적인** 사유뿐이다. 대여 중이거나 충전 중인 것은 순환의
     정상 국면이지 부적격이 아니므로, 그 판단은 ``_candidates`` 의 상태 필터가 한다.
+
+    ``stale_observation`` (F1 리뷰 반영, 08-22): 창은 있고 pct 도 읽히지만
+    ``stale_after`` 안에 신선한 값이 하나도 없으면 **교체 대상**으로 뽑지 않는다.
+    관측이 두절된 계정을 넘겨받을 계정으로 고르면 ``relogin_required`` 로 격리된
+    계정이 다른 계정을 대신 인수하는 역설이 생긴다. 관측 파이프라인 전체가
+    죽었을 때는 신선한 후보가 하나도 안 남아 F3 가 자연히 조용해지고
+    ``pool_usage_stale`` 경보만 남는다 — 후보가 없다고 교체를 강행하지 않는다.
     """
     if account.credential_type in _WINDOWLESS_CREDENTIAL_TYPES:
         return "api_key"
@@ -795,6 +905,8 @@ def ineligible_reason(
         return "held"
     if _all_pct_unknown(windows):
         return "no_observation"
+    if windows and _max_fresh_pct(windows, now, stale_after) is None:
+        return "stale_observation"
     return None
 
 
@@ -805,6 +917,8 @@ def _candidates(
     windows: dict[uuid.UUID, list[AccountUsageWindow]],
     unusable: set[uuid.UUID],
     server_has_live: bool,
+    now: datetime,
+    stale_after: timedelta,
     reserved: set[uuid.UUID] | None = None,
     replacing: bool = False,
 ) -> list[Account]:
@@ -824,7 +938,11 @@ def _candidates(
         # 지속적인 부적격 사유(자격증명 유형·제외 플래그·사용 불가·운영자 상태·
         # 미상 관측)는 한 곳에서 판정한다 — 콘솔이 보여 주는 이유와 같은 함수다.
         if ineligible_reason(
-            account, unusable=unusable, windows=windows.get(account.id, [])
+            account,
+            unusable=unusable,
+            windows=windows.get(account.id, []),
+            now=now,
+            stale_after=stale_after,
         ) is not None:
             continue
         # 순환의 정상 국면(대여 중·회수 중·충전 중)은 부적격이 아니라 "지금은 아님"이다.
@@ -867,6 +985,7 @@ def _desired_recommendation(
     unusable: set[uuid.UUID],
     stale_after: timedelta,
     now: datetime,
+    servers: dict[uuid.UUID, Server],
 ) -> dict | None:
     """이 서버에 대해 지금 참인 권고 한 건(또는 없음).
 
@@ -982,6 +1101,69 @@ def _desired_recommendation(
             ),
         }
 
+    # F3(08-22 modarra9 사고): 관측이 끊기면 위 hot 트리거((_fresh_pct or -1.0)
+    # >= swap_at)는 낡은 pct를 -1.0으로 접어 조용히 불발된다. pool_usage_stale
+    # 경보(F1)와 같은 판정 — leased, 창은 있으나 전부 stale/미상, 지금 이 계정을
+    # 들고 있는 서버가 online, 재배정 유예(stale_after)도 지났다 — 이 성립하면
+    # 소진 임박과 동일하게 취급해 같은 swap 경로로 선제 교체한다.
+    # min_lease_minutes는 hot과 똑같이 존중한다.
+    stale_windows: dict[uuid.UUID, AccountUsageWindow] = {}
+    for a in leased:
+        if now - _lease_started_at(live[a.id]) < min_lease:
+            continue
+        w = _usage_stale(
+            windows.get(a.id, []),
+            server=servers.get(live[a.id].server_id),
+            lease_started_at=_lease_started_at(live[a.id]),
+            now=now,
+            stale_after=stale_after,
+        )
+        if w is not None:
+            stale_windows[a.id] = w
+    stale = [a for a in leased if a.id in stale_windows]
+    if stale:
+        # 결정적 우선순위 — ① 마지막으로 알려진 pct가 높은 쪽(소진에 더 가까웠을
+        # 가능성이 크다) ② 그마저 같으면 두절이 더 오래된 쪽 ③ 그래도 같으면
+        # account_id. 스윕이 재진입할 때마다 대상이 흔들리면 안 된다(_candidates
+        # 의 타이브레이크와 같은 이유).
+        def _stale_rank(a: Account) -> tuple[float, float, str]:
+            w = stale_windows[a.id]
+            pct = w.pct if w.pct is not None else -1.0
+            reported = _aware(w.reported_at)
+            age = (now - reported).total_seconds() if reported is not None else float("inf")
+            return (-pct, -age, str(a.id))
+
+        worst = min(stale, key=_stale_rank)
+        target_account = _handover_target({worst.id})
+        # broken/hot 과 달리 대상이 없다고 여기서 완전히 포기하지 않는다 — 두절은
+        # "이 계정이 지금 위험하다"는 확증이 아니라 "모른다"일 뿐이라, 대신 넘길
+        # 계정이 없으면 아래 초과분 회수(target 불필요)나 예열이 여전히 같은
+        # 계정을 서버에서 내리는 데 쓸 수 있다.
+        if target_account is not None:
+            stale_window = stale_windows[worst.id]
+            last_observed = _aware(stale_window.reported_at)
+            minutes_since = (
+                int((now - last_observed).total_seconds() // 60)
+                if last_observed is not None
+                else None
+            )
+            last_pct = stale_window.pct
+            return {
+                "kind": "swap",
+                "from_account_id": worst.id,
+                "to_account_id": target_account.id,
+                # 현재 pct는 미상이다 — swap_at을 넘었다고 주장하는 대신 마지막으로
+                # 알려진 값을 남긴다(트리거 근거가 pct가 아니라 두절이라는 뜻).
+                "trigger_pct": last_pct,
+                "reason": (
+                    f"{worst.email}의 사용량 관측이 "
+                    f"{minutes_since if minutes_since is not None else '알 수 없는 시간'}분째 "
+                    f"두절됐다(마지막 관측 {last_pct if last_pct is not None else '미상'}%). "
+                    f"소진 여부를 확인할 수 없어 선제 교체한다. {target_account.email}로 전환한다."
+                    + _gap_note(target_account)
+                ),
+            }
+
     if len(leased) > target:
         # 초과분은 남은 여유가 가장 적은 계정부터 거둔다. 방금 올린 계정은 후보에서
         # 빼고(min_lease), 순위는 신선한 관측으로만 매긴다 — 낡은 pct 로 고르면
@@ -1040,6 +1222,7 @@ def build_recommendations(
         db.scalars(select(Account).where(Account.tenant_id == tenant_id).order_by(Account.id)).all()
     )
     by_id = {a.id: a for a in accounts}
+    servers_by_id = {s.id: s for s in servers}
     live = _live_assignments(db, tenant_id)
     windows = _windows_by_account(db, tenant_id)
     unusable = _unusable_account_ids(db, tenant_id)
@@ -1091,6 +1274,8 @@ def build_recommendations(
                         unusable=unusable,
                         reserved=reserved,
                         server_has_live=bool(server_live),
+                        now=stamp,
+                        stale_after=stale_after,
                     ),
                     replacements=_candidates(
                         accounts,
@@ -1099,11 +1284,14 @@ def build_recommendations(
                         unusable=unusable,
                         reserved=reserved,
                         server_has_live=bool(server_live),
+                        now=stamp,
+                        stale_after=stale_after,
                         replacing=True,
                     ),
                     unusable=unusable,
                     stale_after=stale_after,
                     now=stamp,
+                    servers=servers_by_id,
                 )
         if desired is not None and desired["to_account_id"] is not None:
             # 이번 틱에 만든 권고의 대상도 곧바로 예약된다 — 뒤에 오는 서버가 같은
