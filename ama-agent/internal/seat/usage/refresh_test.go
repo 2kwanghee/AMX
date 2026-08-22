@@ -231,6 +231,12 @@ func TestTryRefresh_MalformedSuccessBodyIsTransient(t *testing.T) {
 	}
 }
 
+// TestTryRefresh_NoRefreshTokenNeverCallsNetwork covers credentials that
+// PARSE CLEANLY but genuinely carry no usable refresh token — a legitimate
+// shape (e.g. a `claude setup token` account, or a non-OAuth api_key
+// credential with no claudeAiOauth block at all), distinct from a credential
+// this package could not even parse (see
+// TestTryRefresh_MalformedCredentialNeverCallsNetwork, A5).
 func TestTryRefresh_NoRefreshTokenNeverCallsNetwork(t *testing.T) {
 	called := false
 	r := newTestRefresher(t, func(w http.ResponseWriter, req *http.Request) {
@@ -239,9 +245,7 @@ func TestTryRefresh_NoRefreshTokenNeverCallsNetwork(t *testing.T) {
 	})
 
 	cases := map[string][]byte{
-		"not json at all":            []byte("not json"),
-		"missing claudeAiOauth":      []byte(`{"foo": "bar"}`),
-		"claudeAiOauth wrong shape":  []byte(`{"claudeAiOauth": "not-an-object"}`),
+		"missing claudeAiOauth (e.g. an api_key credential)": []byte(`{"foo": "bar"}`),
 		"empty refreshToken":         refreshCredJSON(t, "", nil),
 		"missing refreshToken field": mustMarshal(t, map[string]any{"claudeAiOauth": map[string]any{"accessToken": "x"}}),
 	}
@@ -254,6 +258,48 @@ func TestTryRefresh_NoRefreshTokenNeverCallsNetwork(t *testing.T) {
 			}
 			if called {
 				t.Error("network was called despite no usable refresh token")
+			}
+		})
+	}
+}
+
+// TestTryRefresh_MalformedCredentialNeverCallsNetwork is the A5 regression
+// test (adversarial review, reproduced with truncated/empty/JSON-array/
+// JSON-null inputs): a credential this package cannot even PARSE must be
+// classified distinctly from "no_refresh_token" (which
+// ClassifyRefreshFailure promotes toward relogin_required/quarantine) — a
+// merely corrupted file on disk must never quarantine an otherwise healthy
+// account.
+func TestTryRefresh_MalformedCredentialNeverCallsNetwork(t *testing.T) {
+	called := false
+	r := newTestRefresher(t, func(w http.ResponseWriter, req *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cases := map[string][]byte{
+		"truncated":                 []byte(`{"claudeAiOauth": {"refreshTok`),
+		"empty":                     []byte(``),
+		"not json at all":           []byte("not json"),
+		"json array":                []byte(`[]`),
+		"json null":                 []byte(`null`),
+		"claudeAiOauth wrong shape": []byte(`{"claudeAiOauth": "not-an-object"}`),
+	}
+	for name, cred := range cases {
+		t.Run(name, func(t *testing.T) {
+			called = false
+			out := r.TryRefresh(context.Background(), cred, time.Second)
+			if out.Error != "malformed_credential" {
+				t.Fatalf("Error = %q, want malformed_credential", out.Error)
+			}
+			if called {
+				t.Error("network was called despite an unparseable credential")
+			}
+			// The whole point (A5): this must NOT be treated as a permanent/
+			// quarantine-worthy failure the way a verified-absent refresh
+			// token is.
+			if got := ClassifyRefreshFailure(out.Error); got != StatusTokenExpired {
+				t.Errorf("ClassifyRefreshFailure(%q) = %q, want StatusTokenExpired (never quarantine on a parse failure)", out.Error, got)
 			}
 		})
 	}
@@ -422,8 +468,12 @@ func TestStageRefreshedCredential_UsesProfileStage(t *testing.T) {
 	}
 
 	refreshed := RefreshOutcome{Credentials: refreshCredJSON(t, "rotated-refresh-token", nil)}
-	if err := StageRefreshedCredential(store, drv, accountKey, refreshed, initialMeta); err != nil {
+	conflict, err := StageRefreshedCredential(store, drv, accountKey, refreshed, initialMeta)
+	if err != nil {
 		t.Fatalf("StageRefreshedCredential: %v", err)
+	}
+	if conflict {
+		t.Error("conflict = true with no TokenAccount in the outcome, want false")
 	}
 
 	complete, err = store.Complete(drv, accountKey)
@@ -461,7 +511,7 @@ func TestStageRefreshedCredential_RejectsFailedOutcome(t *testing.T) {
 		{Error: "transient"},
 		{}, // Credentials nil, Error "" — malformed caller usage
 	} {
-		if err := StageRefreshedCredential(store, drv, accountKey, out, provider.AddMeta{Email: "user@example.com"}); err == nil {
+		if _, err := StageRefreshedCredential(store, drv, accountKey, out, provider.AddMeta{Email: "user@example.com"}); err == nil {
 			t.Errorf("StageRefreshedCredential(%+v) = nil error, want a rejection", out)
 		}
 	}
@@ -471,5 +521,213 @@ func TestStageRefreshedCredential_RejectsFailedOutcome(t *testing.T) {
 	complete, err := store.Complete(drv, accountKey)
 	if err != nil || complete {
 		t.Fatalf("Complete = (%v, %v), want (false, nil) — a rejected outcome must not stage anything", complete, err)
+	}
+}
+
+// -- A1 (adversarial review): redirect never leaks the refresh token -------
+
+// TestTryRefresh_RedirectIsNeverFollowed is the A1 regression test. A
+// primary server answers with a 307 (which, per RFC 7231, preserves the
+// original request's method AND BODY) pointing at a second, "malicious"
+// server; the malicious server would receive credJSON's real refresh token
+// verbatim in its POST body if TryRefresh ever followed the redirect. It
+// must not: Go's default CheckRedirect follows up to 10 redirects, which is
+// exactly the bug NewRefresher's CheckRedirect (refresh.go) now closes.
+func TestTryRefresh_RedirectIsNeverFollowed(t *testing.T) {
+	for _, code := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(fmt.Sprintf("http-%d", code), func(t *testing.T) {
+			maliciousCalled := false
+			var maliciousSawBody map[string]string
+			malicious := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				maliciousCalled = true
+				_ = json.NewDecoder(req.Body).Decode(&maliciousSawBody)
+				// A malicious host would of course claim success and hand
+				// back attacker-controlled tokens.
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"access_token": "ATTACKER-CONTROLLED-TOKEN", "expires_in": 3600}`))
+			}))
+			t.Cleanup(malicious.Close)
+
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				http.Redirect(w, req, malicious.URL, code)
+			}))
+			t.Cleanup(primary.Close)
+
+			r := newRefresherForTest(primary.URL, &http.Client{Timeout: 2 * time.Second})
+			out := r.TryRefresh(context.Background(), refreshCredJSON(t, secretRefreshToken, nil), time.Second)
+
+			if maliciousCalled {
+				t.Fatal("the malicious redirect target was contacted at all — the refresh_token was sent to it")
+			}
+			if maliciousSawBody != nil {
+				t.Fatalf("malicious server decoded a body: %+v", maliciousSawBody)
+			}
+			if out.Error == "" {
+				t.Fatalf("out = %+v, want a failure — a redirect response must never classify as success", out)
+			}
+			if out.Credentials != nil {
+				t.Fatalf("Credentials = %s, want nil — must never adopt the attacker's fabricated token", out.Credentials)
+			}
+		})
+	}
+}
+
+// TestFetch_RedirectIsNeverFollowed is Collector's A1 counterpart: a
+// redirect must never be classified as a successful usage fetch, and the
+// redirect target (which would receive the Authorization header on some Go
+// versions/stdlib configurations if this policy regressed) must never be
+// contacted.
+func TestFetch_RedirectIsNeverFollowed(t *testing.T) {
+	maliciousCalled := false
+	malicious := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		maliciousCalled = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"five_hour": {"utilization": 1}}`))
+	}))
+	t.Cleanup(malicious.Close)
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, malicious.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(primary.Close)
+
+	c := newCollectorForTest(primary.URL, &http.Client{Timeout: 2 * time.Second})
+	got, err := c.Fetch(context.Background(), secretToken)
+
+	if maliciousCalled {
+		t.Fatal("the malicious redirect target was contacted at all")
+	}
+	if err == nil {
+		t.Fatalf("got = %+v, err = nil, want a *FetchError — a redirect must never classify as success", got)
+	}
+	var fe *FetchError
+	if !asFetchError(err, &fe) {
+		t.Fatalf("err = %v, want *FetchError", err)
+	}
+	if fe.Kind != "http-307" {
+		t.Errorf("FetchError.Kind = %q, want http-307", fe.Kind)
+	}
+}
+
+// -- A3 (adversarial review): expires_in overflow ---------------------------
+
+// TestTryRefresh_OversizedExpiresInIsRejected is the A3 regression test: an
+// expires_in value that survives json.Unmarshal's float64 range check but
+// overflows int64(*ExpiresIn*1000) inside TryRefresh must be rejected
+// (transient), never silently turned into a garbage expiresAt.
+func TestTryRefresh_OversizedExpiresInIsRejected(t *testing.T) {
+	cases := map[string]float64{
+		"far past maxExpiresInS":  1e18,
+		"just past maxExpiresInS": maxExpiresInS + 1,
+		"negative":                -1,
+		"zero":                    0,
+	}
+	for name, expiresIn := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newTestRefresher(t, func(w http.ResponseWriter, req *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				body, _ := json.Marshal(map[string]any{
+					"access_token": secretAccessToken,
+					"expires_in":   expiresIn,
+				})
+				_, _ = w.Write(body)
+			})
+			out := r.TryRefresh(context.Background(), refreshCredJSON(t, secretRefreshToken, nil), time.Second)
+			if out.Error != "transient" {
+				t.Fatalf("Error = %q, want transient for expires_in=%v", out.Error, expiresIn)
+			}
+			if out.Credentials != nil {
+				t.Fatalf("Credentials = %s, want nil — must never write a garbage expiresAt", out.Credentials)
+			}
+		})
+	}
+}
+
+func TestTryRefresh_SaneExpiresInStillSucceeds(t *testing.T) {
+	r := newTestRefresher(t, func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"access_token": "` + secretAccessToken + `", "expires_in": 3600}`))
+	})
+	out := r.TryRefresh(context.Background(), refreshCredJSON(t, secretRefreshToken, nil), time.Second)
+	if out.Error != "" {
+		t.Fatalf("Error = %q, want success for a sane expires_in", out.Error)
+	}
+}
+
+// -- A4 (adversarial review): identity-conflict on refresh ------------------
+
+func TestIdentityConflict(t *testing.T) {
+	conflictTA := &TokenAccount{UUID: "acct-attacker"}
+	matchTA := &TokenAccount{UUID: "acct-expected"}
+
+	cases := []struct {
+		name    string
+		outcome RefreshOutcome
+		meta    provider.AddMeta
+		want    bool
+	}{
+		{"uuid mismatch is a conflict", RefreshOutcome{TokenAccount: conflictTA}, provider.AddMeta{AccountUUID: "acct-expected"}, true},
+		{"uuid match is not a conflict", RefreshOutcome{TokenAccount: matchTA}, provider.AddMeta{AccountUUID: "acct-expected"}, false},
+		{"no TokenAccount is not a conflict (opportunistic, absent)", RefreshOutcome{}, provider.AddMeta{AccountUUID: "acct-expected"}, false},
+		{"unknown expected uuid is not a conflict (nothing to compare)", RefreshOutcome{TokenAccount: conflictTA}, provider.AddMeta{}, false},
+		{"unknown token uuid is not a conflict", RefreshOutcome{TokenAccount: &TokenAccount{}}, provider.AddMeta{AccountUUID: "acct-expected"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IdentityConflict(c.outcome, c.meta); got != c.want {
+				t.Errorf("IdentityConflict(%+v, %+v) = %v, want %v", c.outcome, c.meta, got, c.want)
+			}
+		})
+	}
+}
+
+// TestStageRefreshedCredential_IdentityConflictStillStagesButReportsTrue
+// verifies StageRefreshedCredential's ordering (A4, mirroring
+// autoswitch.py's _freshen_target: "Persist first, unconditionally: the
+// grant consumed a generation, and not writing the successor would kill the
+// lineage regardless of whose it turns out to be"): a conflicting identity
+// must NOT prevent the rotated credential from being staged, but must be
+// reported so the caller can quarantine this profile as a switch target.
+func TestStageRefreshedCredential_IdentityConflictStillStagesButReportsTrue(t *testing.T) {
+	store, err := profile.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("profile.Open: %v", err)
+	}
+	drv := claude.New()
+	accountKey := profile.AccountKey("user@example.com")
+	meta := provider.AddMeta{Email: "user@example.com", AccountUUID: "acct-expected"}
+
+	if err := store.Stage(drv, accountKey, refreshCredJSON(t, "initial-refresh-token", nil), meta); err != nil {
+		t.Fatalf("initial Stage: %v", err)
+	}
+
+	outcome := RefreshOutcome{
+		Credentials:  refreshCredJSON(t, "rotated-refresh-token", nil),
+		TokenAccount: &TokenAccount{UUID: "acct-DIFFERENT"},
+	}
+	conflict, err := StageRefreshedCredential(store, drv, accountKey, outcome, meta)
+	if err != nil {
+		t.Fatalf("StageRefreshedCredential: %v", err)
+	}
+	if !conflict {
+		t.Error("conflict = false, want true for a mismatched TokenAccount.UUID")
+	}
+
+	// The rotated credential must still be on disk — losing it here would
+	// kill the refresh-token lineage for good.
+	complete, err := store.Complete(drv, accountKey)
+	if err != nil || !complete {
+		t.Fatalf("Complete = (%v, %v), want (true, nil) — identity conflict must not prevent staging", complete, err)
+	}
+	dir, err := store.ProfileDir(drv.Name(), accountKey)
+	if err != nil {
+		t.Fatalf("ProfileDir: %v", err)
+	}
+	onDisk, err := os.ReadFile(drv.CredentialPath(dir))
+	if err != nil {
+		t.Fatalf("read staged credential: %v", err)
+	}
+	if !strings.Contains(string(onDisk), "rotated-refresh-token") {
+		t.Error("the rotated credential was not staged despite the identity conflict")
 	}
 }

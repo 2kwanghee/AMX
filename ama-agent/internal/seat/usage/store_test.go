@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,15 +57,30 @@ func TestOpenStore_LayoutIsSeparateFromProfileAndDeliverLocks(t *testing.T) {
 	}
 }
 
-func TestClaim_StampsLeaseAndCreatesRow(t *testing.T) {
+func TestOpenStore_RejectsSymlinkedDir(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(base, "usage")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+	if _, err := OpenStore(base); err == nil {
+		t.Error("OpenStore with a symlinked usage/ dir = nil error, want rejection")
+	}
+}
+
+func TestReserve_StampsLeaseAndCreatesRow(t *testing.T) {
 	s := mustOpenStore(t)
 	ref := testRef("a@example.com")
 	fixed := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
 	s.clock = func() time.Time { return fixed }
 
-	claims, err := s.Claim([]AccountRef{ref})
-	if err != nil {
-		t.Fatalf("Claim: %v", err)
+	claims, recovered, err := s.Reserve([]AccountRef{ref})
+	if err != nil || recovered {
+		t.Fatalf("Reserve: recovered=%v err=%v", recovered, err)
 	}
 	id, ok := claims[ref]
 	if !ok || id == "" {
@@ -87,22 +103,182 @@ func TestClaim_StampsLeaseAndCreatesRow(t *testing.T) {
 		t.Errorf("ClaimUntil = %v, want %v", *e.ClaimUntil, wantUntil)
 	}
 	if !e.Claimed(fixed) {
-		t.Error("Claimed(now) = false immediately after Claim, want true")
+		t.Error("Claimed(now) = false immediately after Reserve, want true")
 	}
 	if e.Claimed(fixed.Add(91 * time.Second)) {
 		t.Error("Claimed(now+91s) = true, want false (CLAIM_TTL_S=90 elapsed)")
 	}
 }
 
-func TestClaim_TwoDifferentRefsGetDistinctIDs(t *testing.T) {
+func TestReserve_TwoDifferentRefsGetDistinctIDs(t *testing.T) {
 	s := mustOpenStore(t)
 	a, b := testRef("a@example.com"), testRef("b@example.com")
-	claims, err := s.Claim([]AccountRef{a, b})
+	claims, _, err := s.Reserve([]AccountRef{a, b})
 	if err != nil {
-		t.Fatalf("Claim: %v", err)
+		t.Fatalf("Reserve: %v", err)
 	}
 	if claims[a] == "" || claims[b] == "" || claims[a] == claims[b] {
 		t.Fatalf("claims = %+v, want two distinct non-empty ids", claims)
+	}
+}
+
+// TestReserve_ConcurrentCallersOnlyOneWins is the A2 regression test
+// (adversarial review, reproduced empirically): two Store handles opened
+// on the SAME stateDir (simulating two collector processes) race a Reserve
+// on the same never-touched ref. The store's lock (flock, per-open-file-
+// description — genuinely exclusive across the two handles, not merely
+// in-process) must serialize them so exactly one wins the lease; the
+// REMOVED Claim let both win because it never re-checked eligibility under
+// the lock.
+func TestReserve_ConcurrentCallersOnlyOneWins(t *testing.T) {
+	base := t.TempDir()
+	s1, err := OpenStore(base)
+	if err != nil {
+		t.Fatalf("OpenStore s1: %v", err)
+	}
+	s2, err := OpenStore(base)
+	if err != nil {
+		t.Fatalf("OpenStore s2: %v", err)
+	}
+	ref := testRef("a@example.com")
+	stores := [2]*Store{s1, s2}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	var results [2]map[AccountRef]string
+	var errs [2]error
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], _, errs[i] = stores[i].Reserve([]AccountRef{ref})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: Reserve error: %v", i, err)
+		}
+	}
+	wins := 0
+	for _, r := range results {
+		if id, ok := r[ref]; ok && id != "" {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("wins = %d, want exactly 1 (results=%+v)", wins, results)
+	}
+}
+
+// TestReserve_EligibilityGating exercises the four exclusivity conditions
+// (adversarial review A2's explicit list) one at a time: a row that fails
+// ANY of them must not be re-leased by a second Reserve call.
+func TestReserve_EligibilityGating(t *testing.T) {
+	t.Run("already claimed (live lease)", func(t *testing.T) {
+		s := mustOpenStore(t)
+		ref := testRef("a@example.com")
+		if _, _, err := s.Reserve([]AccountRef{ref}); err != nil {
+			t.Fatalf("first Reserve: %v", err)
+		}
+		won, _, err := s.Reserve([]AccountRef{ref})
+		if err != nil {
+			t.Fatalf("second Reserve: %v", err)
+		}
+		if _, ok := won[ref]; ok {
+			t.Error("second Reserve won a still-claimed row, want it excluded")
+		}
+	})
+
+	t.Run("in backoff", func(t *testing.T) {
+		s := mustOpenStore(t)
+		ref := testRef("a@example.com")
+		if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "http-429"}}, nil); err != nil {
+			t.Fatalf("Record failure: %v", err)
+		}
+		won, _, err := s.Reserve([]AccountRef{ref})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		if _, ok := won[ref]; ok {
+			t.Error("Reserve won a row still in backoff, want it excluded")
+		}
+	})
+
+	t.Run("token dead (quarantined)", func(t *testing.T) {
+		s := mustOpenStore(t)
+		ref := testRef("a@example.com")
+		if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "invalid_grant"}}, nil); err != nil {
+			t.Fatalf("Record failure: %v", err)
+		}
+		// Let backoff elapse so backoff alone cannot explain exclusion.
+		s.clock = func() time.Time { return time.Now().Add(time.Hour) }
+		won, _, err := s.Reserve([]AccountRef{ref})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		if _, ok := won[ref]; ok {
+			t.Error("Reserve won a token-dead row, want it excluded")
+		}
+	})
+
+	t.Run("already fresh", func(t *testing.T) {
+		s := mustOpenStore(t)
+		ref := testRef("a@example.com")
+		if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: &provider.Usage{FiveHour: &provider.Window{Pct: 1}}}}, nil); err != nil {
+			t.Fatalf("Record success: %v", err)
+		}
+		won, _, err := s.Reserve([]AccountRef{ref})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		if _, ok := won[ref]; ok {
+			t.Error("Reserve won an already-fresh row, want it excluded")
+		}
+	})
+}
+
+func TestReserve_NeverTouchedRowIsAlwaysEligible(t *testing.T) {
+	s := mustOpenStore(t)
+	ref := testRef("never-touched@example.com")
+	won, _, err := s.Reserve([]AccountRef{ref})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if _, ok := won[ref]; !ok {
+		t.Error("Reserve excluded a never-touched row, want it always eligible")
+	}
+}
+
+func TestReserve_PropagatesRecoveredFlag(t *testing.T) {
+	s := mustOpenStore(t)
+	if err := os.WriteFile(s.path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	_, recovered, err := s.Reserve([]AccountRef{testRef("a@example.com")})
+	if err != nil {
+		t.Fatalf("Reserve on a corrupt file must not error: %v", err)
+	}
+	if !recovered {
+		t.Error("recovered = false reserving against a corrupt file, want true")
+	}
+}
+
+func TestRecord_PropagatesRecoveredFlag(t *testing.T) {
+	s := mustOpenStore(t)
+	if err := os.WriteFile(s.path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	ref := testRef("a@example.com")
+	_, recovered, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: nil}}, nil)
+	if err != nil {
+		t.Fatalf("Record on a corrupt file must not error: %v", err)
+	}
+	if !recovered {
+		t.Error("recovered = false recording against a corrupt file, want true")
 	}
 }
 
@@ -111,17 +287,21 @@ func TestRecord_SuccessFencedByClaimUpdatesLastGoodAndClearsFailureState(t *test
 	ref := testRef("a@example.com")
 
 	// Seed a prior failure so success-clearing is actually exercised.
-	if _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "http-429", RetryAfterS: nil}}, nil); err != nil {
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "http-429", RetryAfterS: nil}}, nil); err != nil {
 		t.Fatalf("seed failure Record: %v", err)
 	}
 
-	claims, err := s.Claim([]AccountRef{ref})
+	// The seeded 429 leaves the row in backoff, which Reserve's eligibility
+	// gate would legitimately exclude — advance the clock past it so Reserve
+	// can hand out a fenced claim id the way a real second poll would.
+	s.clock = func() time.Time { return time.Now().Add(time.Hour) }
+	claims, _, err := s.Reserve([]AccountRef{ref})
 	if err != nil {
-		t.Fatalf("Claim: %v", err)
+		t.Fatalf("Reserve: %v", err)
 	}
 	usage := &provider.Usage{FiveHour: &provider.Window{Pct: 42}}
 	plan := &Plan{NextPollAt: time.Now().Add(5 * time.Minute), IntervalS: 300}
-	accepted, err := s.Record(map[AccountRef]FetchRecord{
+	accepted, _, err := s.Record(map[AccountRef]FetchRecord{
 		ref: {Usage: usage, Plan: plan},
 	}, claims)
 	if err != nil {
@@ -163,7 +343,7 @@ func TestRecord_FailureIncrementsAndComputesBackoffViaNextPollAfterFetchError(t 
 	s.clock = func() time.Time { return fixed }
 
 	retryAfter := 42.0
-	accepted, err := s.Record(map[AccountRef]FetchRecord{
+	accepted, _, err := s.Record(map[AccountRef]FetchRecord{
 		ref: {Error: "http-429", RetryAfterS: &retryAfter},
 	}, nil)
 	if err != nil {
@@ -212,7 +392,7 @@ func TestRecord_PermanentAuthErrorsAdvanceAuthDeadStrikesAndTokenDead(t *testing
 	for _, errKind := range []string{"invalid_grant", "no_refresh_token"} {
 		t.Run(errKind, func(t *testing.T) {
 			s2 := mustOpenStore(t)
-			if _, err := s2.Record(map[AccountRef]FetchRecord{ref: {Error: errKind}}, nil); err != nil {
+			if _, _, err := s2.Record(map[AccountRef]FetchRecord{ref: {Error: errKind}}, nil); err != nil {
 				t.Fatalf("Record: %v", err)
 			}
 			entries, _, err := s2.Entries([]AccountRef{ref})
@@ -230,7 +410,7 @@ func TestRecord_PermanentAuthErrorsAdvanceAuthDeadStrikesAndTokenDead(t *testing
 	}
 
 	// A transient error must NOT advance the strike count.
-	if _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "timeout"}}, nil); err != nil {
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "timeout"}}, nil); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	entries, _, err := s.Entries([]AccountRef{ref})
@@ -240,15 +420,30 @@ func TestRecord_PermanentAuthErrorsAdvanceAuthDeadStrikesAndTokenDead(t *testing
 	if e := entries[ref]; e.AuthDeadStrikes != 0 || e.TokenDead() {
 		t.Errorf("transient failure must not advance AuthDeadStrikes: %+v", e)
 	}
+
+	// A5/adversarial review: "malformed_credential" must NOT advance the
+	// strike count either — a parse failure is no evidence the account
+	// itself is unusable.
+	s3 := mustOpenStore(t)
+	if _, _, err := s3.Record(map[AccountRef]FetchRecord{ref: {Error: "malformed_credential"}}, nil); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	entries, _, err = s3.Entries([]AccountRef{ref})
+	if err != nil {
+		t.Fatalf("Entries: %v", err)
+	}
+	if e := entries[ref]; e.AuthDeadStrikes != 0 || e.TokenDead() {
+		t.Errorf("malformed_credential must not advance AuthDeadStrikes: %+v", e)
+	}
 }
 
 func TestRecord_SuccessAfterDeadStrikesResetsAuthDeadStrikes(t *testing.T) {
 	s := mustOpenStore(t)
 	ref := testRef("a@example.com")
-	if _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "invalid_grant"}}, nil); err != nil {
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "invalid_grant"}}, nil); err != nil {
 		t.Fatalf("Record failure: %v", err)
 	}
-	if _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: nil}}, nil); err != nil {
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: nil}}, nil); err != nil {
 		t.Fatalf("Record success: %v", err)
 	}
 	entries, _, err := s.Entries([]AccountRef{ref})
@@ -264,20 +459,25 @@ func TestRecord_StaleClaimIsFencedOut(t *testing.T) {
 	s := mustOpenStore(t)
 	ref := testRef("a@example.com")
 
-	firstClaims, err := s.Claim([]AccountRef{ref})
+	firstClaims, _, err := s.Reserve([]AccountRef{ref})
 	if err != nil {
-		t.Fatalf("first Claim: %v", err)
+		t.Fatalf("first Reserve: %v", err)
 	}
-	secondClaims, err := s.Claim([]AccountRef{ref})
+	// The row is now claimed, so a second Reserve would normally exclude it
+	// (eligibility gating) — advance past the lease so the SECOND Reserve
+	// can win a fresh claim id on the same ref, exactly as two racing
+	// collectors would after the first lease ages out.
+	s.clock = func() time.Time { return time.Now().Add(time.Hour) }
+	secondClaims, _, err := s.Reserve([]AccountRef{ref})
 	if err != nil {
-		t.Fatalf("second Claim: %v", err)
+		t.Fatalf("second Reserve: %v", err)
 	}
 	if firstClaims[ref] == secondClaims[ref] {
-		t.Fatal("two Claim calls on the same ref produced the same claim id")
+		t.Fatal("two Reserve calls on the same ref produced the same claim id")
 	}
 
 	usage := &provider.Usage{FiveHour: &provider.Window{Pct: 10}}
-	accepted, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, firstClaims)
+	accepted, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, firstClaims)
 	if err != nil {
 		t.Fatalf("Record with stale claim: %v", err)
 	}
@@ -285,7 +485,7 @@ func TestRecord_StaleClaimIsFencedOut(t *testing.T) {
 		t.Error("accepted[ref] = true using the FIRST (superseded) claim id, want it fenced out")
 	}
 
-	accepted, err = s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, secondClaims)
+	accepted, _, err = s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, secondClaims)
 	if err != nil {
 		t.Fatalf("Record with live claim: %v", err)
 	}
@@ -300,12 +500,12 @@ func TestRecord_UnfencedModeDefersOnlyToALiveClaim(t *testing.T) {
 	fixed := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
 	s.clock = func() time.Time { return fixed }
 
-	if _, err := s.Claim([]AccountRef{ref}); err != nil {
-		t.Fatalf("Claim: %v", err)
+	if _, _, err := s.Reserve([]AccountRef{ref}); err != nil {
+		t.Fatalf("Reserve: %v", err)
 	}
 
 	usage := &provider.Usage{FiveHour: &provider.Window{Pct: 5}}
-	accepted, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, nil)
+	accepted, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, nil)
 	if err != nil {
 		t.Fatalf("Record (unfenced, live claim): %v", err)
 	}
@@ -316,7 +516,7 @@ func TestRecord_UnfencedModeDefersOnlyToALiveClaim(t *testing.T) {
 	// Advance past the lease and try again unfenced: a crashed claimer's
 	// leftover ticket must age out, not block forever.
 	s.clock = func() time.Time { return fixed.Add(91 * time.Second) }
-	accepted, err = s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, nil)
+	accepted, _, err = s.Record(map[AccountRef]FetchRecord{ref: {Usage: usage}}, nil)
 	if err != nil {
 		t.Fatalf("Record (unfenced, expired claim): %v", err)
 	}
@@ -343,7 +543,7 @@ func TestEntries_FreshRespectsServeTTLS(t *testing.T) {
 	ref := testRef("a@example.com")
 	fixed := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
 	s.clock = func() time.Time { return fixed }
-	if _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: &provider.Usage{FiveHour: &provider.Window{Pct: 1}}}}, nil); err != nil {
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: &provider.Usage{FiveHour: &provider.Window{Pct: 1}}}}, nil); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -374,7 +574,7 @@ func TestPlanInput_WiresStoredEntryIntoPlanAfterFetch(t *testing.T) {
 	s.clock = func() time.Time { return t0 }
 
 	firstUsage := &provider.Usage{FiveHour: &provider.Window{Pct: 10}}
-	if _, err := s.Record(map[AccountRef]FetchRecord{
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{
 		ref: {Usage: firstUsage, Plan: &Plan{NextPollAt: t0.Add(300 * time.Second), IntervalS: 300}},
 	}, nil); err != nil {
 		t.Fatalf("seed Record: %v", err)
@@ -447,10 +647,27 @@ func TestReadRows_ForeignSchemaVersionRecoversToEmpty(t *testing.T) {
 	}
 }
 
+func TestReadWrite_RejectsSymlinkedDataFile(t *testing.T) {
+	s := mustOpenStore(t)
+	target := filepath.Join(filepath.Dir(s.path), "elsewhere.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, s.path); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+	if _, _, err := s.Entries([]AccountRef{testRef("a@example.com")}); err == nil {
+		t.Error("Entries against a symlinked usage.json = nil error, want rejection")
+	}
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{testRef("a@example.com"): {Usage: nil}}, nil); err == nil {
+		t.Error("Record against a symlinked usage.json = nil error, want rejection")
+	}
+}
+
 func TestWriteRows_AtomicAndPermission0600(t *testing.T) {
 	s := mustOpenStore(t)
 	ref := testRef("a@example.com")
-	if _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: &provider.Usage{FiveHour: &provider.Window{Pct: 1}}}}, nil); err != nil {
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Usage: &provider.Usage{FiveHour: &provider.Window{Pct: 1}}}}, nil); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	info, err := os.Stat(s.path)
@@ -475,7 +692,7 @@ func TestWriteRows_AtomicAndPermission0600(t *testing.T) {
 func TestClearDeadToken_ResetsStrikesAndFailureState(t *testing.T) {
 	s := mustOpenStore(t)
 	ref := testRef("a@example.com")
-	if _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "invalid_grant"}}, nil); err != nil {
+	if _, _, err := s.Record(map[AccountRef]FetchRecord{ref: {Error: "invalid_grant"}}, nil); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	entries, _, err := s.Entries([]AccountRef{ref})
@@ -516,8 +733,8 @@ func TestAccountRef_InvalidKeysAreRejected(t *testing.T) {
 		if _, err := ref.storeKey(); err == nil {
 			t.Errorf("storeKey(%+v) = nil error, want rejection", ref)
 		}
-		if _, err := s.Claim([]AccountRef{ref}); err == nil {
-			t.Errorf("Claim(%+v) = nil error, want rejection", ref)
+		if _, _, err := s.Reserve([]AccountRef{ref}); err == nil {
+			t.Errorf("Reserve(%+v) = nil error, want rejection", ref)
 		}
 	}
 }

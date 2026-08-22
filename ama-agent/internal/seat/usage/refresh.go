@@ -18,14 +18,45 @@ package usage
 //     (oauth.py:154-157). This refresh-token lineage is permanently dead —
 //     the ONLY outcome that should ever promote a caller toward
 //     relogin_required (see ClassifyRefreshFailure).
-//   - "no_refresh_token": the input credential has no claudeAiOauth block, or
-//     that block has no non-empty refreshToken (oauth.py:110-114). No network
-//     call is made in this case. Equally permanent for retry purposes as
-//     invalid_grant (mirrors tsamx's PERMANENT_AUTH_ERRORS).
+//   - "no_refresh_token": the input credential PARSES CLEANLY (a JSON object,
+//     with a claudeAiOauth object when present) but genuinely carries no
+//     non-empty refreshToken — e.g. a `claude setup token` account, which
+//     legitimately has none (oauth.py:110-114). Equally permanent for retry
+//     purposes as invalid_grant (mirrors tsamx's PERMANENT_AUTH_ERRORS).
+//   - "malformed_credential": the input could NOT be read as a credential at
+//     all — invalid JSON, a non-object top level, a claudeAiOauth key present
+//     but not itself an object. This is a DELIBERATE DIVERGENCE from
+//     oauth.py, which maps this same shape to "no_refresh_token" (verified:
+//     try_refresh_oauth_credentials's `except json.JSONDecodeError` branch
+//     returns the literal RefreshOutcome(None, "no_refresh_token")) — folding
+//     the two together is exactly what let a merely CORRUPTED file on disk
+//     (a torn write, a truncated copy) permanently quarantine an otherwise
+//     healthy account the same way a verified-absent refresh token does
+//     (adversarial review A5, reproduced with truncated/empty/JSON-array/
+//     JSON-null inputs). ClassifyRefreshFailure treats this the same as
+//     "transient" (retry later, never relogin_required) precisely to close
+//     that gap.
 //   - "transient": anything else — network error, timeout, 5xx, an ambiguous
-//     4xx without the invalid_grant/invalid_client marker, or a malformed 2xx
-//     body (oauth.py:158-161's bare `except Exception`). Retry later; the
-//     token may still be valid.
+//     4xx without the invalid_grant/invalid_client marker, a malformed 2xx
+//     body (oauth.py:158-161's bare `except Exception`), or an expires_in
+//     value outside maxExpiresInS's sane range (A3). Retry later; the token
+//     may still be valid.
+//
+// PRECONDITION (A5, documented — not enforced by this file): tsamx calls
+// try_refresh_oauth_credentials only AFTER its own near-expiry check has
+// already passed (autoswitch.py:778's `near_expiry` gate,
+// switcher.py:2969's `oauth.is_oauth_token_expired` gate) — never
+// unconditionally. A caller wiring TryRefresh into a scheduler must apply
+// the same gate itself (this package's own expiry.go —
+// CredentialExpiry.IsExpired / JudgeIdleExpiry — is the equivalent local
+// check) rather than calling TryRefresh on every tick regardless of expiry;
+// refreshing a token that is nowhere near expiring burns a refresh-token
+// generation for no reason and invites exactly the kind of needless traffic
+// poll_policy.go's budget notes warn about elsewhere in this package.
+//
+// REDIRECT POLICY (A1): every *http.Client this file constructs refuses to
+// follow HTTP redirects at all (see noFollowRedirects) — see that function's
+// doc for why.
 import (
 	"bytes"
 	"context"
@@ -58,6 +89,12 @@ const (
 // widening was to cover http.Client's redirect/drain overhead beyond
 // urllib's connect-only timeout; a token POST has no redirects to chase).
 const defaultRefreshTimeout = 10 * time.Second
+
+// maxExpiresInS bounds a token endpoint's advertised expires_in (seconds) to
+// a sane upper limit — see the A3 comment at TryRefresh's expires_in check
+// for why this exists. 10 years is comfortably above any real access-token
+// lifetime while still catching the overflow failure mode.
+const maxExpiresInS = 10 * 365 * 24 * 3600 // seconds
 
 // TokenAccount is the optional account identity the refresh grant's response
 // may carry alongside a successful rotation, ported from
@@ -94,6 +131,37 @@ type Refresher struct {
 	tokenURL string
 }
 
+// noFollowRedirects is the CheckRedirect policy every http.Client this
+// package constructs (both Refresher and Collector) uses: refuse every
+// redirect outright, returning the 3xx response itself rather than
+// following it (http.ErrUseLastResponse; see the net/http docs for
+// Client.CheckRedirect).
+//
+// Adversarial review A1, reproduced empirically: Go's default CheckRedirect
+// (nil) follows up to 10 redirects, and per RFC 7231 a 307/308 response
+// preserves the original request's method AND BODY — so an attacker who can
+// make the token endpoint (or anything on its path, e.g. a compromised
+// intermediate proxy) answer with a 307 to a host they control would receive
+// this package's POST body VERBATIM, which for Refresher.TryRefresh IS the
+// refresh_token. A prior version of this file's package doc claimed "a token
+// POST has no redirects to chase" — that was an unverified assumption, not a
+// checked fact, and the experiment above disproves it. Refusing every
+// redirect closes the whole class rather than trying to distinguish a
+// same-host redirect (plausibly safe) from a cross-host one (attacker
+// territory): distinguishing them correctly is exactly the kind of judgment
+// call this package must never need to get right under adversarial input.
+//
+// Collector.Fetch carries the same policy even though its request is a GET
+// with the access token only in the Authorization header (never the URL or
+// body) — Go's stdlib already strips Authorization on a cross-host redirect,
+// but relying on that stdlib behavior staying true across Go versions is a
+// weaker guarantee than simply never following a redirect at all, and
+// keeping both clients on one shared policy removes any need to reason about
+// the two differently.
+func noFollowRedirects(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
 // NewRefresher returns a Refresher targeting the real Claude token endpoint,
 // using the default transport (proxy-/TLS-config-aware) with no client-level
 // timeout — every call bounds itself via the context TryRefresh derives
@@ -101,7 +169,7 @@ type Refresher struct {
 // outlive that bound even though the client itself carries none.
 func NewRefresher() *Refresher {
 	return &Refresher{
-		client:   &http.Client{Transport: http.DefaultTransport},
+		client:   &http.Client{Transport: http.DefaultTransport, CheckRedirect: noFollowRedirects},
 		tokenURL: oauthTokenURL,
 	}
 }
@@ -109,10 +177,14 @@ func NewRefresher() *Refresher {
 // newRefresherForTest is used only by refresh_test.go to point TryRefresh at
 // an httptest.Server instead of the real endpoint. Not exported: production
 // callers must never be able to redirect this off Anthropic's token URL.
+// CheckRedirect is forced to noFollowRedirects UNCONDITIONALLY, even when a
+// test supplies its own client — a test must never be able to silently
+// exercise a weaker redirect policy than production ever runs with.
 func newRefresherForTest(tokenURL string, client *http.Client) *Refresher {
 	if client == nil {
 		client = &http.Client{}
 	}
+	client.CheckRedirect = noFollowRedirects
 	return &Refresher{client: client, tokenURL: tokenURL}
 }
 
@@ -139,15 +211,31 @@ func newRefresherForTest(tokenURL string, client *http.Client) *Refresher {
 func (r *Refresher) TryRefresh(ctx context.Context, credentialJSON []byte, timeout time.Duration) RefreshOutcome {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(credentialJSON, &top); err != nil {
-		return RefreshOutcome{Error: "no_refresh_token"}
+		return RefreshOutcome{Error: "malformed_credential"}
+	}
+	if top == nil {
+		// A well-formed JSON literal `null` unmarshals into a nil map with NO
+		// error — Go's json package treats null-into-map as "leave it zero,"
+		// not a failure. A nil top-level object is not a credential shape at
+		// all (A5, reproduced with a literal `null` input), so it is treated
+		// the same as unparseable input, not silently routed into the
+		// "absent claudeAiOauth -> no_refresh_token" branch below (which
+		// exists for a genuinely well-formed non-OAuth credential, e.g. an
+		// api_key set, not for an empty/corrupt one).
+		return RefreshOutcome{Error: "malformed_credential"}
 	}
 	oauthRaw, ok := top["claudeAiOauth"]
 	if !ok {
+		// A well-formed object with no claudeAiOauth block at all is a
+		// legitimate non-OAuth credential (e.g. an api_key set) — genuinely
+		// nothing to refresh, not a parse failure.
 		return RefreshOutcome{Error: "no_refresh_token"}
 	}
 	var oauth map[string]json.RawMessage
 	if err := json.Unmarshal(oauthRaw, &oauth); err != nil {
-		return RefreshOutcome{Error: "no_refresh_token"}
+		// claudeAiOauth is PRESENT but not itself a JSON object (wrong type)
+		// — a schema violation, not a legitimate "no OAuth data" shape.
+		return RefreshOutcome{Error: "malformed_credential"}
 	}
 	refreshToken, ok := stringField(oauth, "refreshToken")
 	if !ok || refreshToken == "" {
@@ -231,6 +319,24 @@ func (r *Refresher) TryRefresh(ctx context.Context, credentialJSON []byte, timeo
 	// is absent. Go has no such implicit crash mode, so both are checked
 	// explicitly here to reach the same outcome for the same malformed input.
 	if tokenResp.AccessToken == "" || tokenResp.ExpiresIn == nil {
+		return RefreshOutcome{Error: "transient"}
+	}
+	// A3 (adversarial review, reproduced empirically): an oversized-but-still-
+	// finite expires_in (one that survives json.Unmarshal's float64 range
+	// check, e.g. 1e18) overflows int64(*ExpiresIn*1000) below into an
+	// unspecified value — measured: a large expires_in produced
+	// expiresAt=-9223370249428224543, a garbage NEGATIVE epoch millisecond
+	// that IsExpired (expiry.go) would then read as "already expired,"
+	// silently poisoning the very credential this refresh was meant to fix.
+	// Python has no equivalent failure mode (arbitrary-precision int), so
+	// there is nothing to port here — this bound is new, added specifically
+	// to close a Go-only overflow. REJECTED rather than clamped: clamping
+	// would fabricate a plausible-looking but fictitious expiry and silently
+	// mask a malformed or manipulated response, exactly the failure mode a
+	// caller most needs to be able to detect; treating it as "transient" —
+	// the same bucket every other malformed-2xx-body case already falls
+	// into — costs nothing but a retry.
+	if *tokenResp.ExpiresIn <= 0 || *tokenResp.ExpiresIn > maxExpiresInS {
 		return RefreshOutcome{Error: "transient"}
 	}
 
@@ -325,10 +431,13 @@ func parseTokenAccount(account *struct {
 //     commit adds); a caller wiring a scheduler on top decides whether to
 //     require AUTH_DEAD_STRIKES consecutive invalid_grant answers (as tsamx
 //     does) before acting on this classification, or to act on the first one.
-//   - "transient": anything else (network/5xx/ambiguous-4xx/malformed-2xx) —
-//     StatusTokenExpired. The token may still be alive; the caller should
-//     retry the refresh later, exactly as an idle profile's routine
-//     access-token expiry is already reported.
+//   - "transient" and "malformed_credential": anything else (network/5xx/
+//     ambiguous-4xx/malformed-2xx/oversized-expires_in, or a credential this
+//     package could not even parse — A5) — StatusTokenExpired. The token may
+//     still be alive; the caller should retry the refresh later, exactly as
+//     an idle profile's routine access-token expiry is already reported. A
+//     corrupted file on disk must never quarantine an otherwise healthy
+//     account merely because this attempt could not read it.
 func ClassifyRefreshFailure(errKind string) string {
 	switch errKind {
 	case "invalid_grant", "no_refresh_token":
@@ -336,6 +445,43 @@ func ClassifyRefreshFailure(errKind string) string {
 	default:
 		return StatusTokenExpired
 	}
+}
+
+// IdentityConflict reports whether outcome's opportunistic TokenAccount
+// authenticates as a DIFFERENT account than expectedMeta claims — ported
+// from tsamx.autoswitch.AutoSwitchEngine._note_token_identity's core
+// judgment (autoswitch.py:800-836: "the credential authenticates under a
+// different organization ... or as a different account uuid"), adapted to
+// the fields provider.AddMeta actually carries.
+//
+// DOCUMENTED DIVERGENCE from tsamx: the original compares BOTH
+// organizationUuid (checked first, whenever both sides record one) and
+// account uuid, and BACKFILLS an empty slot uuid from the token response
+// rather than treating it as unknown. provider.AddMeta (internal/provider/
+// driver.go, not modified by this file) carries no OrganizationUUID field at
+// all — only OrganizationName — so the org-first comparison cannot be
+// ported; only the account-uuid comparison is. Backfill is also not
+// implemented: AddMeta is a value the CALLER supplies fresh on every call,
+// not a stored, mutable per-profile identity record this package owns, so
+// there is nothing to backfill INTO here — a caller wiring this in is
+// expected to already know and supply the account's real uuid via meta
+// once one is known.
+//
+// Returns true (conflict) only when BOTH expectedMeta.AccountUUID and
+// outcome.TokenAccount.UUID are non-empty (after trimming) and they differ.
+// Either side being unknown is NOT a conflict — mirrors tsamx's "empty slot
+// uuid -> not a conflict" outcome (minus the backfill write); there being
+// nothing to compare against is not evidence of a mismatch.
+func IdentityConflict(outcome RefreshOutcome, expectedMeta provider.AddMeta) bool {
+	if outcome.TokenAccount == nil {
+		return false
+	}
+	want := strings.TrimSpace(expectedMeta.AccountUUID)
+	got := strings.TrimSpace(outcome.TokenAccount.UUID)
+	if want == "" || got == "" {
+		return false
+	}
+	return want != got
 }
 
 // StageRefreshedCredential persists a SUCCESSFUL RefreshOutcome onto a P2
@@ -364,9 +510,23 @@ func ClassifyRefreshFailure(errKind string) string {
 // Returns an error without touching the profile at all when outcome is not a
 // success (Error != "" or Credentials == nil) — calling this on a failed
 // outcome is always a caller bug, not a legitimate no-op.
-func StageRefreshedCredential(store *profile.Store, drv provider.Driver, accountKey string, outcome RefreshOutcome, meta provider.AddMeta) error {
+//
+// conflict reports IdentityConflict(outcome, meta) — computed AFTER Stage
+// runs, never gating it: mirrors tsamx's _freshen_target, which persists the
+// rotated credential UNCONDITIONALLY before ever checking identity ("the
+// grant consumed a generation, and not writing the successor would kill the
+// lineage regardless of whose it turns out to be" — autoswitch.py's own
+// comment on this exact ordering). A true conflict means the credential now
+// staged authenticates as a different account than expected: the caller
+// must quarantine this profile as a switch target (never activate it) but
+// must NOT re-attempt the refresh or discard what was just staged — losing
+// the newly rotated refresh token here would kill the lineage for good.
+func StageRefreshedCredential(store *profile.Store, drv provider.Driver, accountKey string, outcome RefreshOutcome, meta provider.AddMeta) (conflict bool, err error) {
 	if outcome.Error != "" || outcome.Credentials == nil {
-		return fmt.Errorf("usage: refresh outcome is not a success (error=%q), nothing to stage", outcome.Error)
+		return false, fmt.Errorf("usage: refresh outcome is not a success (error=%q), nothing to stage", outcome.Error)
 	}
-	return store.Stage(drv, accountKey, outcome.Credentials, meta)
+	if err := store.Stage(drv, accountKey, outcome.Credentials, meta); err != nil {
+		return false, err
+	}
+	return IdentityConflict(outcome, meta), nil
 }

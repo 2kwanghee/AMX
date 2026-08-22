@@ -54,10 +54,11 @@
 // Same three-phase discipline as usage_store.py's module doc (never holds
 // the lock across network I/O):
 //
-//	(a) Claim: lock -> read, stamp claimUntil on the leased rows -> unlock;
+//	(a) Reserve: lock -> re-check eligibility -> stamp claimUntil on the rows
+//	    that pass -> unlock;
 //	(b) fetch: the caller's own network round trip, with NO lock held;
 //	(c) Record: lock -> re-read, merge outcomes fenced by the claim ids
-//	    Claim handed out, clear the claim, write -> unlock.
+//	    Reserve handed out, clear the claim, write -> unlock.
 //
 // The lock lives at <stateDir>/usage/.usage.lock — a different file from
 // both P2's per-profile locks (<stateDir>/profiles/<provider>/
@@ -68,16 +69,20 @@
 //
 // # Scope boundary — what this file does NOT build
 //
-// tsamx's usage_store.py additionally implements `reserve()`/`due_candidate`
-// — SCHEDULING logic that decides WHICH candidate is due for a fetch right
-// now, gated on `respect_plans`/`repair_overslept` caller modes. That is
-// selection/scheduling policy, which belongs to the P5 AutoSwitch engine
-// this task is explicitly forbidden from building (design note P5's
-// threshold/cooldown/hysteresis/selection-strategy section). This file ports
-// only the simpler, unconditional `claim()` (here: Store.Claim) plus
-// `record()` (here: Store.Record) and the read model's four predicates
-// (fresh/in_backoff/recent_429/claimed) — the storage substrate a future
-// scheduler will sit on top of, not the scheduler itself.
+// tsamx's usage_store.py's reserve() additionally gates eligibility on
+// nextPollAt/pollIntervalS ("poll-due") under two caller modes
+// (respect_plans/repair_overslept) — deciding WHICH of several already-
+// eligible candidates is due for a fetch RIGHT NOW under an adaptive
+// cadence. That half is SCHEDULING policy and belongs to the P5 AutoSwitch
+// engine this task is explicitly forbidden from building (design note P5's
+// threshold/cooldown/hysteresis/selection-strategy section). Store.Reserve
+// below ports only reserve()'s other half — the four EXCLUSIVITY conditions
+// that exist purely to stop two collectors from double-fetching the SAME
+// row (not claimed, not backing off, not quarantined, not already fresh) —
+// plus `record()` (here: Store.Record) and the read model's predicates
+// (fresh/in_backoff/recent_429/claimed/tokenDead). See Reserve's own doc for
+// exactly which usage_store.py function this replaces and why (adversarial
+// review A2).
 package usage
 
 import (
@@ -129,7 +134,11 @@ const AuthDeadStrikesThreshold = 1
 // Entry.AuthDeadStrikes. Values match this package's own refresh.go
 // RefreshOutcome.Error vocabulary ("invalid_grant", "no_refresh_token"), so a
 // caller that folds a failed refresh attempt into a FetchRecord gets the
-// same permanence judgment tsamx makes.
+// same permanence judgment tsamx makes. Deliberately does NOT include
+// refresh.go's "malformed_credential" (adversarial review A5): a credential
+// this package merely failed to PARSE is no evidence the account itself is
+// unusable, and must never advance the quarantine strike count the way a
+// server-confirmed dead refresh-token lineage does.
 var permanentAuthErrors = map[string]bool{
 	"invalid_grant":    true,
 	"no_refresh_token": true,
@@ -366,6 +375,9 @@ func OpenStore(stateDir string) (*Store, error) {
 		return nil, errors.New("usage: empty state dir")
 	}
 	dir := filepath.Join(stateDir, storeSubdir)
+	if err := rejectSymlinkPath(dir); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -376,10 +388,36 @@ func OpenStore(stateDir string) (*Store, error) {
 	}, nil
 }
 
+// rejectSymlinkPath lstat's path and errors if it exists and is a symlink —
+// the same guard profile.go's rejectSymlink applies to every path it
+// touches (minor, adversarial review: "usage.json 자리가 심링크면 추종해
+// 대상을 덮어쓴다"). A symlink planted at this store's directory, data file,
+// or lock file before it is ever used would redirect reads to, and put
+// writes/locks at, wherever it points; refusing to proceed at all closes
+// that regardless of the exact rename/open semantics on any given platform.
+// A path that does not exist yet is fine — the caller's own MkdirAll/
+// os.CreateTemp+Rename is what brings it into existence as a plain file.
+func rejectSymlinkPath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("usage: %s is a symlink, refusing to use it", path)
+	}
+	return nil
+}
+
 // lock acquires the store's single advisory lock, retrying on contention up
 // to lockRetryBound — the same bounded-retry shape profile.go's lock() uses
 // (a stuck lock file must never hang a caller indefinitely).
 func (s *Store) lock() (*fslock.Lock, error) {
+	if err := rejectSymlinkPath(s.lockPath); err != nil {
+		return nil, err
+	}
 	deadline := time.Now().Add(lockRetryBound)
 	for {
 		l, err := fslock.TryLock(s.lockPath)
@@ -402,6 +440,9 @@ func (s *Store) lock() (*fslock.Lock, error) {
 // brief ("파싱 실패 시 빈 상태로 시작하되 그 사실을 반환") — tsamx's own
 // _read_rows does not report this to its caller at all.
 func (s *Store) readRows() (rows map[string]*storeRow, recovered bool, err error) {
+	if err := rejectSymlinkPath(s.path); err != nil {
+		return nil, false, err
+	}
 	raw, rerr := os.ReadFile(s.path)
 	if rerr != nil {
 		if errors.Is(rerr, fs.ErrNotExist) {
@@ -426,6 +467,9 @@ func (s *Store) readRows() (rows map[string]*storeRow, recovered bool, err error
 // directory + rename, 0600) so a concurrent lock-free Entries reader never
 // observes a partial write.
 func (s *Store) writeRows(rows map[string]*storeRow) error {
+	if err := rejectSymlinkPath(s.path); err != nil {
+		return err
+	}
 	b, err := json.Marshal(storeFile{SchemaVersion: storeSchemaVersion, Accounts: rows})
 	if err != nil {
 		return err
@@ -433,109 +477,147 @@ func (s *Store) writeRows(rows map[string]*storeRow) error {
 	return atomicWriteStore(s.path, b, 0o600)
 }
 
-// Claim unconditionally leases refs for an in-flight fetch: stamps
-// lastAttemptAt=now and a fresh claimId/claimUntil=now+ClaimTTLS on each,
-// creating the row if absent, and returns the fencing ids Record needs to
-// accept the eventual outcome. Mirrors usage_store.UsageStore.claim exactly
-// — it does NOT check eligibility (not claimed elsewhere, not in backoff,
-// poll-due, ...): a caller that needs that gating reads Store.Entries first
-// and decides via Entry.Claimed/InBackoff/etc itself. (tsamx's own
-// eligibility-checking sibling, reserve()/due_candidate, is scheduling
-// policy this file deliberately does not port — see the package doc.)
-func (s *Store) Claim(refs []AccountRef) (map[AccountRef]string, error) {
+// Reserve atomically wins the right to fetch: re-checks eligibility UNDER
+// THE STORE'S LOCK and stamps a bounded lease (lastAttemptAt=now,
+// claimId/claimUntil=now+ClaimTTLS) ONLY on rows that pass, returning the
+// fencing ids Record needs to accept each eventual outcome.
+//
+// REPLACES this file's former Claim (adversarial review A2, reproduced
+// empirically): Claim ported usage_store.UsageStore.claim(), but
+// `grep -rn "\.claim(\|\.reserve(" tsamx/src/tsamx/*.py` shows claim() is
+// NEVER called by any production code path — every real caller
+// (switcher.py:3691,3698) uses reserve() instead, whose own docstring
+// states plainly what the unconditional claim()-then-check-Entries-yourself
+// pattern this file previously documented actually is: "lets two collectors
+// both pass the check and both fetch; the re-check under the lock closes
+// that window." Deciding eligibility on a lock-free Entries() read and
+// leasing separately is exactly that open window; reproduced here as
+// TestReserve_ConcurrentCallersOnlyOneWins (two Store handles on the same
+// stateDir, raced deliberately — the removed Claim let both win).
+//
+// Eligibility (ALL must hold, checked against each row's CURRENT on-disk
+// state under this call's lock, never a caller's possibly-stale Entries()
+// snapshot): !Entry.Claimed (no live lease held by another collector),
+// !Entry.InBackoff (no active failure backoff), !Entry.TokenDead (the
+// refresh-token lineage is not provably dead — a quarantined account has
+// nothing to gain from another fetch), and !Entry.Fresh (the last-good
+// measurement is not already recent enough to serve without a new fetch). A
+// row that has never been touched (no stored row at all) is always
+// eligible — mirrors reserve()'s own "row doesn't match identity -> always
+// eligible" branch (usage_store.py: the `if not self._matches(...): ...
+// else: if not _row_eligible(...)` split) — there being no prior state IS
+// the reason to fetch, not a disqualifying one.
+//
+// SCOPE (deliberate, not an oversight — see the package doc's "Scope
+// boundary" section): tsamx's _row_eligible additionally gates on
+// nextPollAt/pollIntervalS ("poll-due", under respect_plans/
+// repair_overslept caller modes) — deciding WHICH of several already-
+// eligible rows is due RIGHT NOW under an adaptive cadence. That is
+// scheduling policy for the P5 AutoSwitch engine this task must not build;
+// this port covers only the four EXCLUSIVITY conditions above, which exist
+// solely to stop two collectors double-fetching the SAME row.
+func (s *Store) Reserve(refs []AccountRef) (won map[AccountRef]string, recovered bool, err error) {
 	if len(refs) == 0 {
-		return map[AccountRef]string{}, nil
+		return map[AccountRef]string{}, false, nil
 	}
 	keyed := make(map[AccountRef]string, len(refs))
 	for _, r := range refs {
-		k, err := r.storeKey()
-		if err != nil {
-			return nil, err
+		k, kerr := r.storeKey()
+		if kerr != nil {
+			return nil, false, kerr
 		}
 		keyed[r] = k
-	}
-	claimIDs := make(map[AccountRef]string, len(refs))
-	for _, r := range refs {
-		id, err := newClaimID()
-		if err != nil {
-			return nil, err
-		}
-		claimIDs[r] = id
 	}
 
 	l, err := s.lock()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer l.Unlock()
 
-	rows, _, err := s.readRows()
+	rows, recovered, err := s.readRows()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	now := s.clock()
 	nowF := epochSeconds(now)
-	claimUntilF := nowF + ClaimTTLS
+	won = make(map[AccountRef]string, len(refs))
 	for _, r := range refs {
 		k := keyed[r]
 		row := rows[k]
+		if row != nil {
+			e := entryFromRow(row)
+			if e.Claimed(now) || e.InBackoff(now) || e.TokenDead() || e.Fresh(now) {
+				continue
+			}
+		}
+		id, cerr := newClaimID()
+		if cerr != nil {
+			return nil, false, cerr
+		}
 		if row == nil {
 			row = &storeRow{}
 			rows[k] = row
 		}
 		row.LastAttemptAt = storeFloatPtr(nowF)
-		row.ClaimID = claimIDs[r]
-		row.ClaimUntil = storeFloatPtr(claimUntilF)
+		row.ClaimID = id
+		row.ClaimUntil = storeFloatPtr(nowF + ClaimTTLS)
+		won[r] = id
 	}
-	if err := s.writeRows(rows); err != nil {
-		return nil, err
+	if len(won) > 0 {
+		if err := s.writeRows(rows); err != nil {
+			return nil, false, err
+		}
 	}
-	return claimIDs, nil
+	return won, recovered, nil
 }
 
-// Record merges fetch outcomes into the store, fenced by the claim ids Claim
-// handed out. Mirrors usage_store.UsageStore.record's field-level behavior
-// exactly (success resets the failure fields; failure never touches
-// LastGood/FetchedAt; a supplied success Plan commits atomically with its
-// measurement).
+// Record merges fetch outcomes into the store, fenced by the claim ids
+// Reserve handed out. Mirrors usage_store.UsageStore.record's field-level
+// behavior exactly (success resets the failure fields; failure never
+// touches LastGood/FetchedAt; a supplied success Plan commits atomically
+// with its measurement).
 //
 // claims fences each outcome: an entry is accepted only when the row's
 // current ClaimID equals claims[ref] — a late writer whose lease was
-// replaced by a newer Claim is silently ignored, never overwriting the newer
-// row. Passing claims == nil switches to the UNFENCED mode
+// replaced by a newer Reserve is silently ignored, never overwriting the
+// newer row. Passing claims == nil switches to the UNFENCED mode
 // usage_store.py's record() also supports: an outcome is accepted unless the
 // row carries a claim id AND that claim's stamped ClaimUntil is still in the
 // future — checked directly against ClaimUntil (0.0 when unset, per
 // storeRow's doc), deliberately NOT via liveClaim's legacy lastAttemptAt
 // fallback (mirrors record()'s own comment: "record() deliberately checks
-// only the fenced form"). Returns which refs were actually accepted.
-func (s *Store) Record(outcomes map[AccountRef]FetchRecord, claims map[AccountRef]string) (map[AccountRef]bool, error) {
+// only the fenced form"). Returns which refs were actually accepted, plus
+// whether the read this call performed had to recover from a corrupt/
+// foreign-schema file (adversarial review minor: this used to be silently
+// discarded, leaving a caller with no way to notice).
+func (s *Store) Record(outcomes map[AccountRef]FetchRecord, claims map[AccountRef]string) (accepted map[AccountRef]bool, recovered bool, err error) {
 	if len(outcomes) == 0 {
-		return map[AccountRef]bool{}, nil
+		return map[AccountRef]bool{}, false, nil
 	}
 	keyed := make(map[AccountRef]string, len(outcomes))
 	for r := range outcomes {
-		k, err := r.storeKey()
-		if err != nil {
-			return nil, err
+		k, kerr := r.storeKey()
+		if kerr != nil {
+			return nil, false, kerr
 		}
 		keyed[r] = k
 	}
 
 	l, err := s.lock()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer l.Unlock()
 
-	rows, _, err := s.readRows()
+	rows, recovered, err := s.readRows()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	now := s.clock()
-	accepted := make(map[AccountRef]bool, len(outcomes))
+	accepted = make(map[AccountRef]bool, len(outcomes))
 	for r, rec := range outcomes {
 		k := keyed[r]
 		row := rows[k]
@@ -562,10 +644,10 @@ func (s *Store) Record(outcomes map[AccountRef]FetchRecord, claims map[AccountRe
 	}
 	if len(accepted) > 0 {
 		if err := s.writeRows(rows); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return accepted, nil
+	return accepted, recovered, nil
 }
 
 // applyRecord is Record's per-row merge, mirroring usage_store.py record()'s
