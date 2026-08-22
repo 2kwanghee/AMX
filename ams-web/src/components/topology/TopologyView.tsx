@@ -35,7 +35,7 @@ import { PoolLanes } from './PoolLaneChip';
 import { ServerNode } from './ServerNode';
 import { StatBar } from './StatBar';
 import { TenantNode } from './TenantNode';
-import { VERB_ICON, VERB_LABEL, VERB_STYLE } from './verbs';
+import { VERB_ICON, VERB_STYLE, verbLabel } from './verbs';
 
 type EdgeKind = '' | 'active' | 'pending' | 'error';
 // 할당 엣지(서버↔계정, 편집 가능). mx/my 는 액션 팝오버 위치(엣지 중점).
@@ -1235,7 +1235,7 @@ function EdgePopover({
             onClick={() => run(v)}
           >
             <span className="vbtn-icon"><Icon name={VERB_ICON[v]} size={14} /></span>
-            {VERB_LABEL[v]}
+            {verbLabel(v, assignment.state)}
           </button>
         ))}
       </div>

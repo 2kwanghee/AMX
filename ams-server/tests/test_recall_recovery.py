@@ -23,7 +23,7 @@ from tests.test_grpc_channel import (
     _create_assignment,
     _seed_tenant_account_server,
 )
-from tests.test_sent_recovery import _age_queued
+from tests.test_sent_recovery import _age_queued, _age_sent, _open_alerts
 
 
 # -- helpers ------------------------------------------------------------------
@@ -448,6 +448,57 @@ def test_rest_recall_after_queued_timeout_pending_settles_to_detached(app_env):
     assert a.state == "detached"
     assert a.pending_command_id is None
     assert a.last_error is None
+    assert _account(tenant_id, account_id).status == "available"
+    with get_sessionmaker()() as db:
+        rows = db.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.command_type == "recall",
+            )
+        ).all()
+    assert rows == []
+
+
+def test_rest_recall_after_sent_ack_timeout_pending_preserves_alert_and_error(app_env):
+    # D2: a deliver stuck 'sent' past its ack timeout means the agent may have
+    # already picked up and installed the payload before the ack was lost — a
+    # stranded remote install is possible. sweep_sent_timeouts reverts this to
+    # 'pending' (last_error='sent_ack_timeout') and opens command_send_failed.
+    # Recall from THIS pending must still detach + free the account (the
+    # operator explicitly asked), but — unlike the plain-pending and
+    # queued_timeout cases — must NOT wipe the only visible signal of a
+    # possible remnant: last_error stays, and command_send_failed stays open.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1sentpending@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    _age_sent(command_id, seconds=1000, send_attempts=5)
+    with get_sessionmaker()() as db:
+        commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    reverted = _assignment(tenant_id, assignment_id)
+    assert reverted.state == "pending"
+    assert reverted.last_error == "sent_ack_timeout"
+    assert len(_open_alerts(server_id, "command_send_failed")) == 1
+
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+
+    assert a.state == "detached"
+    assert a.pending_command_id is None
+    assert a.acked_at is None  # never actually acked
+    # last_error preserved — the only visible sign of a possible remnant.
+    assert a.last_error == "sent_ack_timeout"
+    # command_send_failed stays open; only a fresh reconcile drift check (the
+    # agent reporting the account still present) should ever clear a genuine
+    # remnant.
+    assert len(_open_alerts(server_id, "command_send_failed")) == 1
     assert _account(tenant_id, account_id).status == "available"
     with get_sessionmaker()() as db:
         rows = db.scalars(

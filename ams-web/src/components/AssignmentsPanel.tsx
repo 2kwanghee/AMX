@@ -6,7 +6,7 @@ import { allowedAssignmentActions, api, krLastError } from '@/lib/api-client/cli
 import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
 import type { Assignment, AccountPage, AssignmentPage, ServerPage } from '@/lib/api-client/types';
 import { Badge, EmailChip, Icon, LiveDot, Modal, TimeCell, useAction, useMarkOnData } from './common';
-import { VERB_ICON, VERB_LABEL, VERB_STYLE } from './topology/verbs';
+import { VERB_ICON, VERB_STYLE, verbLabel } from './topology/verbs';
 import { currentActiveByServer } from '@/lib/assignment-active';
 
 export { currentActiveByServer };
@@ -158,7 +158,7 @@ export function AssignmentsPanel({ tenantId }: { tenantId: string }) {
                           onClick={() => doAction(a.id, v)}
                         >
                           <span className="vbtn-icon"><Icon name={VERB_ICON[v]} size={14} /></span>
-                          {VERB_LABEL[v]}
+                          {verbLabel(v, a.state)}
                         </button>
                       ))}
                       {a.state === 'detached' && (

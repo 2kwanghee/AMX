@@ -200,12 +200,27 @@ def _settle_recall_pending_to_detached(db: Session, assignment: Assignment) -> A
     Equivalent to ``reconcile._settle_recall_detached`` (state-only settle: no
     agent command, since there is no remote install to recall) — duplicated
     here rather than imported because ``reconcile`` imports this module, and
-    the reverse import would be circular."""
+    the reverse import would be circular.
+
+    D2 잔재 보호: ``last_error`` 가 ``"sent_ack_timeout"`` 이면 이 pending은
+    D2 sent-ack 스위퍼(``sweep_sent_timeouts``)가 ``sent`` 상태에서 되돌린
+    것이다 — 에이전트가 페이로드를 이미 가져가 설치까지 했지만 ack만 유실됐을
+    수 있으므로, 원격에 실제 잔재가 남아 있을 가능성을 배제할 수 없다. 이
+    경우 ``resolve_server_account_alerts`` 를 건너뛰어 ``command_send_failed``
+    경보를 열린 채 남기고 ``last_error`` 도 지우지 않는다 — 잔재 가능성의
+    유일한 가시 신호이기 때문이다. detach 전이와 계정 available 복귀는
+    그대로 수행한다(운영자가 명시적으로 회수를 지시했으므로). 에이전트가 다시
+    붙었을 때 실제로 계정이 살아있다면 reconcile의 drift 감지가
+    (state=detached인데 actual != ABSENT → CORRECTION_RECALL,
+    reconcile.py:405-406) 잔재를 발견해 정리한다 — 코드로 보장되지 않는
+    전제이므로 여기 남긴다. 어느 경우든 ack된 적이 없으므로 ``acked_at`` 은
+    찍지 않는다."""
+    stranded_install = assignment.last_error == "sent_ack_timeout"
     assignment.state = "detached"
     assignment.pending_command_id = None
-    assignment.last_error = None
+    if not stranded_install:
+        assignment.last_error = None
     assignment.recall_retry_count = 0
-    assignment.acked_at = _now()
     assignment.updated_at = _now()
     alerts.resolve(
         db,
@@ -213,11 +228,12 @@ def _settle_recall_pending_to_detached(db: Session, assignment: Assignment) -> A
         kind="recall_failed",
         account_id=assignment.account_id,
     )
-    alerts.resolve_server_account_alerts(
-        db,
-        server_id=assignment.server_id,
-        account_id=assignment.account_id,
-    )
+    if not stranded_install:
+        alerts.resolve_server_account_alerts(
+            db,
+            server_id=assignment.server_id,
+            account_id=assignment.account_id,
+        )
     account = db.scalar(
         select(Account).where(
             Account.id == assignment.account_id, Account.tenant_id == assignment.tenant_id
