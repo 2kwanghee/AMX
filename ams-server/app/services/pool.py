@@ -52,7 +52,7 @@ from app.models import (
     Server,
     Tenant,
 )
-from app.services import alerts as alerts_service, commands, inventory
+from app.services import alerts as alerts_service, commands, inventory, providers
 
 # 보존 스윕 …0C 다음 번호. 한 인스턴스만 이번 틱의 풀 계산을 소유한다(F3 다중 인스턴스).
 _POOL_SWEEP_LOCK_KEY = 0x414D580F0D
@@ -962,10 +962,11 @@ def _candidates(
             continue
         if reserved is not None and account.id in reserved:
             continue
-        # Codex 는 서버당 1개 제한이라, 이미 뭔가 붙어 있는 서버에는 얹지 않는다.
-        # 다만 대체 상대를 찾는 중이면 이 필터를 걸지 않는다(§8 — 나가는 계정의
-        # 자리를 물려받을 후보까지 막으면 교체 자체가 불가능해진다).
-        if account.provider == "codex" and server_has_live and not replacing:
+        # 서버당 1개 제한인 프로바이더(providers.per_server_limit, 오늘은 Codex만)는
+        # 이미 뭔가 붙어 있는 서버에는 얹지 않는다. 다만 대체 상대를 찾는 중이면 이
+        # 필터를 걸지 않는다(§8 — 나가는 계정의 자리를 물려받을 후보까지 막으면
+        # 교체 자체가 불가능해진다).
+        if providers.per_server_limit(account.provider) == 1 and server_has_live and not replacing:
             continue
         out.append(account)
     out.sort(
@@ -1042,9 +1043,9 @@ def _desired_recommendation(
         """
         if target_account.id in {a.id for a in leased}:
             return ""
-        if target_account.provider != "codex":
+        if providers.per_server_limit(target_account.provider) != 1:
             return ""
-        if not any(a.provider == "codex" for a in leased):
+        if not any(a.provider == target_account.provider for a in leased):
             return ""
         return (
             " Codex 는 호스트당 계정이 하나뿐이라 먼저 거두고 나서 올린다 — "
@@ -2005,19 +2006,20 @@ def start_chain(
                 "교체 대상 계정이 다른 서버에 배정돼 있다. 그 배정을 먼저 회수하라.",
             )
         if target is None:
-            # 아직 서버에 없는 계정으로 넘긴다 — 먼저 올려야 한다. Codex 만 예외로
-            # 자리를 비우고 나서 올린다(호스트당 자격증명 하나). 그 순서에서는
-            # 서버가 잠깐 무자격이 되는데, 대안이 "영영 못 바꾼다"이므로 감수한다.
+            # 아직 서버에 없는 계정으로 넘긴다 — 먼저 올려야 한다. 서버당 1개
+            # 제한인 프로바이더(providers.per_server_limit, 오늘은 Codex만)는
+            # 예외로 자리를 비우고 나서 올린다(호스트당 자격증명 하나). 그
+            # 순서에서는 서버가 잠깐 무자격이 되는데, 대안이 "영영 못 바꾼다"이므로
+            # 감수한다.
             to_account = db.get(Account, recommendation.to_account_id)
             held_accounts = [db.get(Account, a.account_id) for a in server_live]
-            server_has_codex = any(
-                acc is not None and acc.provider == "codex" for acc in held_accounts
+            to_limit = (
+                providers.per_server_limit(to_account.provider) if to_account is not None else None
             )
-            if (
-                to_account is not None
-                and to_account.provider == "codex"
-                and server_has_codex
-            ):
+            server_has_same_provider = to_account is not None and any(
+                acc is not None and acc.provider == to_account.provider for acc in held_accounts
+            )
+            if to_limit == 1 and server_has_same_provider:
                 swap_first_step = "recall"
             else:
                 swap_first_step = "deliver"
