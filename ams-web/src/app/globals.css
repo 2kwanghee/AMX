@@ -953,7 +953,12 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
   /* 스냅 격자를 흐린 점 배경으로 — 24px 반복. */
   background-image: radial-gradient(color-mix(in srgb, var(--canvas-border) 70%, transparent) 1px, transparent 1.4px);
   background-size: 24px 24px; background-position: 0 28px;
+  /* 캔버스 자체는 히트 대상에서 빼서 빈 영역 클릭이 아래 .topo-edges의
+     .topo-hit(선 클릭 팝오버)까지 내려가게 한다. z-index:1로 SVG를 덮은 채
+     포인터만 통과시키는 구조라, 자식(노드·레인·라벨)은 바로 아래에서 되살린다. */
+  pointer-events: none;
 }
+.topo-canvas-area > * { pointer-events: auto; }
 .topo-band-label {
   position: absolute; top: 4px; z-index: 2;
   font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--canvas-muted);
