@@ -38,6 +38,10 @@ AssignmentState = Literal[
 # 계정 풀(기획서 §2.1). accounts.status 와 축이 다르다 — 이건 배급 순환의 위치다.
 PoolState = Literal["ready", "leased", "recalling", "cooling", "pinned", "held"]
 PoolMode = Literal["manual", "auto"]
+# 시트 엔진 P1(docs/design-notes/seat-engine-plan.md §5 결정 1). "owner"(기본값)는
+# 소유자 라벨이 있는 계정을 같은 라벨의 서버로만 로테이션하고, 라벨이 비어 있으면
+# 조직 공용으로 전 서버 후보다. "server"는 소유자를 보지 않는 현행 그대로다.
+RotationScope = Literal["owner", "server"]
 PoolRecommendationKind = Literal["prefetch", "swap", "recall_idle", "lease"]
 PoolChainStep = Literal["deliver", "switch", "recall", "done", "failed"]
 PoolEventKind = Literal[
@@ -290,6 +294,9 @@ class PoolPolicy(Wire):
     prefetch_at_pct: int = Field(default=70, ge=0, le=100)
     min_lease_minutes: int = Field(default=30, ge=0, le=1440)
     ready_return_pct: int = Field(default=20, ge=0, le=100)
+    # 시트 엔진 P1 §5 결정 1. 기존 데이터는 이 키가 없어 기본값 "owner"로 읽히지만,
+    # 계정·서버 owner 가 전부 빈 값이라 전환 당일 동작은 "server"와 같다.
+    rotation_scope: RotationScope = "owner"
 
 
 class PoolPolicyUpdate(Wire):
@@ -301,6 +308,7 @@ class PoolPolicyUpdate(Wire):
     prefetch_at_pct: int | None = Field(default=None, ge=0, le=100)
     min_lease_minutes: int | None = Field(default=None, ge=0, le=1440)
     ready_return_pct: int | None = Field(default=None, ge=0, le=100)
+    rotation_scope: RotationScope | None = None
 
 
 class WindowState(Wire):

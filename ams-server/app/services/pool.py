@@ -116,6 +116,10 @@ DEFAULT_POLICY: dict[str, Any] = {
     "prefetch_at_pct": 70,
     "min_lease_minutes": 30,
     "ready_return_pct": 20,
+    # 시트 엔진 P1(기획서 §5 결정 1). "owner" 가 기본값이지만 기존 서버·계정은
+    # owner 가 전부 빈 값이라(마이그레이션 직후) 전환 당일 동작은 "server"와
+    # 같다 — 라벨을 붙이는 만큼만 정책이 켜진다.
+    "rotation_scope": "owner",
 }
 
 WINDOW_HIGH_KIND = "account_window_high"
@@ -133,6 +137,16 @@ def _aware(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _normalize_owner_label(value: str | None) -> str:
+    """owner 라벨 비교용 정규화 — 공백 제거 후 대소문자 무시.
+
+    운영자가 손으로 입력하는 자유 텍스트라 "Ops" 와 "ops "가 같은 소유자를
+    가리켜야 한다. None 과 빈 문자열은 둘 다 ""(조직 공용)으로 접힌다. 계정
+    owner·서버 owner 양쪽 비교에 이 함수 하나만 쓴다(§5 결정 1).
+    """
+    return (value or "").strip().casefold()
 
 
 def resolve_policy(server: Server | None) -> dict[str, Any]:
@@ -927,6 +941,8 @@ def _candidates(
     stale_after: timedelta,
     reserved: set[uuid.UUID] | None = None,
     replacing: bool = False,
+    rotation_scope: str = "owner",
+    server_owner: str | None = None,
 ) -> list[Account]:
     """배급처에서 뽑을 수 있는 계정 목록, 기획서 §2.4 의 순서로 정렬해 반환.
 
@@ -937,8 +953,17 @@ def _candidates(
     ``replacing`` 은 "나가는 계정을 대체할 자리를 찾는 중"이라는 뜻이다. 그때는
     Codex 의 서버당 1개 제한을 후보 필터로 쓰지 않는다 — 그 제한 때문에 후보가
     비면, 이미 소진된 Codex 계정을 물고 있는 서버는 영영 교체 상대를 못 찾는다.
+
+    ``rotation_scope="owner"``(기본값, 시트 엔진 P1 §5 결정 1)에서는 소유자
+    범위도 후보 필터다: owner 가 비어 있는 계정(조직 공용)은 항상 후보고, owner
+    가 있는 계정은 같은 owner 의 서버에만 간다. 한 사람 소유 시트를 그 사람의
+    서버들 사이에서 옮기는 것은 §1 법적 판정에서 문제가 없지만, 다른 소유자의
+    서버로 넘기는 것은 로테이션이 사람 경계를 넘는 경우라 여기서 막는다.
+    ``rotation_scope="server"`` 는 이 필터를 걷어낸 현행 그대로다. 이 필터는
+    수동 연결(create_assignment)에는 적용하지 않는다 — 자동화만 강제한다.
     """
     epoch = datetime.min.replace(tzinfo=UTC)
+    server_owner_norm = _normalize_owner_label(server_owner)
     out = []
     for account in accounts:
         # 지속적인 부적격 사유(자격증명 유형·제외 플래그·사용 불가·운영자 상태·
@@ -968,6 +993,10 @@ def _candidates(
         # 교체 자체가 불가능해진다).
         if providers.per_server_limit(account.provider) == 1 and server_has_live and not replacing:
             continue
+        if rotation_scope == "owner":
+            account_owner_norm = _normalize_owner_label(account.owner)
+            if account_owner_norm and account_owner_norm != server_owner_norm:
+                continue
         out.append(account)
     out.sort(
         key=lambda a: (
@@ -1287,6 +1316,8 @@ def build_recommendations(
                         server_has_live=bool(server_live),
                         now=stamp,
                         stale_after=stale_after,
+                        rotation_scope=str(policy["rotation_scope"]),
+                        server_owner=server.owner,
                     ),
                     replacements=_candidates(
                         accounts,
@@ -1296,6 +1327,8 @@ def build_recommendations(
                         reserved=reserved,
                         server_has_live=bool(server_live),
                         now=stamp,
+                        rotation_scope=str(policy["rotation_scope"]),
+                        server_owner=server.owner,
                         stale_after=stale_after,
                         replacing=True,
                     ),

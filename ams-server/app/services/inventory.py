@@ -966,6 +966,9 @@ def create_assignment(
     get_server(db, tenant_id, server_id)
     if account.provider == "codex":
         _reject_second_codex_account(db, tenant_id, server_id)
+    # rotation_scope(P1, app/services/pool.py _candidates)는 자동화 후보 필터일
+    # 뿐 수동 연결은 그대로 통과시킨다 — 감사 로그가 이미 남으니 운영자가 직접
+    # 누른 연결까지 막을 이유가 없다.
 
     assignment = Assignment(
         tenant_id=tenant_id,
