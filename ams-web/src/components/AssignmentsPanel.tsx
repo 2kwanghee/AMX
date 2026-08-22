@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
-import { allowedAssignmentActions, api } from '@/lib/api-client/client';
+import { allowedAssignmentActions, api, krLastError } from '@/lib/api-client/client';
 import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
 import type { Assignment, AccountPage, AssignmentPage, ServerPage } from '@/lib/api-client/types';
 import { Badge, EmailChip, Icon, LiveDot, Modal, TimeCell, useAction, useMarkOnData } from './common';
@@ -26,7 +26,7 @@ function SyncCell({ a }: { a: Assignment }) {
   }
   if (a.lastError) {
     return (
-      <span className="sync-cell err" title={a.lastError}>
+      <span className="sync-cell err" title={krLastError(a.lastError)}>
         동기화 실패
       </span>
     );
@@ -145,7 +145,7 @@ export function AssignmentsPanel({ tenantId }: { tenantId: string }) {
                   </td>
                   <td>
                     <Badge value={a.state} />
-                    {a.lastError && <div className="err">{a.lastError}</div>}
+                    {a.lastError && <div className="err">{krLastError(a.lastError)}</div>}
                   </td>
                   <td><SyncCell a={a} /></td>
                   <td>

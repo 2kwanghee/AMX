@@ -348,6 +348,22 @@ export function krApiError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+// -- 배정 lastError 한글화 -----------------------------------------------------
+// assignment.lastError 는 서버가 남긴 실패 사유 상수(commands.py의 detail/
+// last_error 값)를 원문 그대로 담는다. 매핑에 없는 값은 원문을 그대로 보여준다
+// — 새 실패 사유가 추가돼도 정보가 사라지지는 않게 하기 위해서다.
+const KR_LAST_ERROR: Record<string, string> = {
+  queued_timeout:
+    '전달 대기 초과 — 서버에 에이전트가 설치되어 접속 중인지 확인하세요.',
+  sent_ack_timeout:
+    '전송 후 응답 없음 — 서버 접속 상태를 확인하세요.',
+};
+
+export function krLastError(code: string | null | undefined): string {
+  if (!code) return '';
+  return KR_LAST_ERROR[code] ?? code;
+}
+
 export type AssignmentActionVerb =
   | 'deliver'
   | 'recall'

@@ -3,7 +3,7 @@
 import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import useSWR from 'swr';
-import { api } from '@/lib/api-client/client';
+import { api, krLastError } from '@/lib/api-client/client';
 import { readNavSession, type NavSession } from '@/lib/nav-session';
 import type {
   AccountPage,
@@ -276,7 +276,7 @@ function ActivityFeed({ tenantId }: { tenantId: string }) {
       const t = ms(a.ackedAt) || ms(a.deliveredAt);
       events.push({
         id: `err-${a.id}`, at: Number.isNaN(t) ? Date.now() : t, icon: 'alert', tone: 'crit',
-        text: <><span className="mono">{email}</span> 오류: {a.lastError}</>,
+        text: <><span className="mono">{email}</span> 오류: {krLastError(a.lastError)}</>,
       });
     } else if (a.ackedAt) {
       events.push({

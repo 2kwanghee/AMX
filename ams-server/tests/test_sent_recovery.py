@@ -444,11 +444,20 @@ def test_reconcile_ignores_inflight_delivering_assignment(app_env):
 
 
 # -- D3 queued-never-sent recovery ---------------------------------------------
-def test_queued_timeout_deliver_fails_and_reverts_to_pending(app_env):
-    # A command a poll loop never claimed (agent missing/too old to open a
-    # session) stays ``queued`` forever without this sweep: pending_command_id
-    # never clears and the console shows "동기화중" indefinitely.
-    tenant_id, account_id, server_id = _seed_tenant_account_server("d3queued@ex.com")
+def _deliver_and_age_queued(email, *, last_seen_at, age_seconds):
+    """Seed, deliver, then force the server's last_seen_at, then age the command.
+
+    ``last_seen_at`` is stamped only *after* ``request_deliver`` runs, not
+    before: ``request_deliver`` now 409s outright when it is NULL
+    (D3, commands.py), so a deliver command can never realistically be queued
+    for a never-connected server in the first place — this helper reaches
+    that DB state directly (server connected once, then rewound) purely to
+    exercise the sweep's own query branching in isolation. The sweep's short
+    tier chiefly matters for server-scoped commands (set_mode/req_report/
+    set_policy/self_update), which have no such precondition and genuinely can
+    be queued against a server that has never connected.
+    """
+    tenant_id, account_id, server_id = _seed_tenant_account_server(email)
     assignment_id = _create_assignment(tenant_id, account_id, server_id)
     _set_state(tenant_id, assignment_id, "pending")
     with get_sessionmaker()() as db:
@@ -458,11 +467,29 @@ def test_queued_timeout_deliver_fails_and_reverts_to_pending(app_env):
                 AgentCommand.assignment_id == assignment_id
             )
         )
+    with get_sessionmaker()() as db:
+        server = inventory.get_server(db, tenant_id, server_id)
+        server.last_seen_at = last_seen_at
+        db.commit()
+    _age_queued(command_id, seconds=age_seconds)
+    return tenant_id, assignment_id, command_id
+
+
+def test_queued_timeout_never_connected_server_fails_at_short_tier(app_env):
+    # A command a poll loop never claimed for a server whose agent has never
+    # once connected stays ``queued`` forever without this sweep:
+    # pending_command_id never clears and the console shows "동기화중"
+    # indefinitely. This tier ages out fast (180s default) — nothing has ever
+    # been "in progress" for this server, so there is nothing to wait out.
+    tenant_id, assignment_id, command_id = _deliver_and_age_queued(
+        "d3never-queued@ex.com", last_seen_at=None, age_seconds=1000
+    )
     assert _command(command_id).status == "queued"
-    _age_queued(command_id, seconds=1000)
 
     with get_sessionmaker()() as db:
-        failed = commands.sweep_queued_timeouts(db, timeout_seconds=180)
+        failed = commands.sweep_queued_timeouts(
+            db, timeout_seconds=180, stale_seconds=1800
+        )
     assert failed == [command_id]
 
     cmd = _command(command_id)
@@ -474,18 +501,48 @@ def test_queued_timeout_deliver_fails_and_reverts_to_pending(app_env):
     assert a.last_error == "queued_timeout"
 
 
-def test_fresh_queued_is_not_swept(app_env):
-    tenant_id, account_id, server_id = _seed_tenant_account_server("d3fresh@ex.com")
-    assignment_id = _create_assignment(tenant_id, account_id, server_id)
-    _set_state(tenant_id, assignment_id, "pending")
+def test_queued_timeout_previously_connected_server_waits_for_stale_tier(app_env):
+    # A server that has connected before (just between sessions — restart,
+    # maintenance) must NOT lose a queued deliver to the short tier: an
+    # ordinary reconnect within that window would otherwise race the sweep and
+    # sometimes lose. 1000s clears the 180s never-connected tier but must stay
+    # queued until the much longer stale tier (1800s default) actually passes.
+    now = datetime.now(UTC)
+    tenant_id, assignment_id, command_id = _deliver_and_age_queued(
+        "d3stale-wait@ex.com", last_seen_at=now, age_seconds=1000
+    )
+
     with get_sessionmaker()() as db:
-        commands.request_deliver(db, tenant_id, assignment_id)
-        command_id = db.scalar(
-            select(AgentCommand.command_id).where(
-                AgentCommand.assignment_id == assignment_id
-            )
+        failed = commands.sweep_queued_timeouts(
+            db, timeout_seconds=180, stale_seconds=1800
         )
-    _age_queued(command_id, seconds=5)  # well within the 180s timeout
+    assert failed == []
+    assert _command(command_id).status == "queued"
+
+
+def test_queued_timeout_previously_connected_server_fails_past_stale_tier(app_env):
+    now = datetime.now(UTC)
+    tenant_id, assignment_id, command_id = _deliver_and_age_queued(
+        "d3stale-fail@ex.com", last_seen_at=now, age_seconds=2000
+    )
+
+    with get_sessionmaker()() as db:
+        failed = commands.sweep_queued_timeouts(
+            db, timeout_seconds=180, stale_seconds=1800
+        )
+    assert failed == [command_id]
+
+    cmd = _command(command_id)
+    assert cmd.status == "failed"
+    a = _assignment(tenant_id, assignment_id)
+    assert a.state == "pending"
+    assert a.pending_command_id is None
+
+
+def test_fresh_queued_is_not_swept(app_env):
+    tenant_id, assignment_id, command_id = _deliver_and_age_queued(
+        "d3fresh@ex.com", last_seen_at=None, age_seconds=5
+    )  # well within the 180s never-connected timeout
 
     with get_sessionmaker()() as db:
         failed = commands.sweep_queued_timeouts(db, timeout_seconds=180)
@@ -495,23 +552,17 @@ def test_fresh_queued_is_not_swept(app_env):
 
 def test_sweep_sent_timeouts_also_sweeps_queued(app_env):
     # sweep_sent_timeouts is the only sweep the gRPC sweeper loop registers, so
-    # it must fold the queued-timeout sweep into its own return value or D3
-    # never actually runs against a live deployment.
-    tenant_id, account_id, server_id = _seed_tenant_account_server("d3folded@ex.com")
-    assignment_id = _create_assignment(tenant_id, account_id, server_id)
-    _set_state(tenant_id, assignment_id, "pending")
-    with get_sessionmaker()() as db:
-        commands.request_deliver(db, tenant_id, assignment_id)
-        command_id = db.scalar(
-            select(AgentCommand.command_id).where(
-                AgentCommand.assignment_id == assignment_id
-            )
-        )
-    _age_queued(command_id, seconds=1000)
+    # it must fold the queued-timeout sweep into its own return value, in the
+    # same transaction (before its own db.commit(), so it stays under the
+    # advisory lock's transaction scope), or D3 never actually runs against a
+    # live deployment.
+    tenant_id, assignment_id, command_id = _deliver_and_age_queued(
+        "d3folded@ex.com", last_seen_at=None, age_seconds=1000
+    )
 
     with get_sessionmaker()() as db:
         requeued, failed = commands.sweep_sent_timeouts(
-            db, timeout_seconds=90, queued_timeout_seconds=180
+            db, timeout_seconds=90, queued_timeout_seconds=180, queued_stale_seconds=1800
         )
     assert requeued == []
     assert failed == [command_id]
@@ -519,10 +570,14 @@ def test_sweep_sent_timeouts_also_sweeps_queued(app_env):
 
 
 def test_deliver_to_never_connected_server_is_refused(app_env):
-    # D3: a server whose agent has never once connected (last_seen_at NULL —
-    # not installed, or too old to complete session setup) would never poll
-    # for a queued deliver command; reject up front instead of letting it sit
-    # queued until the sweep ages it out.
+    # D3: a server whose agent has never once connected (last_seen_at NULL)
+    # would never poll for a queued deliver command; reject up front instead
+    # of letting it sit queued until the sweep ages it out. This does NOT
+    # cover a too-old agent: an incompatible agent that got as far as
+    # authenticating (enroll_token / server_credential) already has
+    # last_seen_at stamped before its session aborts on the version/KEK check
+    # (grpc/server.py _authenticate/_touch_server), so it passes this check —
+    # only the queued sweep's stale tier catches that case.
     tenant_id, account_id, server_id = _seed_tenant_account_server("d3never@ex.com")
     assignment_id = _create_assignment(tenant_id, account_id, server_id)
     _set_state(tenant_id, assignment_id, "pending")
