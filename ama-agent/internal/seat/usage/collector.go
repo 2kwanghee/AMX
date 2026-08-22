@@ -213,8 +213,15 @@ func parseRetryAfter(raw string) *float64 {
 		return nil
 	}
 	v, err := strconv.ParseFloat(raw, 64)
-	if err != nil || v < 0 {
+	if err != nil {
 		return nil
+	}
+	// A negative Retry-After is clamped to 0, NOT discarded: tsamx does
+	// max(0.0, float(raw)) (oauth.py:358), and with the failure planner in
+	// place the two paths diverge otherwise — a 429 carrying "-1" would take
+	// the edge backoff here but the ordinary 429 floor there.
+	if v < 0 {
+		v = 0
 	}
 	return &v
 }

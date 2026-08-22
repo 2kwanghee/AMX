@@ -336,7 +336,10 @@ func TestParseRetryAfter(t *testing.T) {
 		{"", nil},
 		{"  ", nil},
 		{"not-a-number", nil},
-		{"-5", nil},
+		// Clamped to 0, not discarded — tsamx does max(0.0, float(raw))
+		// (oauth.py:358). Discarding would send a 429 carrying "-1" down the
+		// edge-backoff path instead of the ordinary 429 floor.
+		{"-5", func() *float64 { v := 0.0; return &v }()},
 		{"0", func() *float64 { v := 0.0; return &v }()},
 		{"42", func() *float64 { v := 42.0; return &v }()},
 	}
