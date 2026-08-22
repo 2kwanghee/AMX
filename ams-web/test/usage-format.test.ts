@@ -5,12 +5,14 @@ import {
   allocationStatusLabel,
   fmtCalls,
   fmtExact,
+  fmtRemainingWindow,
+  fmtResetClock,
   fmtTokens,
   poolAllExhausted,
   poolMaxUtilization,
   usageAccountView,
 } from '@/lib/usage-format';
-import type { UsageAccount, UsagePayload } from '@/lib/api-client/types';
+import type { AccountUsageWindowSummary, UsageAccount, UsagePayload } from '@/lib/api-client/types';
 
 describe('fmtTokens', () => {
   it('1000 미만은 압축하지 않는다', () => {
@@ -160,5 +162,40 @@ describe('usageAccountView', () => {
     const v = usageAccountView(STORED_PAYLOAD.accounts![1]);
     expect(v.isCurrent).toBe(false);
     expect(v.allocationStatus).toBe('quarantined');
+  });
+});
+
+describe('fmtResetClock', () => {
+  it('24시간제 HH:MM 로 떨어진다(오전/오후 없음)', () => {
+    expect(fmtResetClock('2026-08-22T14:30:00Z')).toMatch(/^\d{2}:\d{2}$/);
+  });
+
+  it('미상·파싱 불가는 undefined', () => {
+    expect(fmtResetClock(undefined)).toBeUndefined();
+    expect(fmtResetClock(null)).toBeUndefined();
+    expect(fmtResetClock('not-a-date')).toBeUndefined();
+  });
+});
+
+describe('fmtRemainingWindow', () => {
+  it('pct 를 100에서 뺀 잔여율과 리셋 시각을 병기한다', () => {
+    const w: AccountUsageWindowSummary = { pct: 62, resetsAt: '2026-08-22T05:30:00Z' };
+    const text = fmtRemainingWindow(w);
+    expect(text).toMatch(/^잔여 38% · \d{2}:\d{2} 리셋$/);
+  });
+
+  it('리셋 시각이 없으면 리셋 문구를 뺀다', () => {
+    expect(fmtRemainingWindow({ pct: 20, resetsAt: null })).toBe('잔여 80%');
+  });
+
+  it('pct 미상은 대시', () => {
+    expect(fmtRemainingWindow({ pct: null, resetsAt: null })).toBe('—');
+    expect(fmtRemainingWindow(null)).toBe('—');
+    expect(fmtRemainingWindow(undefined)).toBe('—');
+  });
+
+  it('경계값을 0~100 사이로 자른다', () => {
+    expect(fmtRemainingWindow({ pct: -5, resetsAt: null })).toBe('잔여 100%');
+    expect(fmtRemainingWindow({ pct: 130, resetsAt: null })).toBe('잔여 0%');
   });
 });

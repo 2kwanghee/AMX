@@ -39,6 +39,23 @@ export interface TenantUpdate {
   status?: TenantStatus;
 }
 
+// 계약 밖 추가분(account-remaining-usage-plan.md 1단계). 창 하나의 마지막
+// 관측값 — stale이어도 값은 그대로 온다(값을 숨기지 않고 부모 stale로만 표시한다).
+export interface AccountUsageWindowSummary {
+  pct: number | null;
+  resetsAt?: string | null;
+}
+// 계약 밖 추가분. window_minutes 300(5h)/10080(7d)로만 매칭한 창 요약.
+// stale 판정 SSOT는 서버 app/services/pool.py의 _fresh_pct와 같은 규칙
+// (pool_window_stale_minutes 이내 관측만 신선)이며, 여기서는 서버가 이미
+// 판단해 내려준 값을 그대로 쓴다.
+export interface AccountUsageSummary {
+  fiveHour: AccountUsageWindowSummary | null;
+  sevenDay: AccountUsageWindowSummary | null;
+  fetchedAt?: string | null;
+  stale: boolean;
+}
+
 export interface Account {
   id: string;
   tenantId: string;
@@ -62,6 +79,8 @@ export interface Account {
   credentialExpiresAt?: string;
   lastSwitchedAt?: string;
   createdAt?: string;
+  // 계약 밖 추가분. 서버가 항상 채워 보낸다(관측이 없어도 null 슬롯을 가진 객체).
+  usage?: AccountUsageSummary | null;
 }
 export interface AccountCreate {
   email: string;

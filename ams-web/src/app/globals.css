@@ -362,6 +362,12 @@ code {
 }
 .time-cell svg { flex: 0 0 auto; }
 
+/* -- 계정 잔여 사용량 셀(5h/7d) -------------------------------------------- */
+.account-usage-cell {
+  display: flex; flex-direction: column; gap: 2px; font-size: 12px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
 /* -- 동기화 셀 ------------------------------------------------------------ */
 .sync-cell {
   display: inline-flex; align-items: center; gap: 5px;
