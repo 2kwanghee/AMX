@@ -190,6 +190,46 @@ func TestCreateTemplateRelEscapeRejected(t *testing.T) {
 	}
 }
 
+// TestCreateTemplateRejectsSymlinkedSubdirectory is N5's exact reproduction:
+// validateTemplateRel only inspects the rel STRING (no ".." component), so a
+// rel like "hooks/pre.sh" sails through it even when "hooks" is itself a
+// pre-planted symlink pointing outside the profile — the escape happens at
+// the filesystem level, which is what rejectSymlinkedAncestors must catch.
+func TestCreateTemplateRejectsSymlinkedSubdirectory(t *testing.T) {
+	if runtimeIsWindows() {
+		t.Skip("symlink creation semantics differ on windows; covered by unix CI")
+	}
+	s := openStore(t)
+	tmplDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmplDir, "hooks"), 0o755); err != nil {
+		t.Fatalf("mkdir template hooks dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmplDir, "hooks", "pre.sh"), []byte("payload"), 0o644); err != nil {
+		t.Fatalf("seed template hook file: %v", err)
+	}
+
+	key := AccountKey("hookescape@example.com")
+	dir, err := s.Create("claude", key, Template{}) // bare profile, no template yet
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "hooks")); err != nil {
+		t.Fatalf("symlink hooks subdirectory: %v", err)
+	}
+
+	_, err = s.Create("claude", key, Template{Dir: tmplDir, Files: []string{"hooks/pre.sh"}})
+	if err == nil {
+		t.Fatal("Create should reject a template file whose destination subdirectory is a symlink")
+	}
+	if _, statErr := os.Stat(filepath.Join(elsewhere, "pre.sh")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("payload escaped through the symlinked hooks subdirectory: %v", statErr)
+	}
+}
+
 // --- Path validation (adversarial) --------------------------------------
 
 func TestProviderKeyPathEscapeRejected(t *testing.T) {
@@ -414,6 +454,81 @@ func TestStageRejectsSymlinkedProviderDir(t *testing.T) {
 	}
 }
 
+// TestOpenRejectsSymlinkedRoot is N1's exact reproduction: planting
+// <stateDir>/profiles as a symlink BEFORE Open is ever called used to defeat
+// every other check in this file, since providerDir/profileDir would then be
+// real directories at the symlink's target and no per-level rejectSymlink
+// call ever looked at root itself.
+func TestOpenRejectsSymlinkedRoot(t *testing.T) {
+	if runtimeIsWindows() {
+		t.Skip("symlink creation semantics differ on windows; covered by unix CI")
+	}
+	stateDir := t.TempDir()
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(stateDir, profilesSubdir)); err != nil {
+		t.Fatalf("symlink profiles root: %v", err)
+	}
+
+	if _, err := Open(stateDir); err == nil {
+		t.Fatal("Open should reject a pre-existing symlinked profiles root")
+	}
+	if _, statErr := os.Stat(filepath.Join(elsewhere, "claude")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Open must not have written through the symlinked root: %v", statErr)
+	}
+}
+
+// TestOpenTightensPreExistingWideRoot exercises N1's ensureDirPerm(root)
+// call: a root directory that already existed at a wider mode before Open
+// is tightened to 0700, matching Create/Stage/SetActive's self-heal.
+func TestOpenTightensPreExistingWideRoot(t *testing.T) {
+	stateDir := t.TempDir()
+	root := filepath.Join(stateDir, profilesSubdir)
+	if err := os.MkdirAll(root, 0o777); err != nil {
+		t.Fatalf("pre-create wide root: %v", err)
+	}
+	if err := os.Chmod(root, 0o777); err != nil {
+		t.Fatalf("chmod wide: %v", err)
+	}
+	if _, err := Open(stateDir); err != nil {
+		t.Fatalf("Open over a pre-existing wide root: %v", err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat root: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("root perm after Open = %o, want tightened to 0700", perm)
+	}
+}
+
+// TestRemoveConfirmWithinRootUsesResolvedPaths is a white-box test of
+// confirmWithinRoot itself (N1b): it must reject a path that lexically looks
+// like a sibling of root ("/root-evil" vs "/root") rather than a true child,
+// proving the boundary check appends the separator instead of doing a bare
+// string-prefix match.
+func TestRemoveConfirmWithinRootUsesResolvedPaths(t *testing.T) {
+	s := openStore(t)
+	sibling := s.root + "-evil"
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatalf("mkdir sibling: %v", err)
+	}
+	if err := s.confirmWithinRoot(sibling); err == nil {
+		t.Fatalf("confirmWithinRoot must reject a sibling directory (%q) that merely shares root's string prefix", sibling)
+	}
+	// A genuine descendant must still pass.
+	key := AccountKey("within@example.com")
+	dir, err := s.Create("claude", key, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.confirmWithinRoot(dir); err != nil {
+		t.Fatalf("confirmWithinRoot rejected a genuine descendant: %v", err)
+	}
+}
+
 // --- Remove --------------------------------------------------------------
 
 func TestRemoveIdempotent(t *testing.T) {
@@ -552,7 +667,7 @@ func TestCompleteReflectsStagedMarker(t *testing.T) {
 	if _, err := s.Create(drv.Name(), key, Template{}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	done, err := s.Complete(drv.Name(), key)
+	done, err := s.Complete(drv, key)
 	if err != nil {
 		t.Fatalf("Complete after Create only: %v", err)
 	}
@@ -563,7 +678,7 @@ func TestCompleteReflectsStagedMarker(t *testing.T) {
 	if err := s.Stage(drv, key, sampleCredential("rt-complete"), provider.AddMeta{Email: "complete@example.com"}); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	done, err = s.Complete(drv.Name(), key)
+	done, err = s.Complete(drv, key)
 	if err != nil {
 		t.Fatalf("Complete after Stage: %v", err)
 	}
@@ -590,12 +705,102 @@ func TestCompleteFalseWhenMarkerMissingDespiteCredentialFile(t *testing.T) {
 	if _, err := os.Stat(drv.CredentialPath(dir)); err != nil {
 		t.Fatalf("credential file should exist for this scenario: %v", err)
 	}
-	done, err := s.Complete(drv.Name(), key)
+	done, err := s.Complete(drv, key)
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if done {
 		t.Fatal("Complete must be false when the marker was never written, even if the credential file exists")
+	}
+}
+
+// TestCompleteFalseWhenMarkerPresentButCredentialMissing is N3's exact
+// reproduction: a marker planted directly on disk (bypassing Stage) with no
+// credential file behind it at all must not read as Complete.
+func TestCompleteFalseWhenMarkerPresentButCredentialMissing(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("premarked@example.com")
+	dir, err := s.Create(drv.Name(), key, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stagedMarkerName), []byte("sha256:deadbeef"), 0o600); err != nil {
+		t.Fatalf("plant marker: %v", err)
+	}
+	done, err := s.Complete(drv, key)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if done {
+		t.Fatal("Complete must be false when no credential file exists, regardless of a pre-planted marker")
+	}
+}
+
+// TestCompleteFalseWhenMarkerFingerprintMismatchesLiveCredential simulates an
+// external rotation (something other than Store.Stage rewriting the
+// credential file, e.g. Claude Code's own refresh, or a directly-forged
+// file) that leaves the OLD marker in place next to a NEW credential whose
+// fingerprint no longer matches it.
+func TestCompleteFalseWhenMarkerFingerprintMismatchesLiveCredential(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("mismatch@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-a"), provider.AddMeta{Email: "mismatch@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	dir, _, err := s.resolveProfile(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("resolveProfile: %v", err)
+	}
+	if err := drv.StageCredential(dir, sampleCredential("rt-b"), provider.AddMeta{Email: "mismatch@example.com"}); err != nil {
+		t.Fatalf("external StageCredential (simulating a rotation Stage never saw): %v", err)
+	}
+	done, err := s.Complete(drv, key)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if done {
+		t.Fatal("Complete should be false once the marker's fingerprint no longer matches the live credential")
+	}
+}
+
+// TestReStageDyingMidwayLeavesCompleteFalse is N2's exact reproduction: Stage
+// succeeds once (Complete==true), then a re-Stage is modeled as dying right
+// after the marker-invalidation step and StageCredential's write, but before
+// the new marker is ever recorded — which is precisely what Stage's own
+// ordering (delete marker, then StageCredential, then write new marker)
+// produces if the process is killed in that window.
+func TestReStageDyingMidwayLeavesCompleteFalse(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("rotate@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-1"), provider.AddMeta{Email: "rotate@example.com"}); err != nil {
+		t.Fatalf("first Stage: %v", err)
+	}
+	done, err := s.Complete(drv, key)
+	if err != nil || !done {
+		t.Fatalf("Complete after first Stage = (%v, %v), want (true, nil)", done, err)
+	}
+
+	dir, _, err := s.resolveProfile(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("resolveProfile: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, stagedMarkerName)); err != nil {
+		t.Fatalf("remove marker (simulating Stage's entry step): %v", err)
+	}
+	if err := drv.StageCredential(dir, sampleCredential("rt-2"), provider.AddMeta{Email: "rotate@example.com"}); err != nil {
+		t.Fatalf("simulate StageCredential: %v", err)
+	}
+	// Crash point: never reaches Stage's final atomicWrite of the new marker.
+
+	done, err = s.Complete(drv, key)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if done {
+		t.Fatal("Complete should be false when a re-Stage was interrupted after invalidating the old marker but before writing the new one")
 	}
 }
 
@@ -663,6 +868,35 @@ func TestSetActiveIsAtomic(t *testing.T) {
 	got, _, err := s.GetActive("claude")
 	if err != nil || got != key2 {
 		t.Fatalf("GetActive after second SetActive = (%q, %v), want %q", got, err, key2)
+	}
+}
+
+// TestSetActiveTightensPreExistingWideProviderDir is N6's exact reproduction:
+// only Create/Stage self-healed a wide provider directory before this fix; a
+// provider directory whose only prior touch was a pre-existing wide MkdirAll
+// (never a Create/Stage) stayed wide through SetActive.
+func TestSetActiveTightensPreExistingWideProviderDir(t *testing.T) {
+	s := openStore(t)
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	if err := os.MkdirAll(providerDir, 0o777); err != nil {
+		t.Fatalf("pre-create wide provider dir: %v", err)
+	}
+	if err := os.Chmod(providerDir, 0o777); err != nil {
+		t.Fatalf("chmod wide: %v", err)
+	}
+
+	if err := s.SetActive("claude", AccountKey("wide-setactive@example.com")); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	info, err := os.Stat(providerDir)
+	if err != nil {
+		t.Fatalf("stat provider dir: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("provider dir perm after SetActive = %o, want tightened to 0700", perm)
 	}
 }
 
@@ -777,6 +1011,63 @@ func TestRemoveBlockedByHeldLockLeavesProfileIntact(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "still-here.txt")); statErr != nil {
 		t.Fatalf("Remove deleted the profile despite the lock being held: %v", statErr)
+	}
+}
+
+// TestStageRejectsSymlinkedLockPath is N4's exact reproduction: a symlink
+// planted at <providerDir>/<accountKey>.lock lets fslock's O_CREATE open
+// follow it and lock/create a file wherever the link points, outside the
+// store root entirely.
+func TestStageRejectsSymlinkedLockPath(t *testing.T) {
+	if runtimeIsWindows() {
+		t.Skip("symlink creation semantics differ on windows; covered by unix CI")
+	}
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("lock-symlink@example.com")
+	dir, err := s.Create(drv.Name(), key, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	providerDir := filepath.Dir(dir)
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	evilLock := filepath.Join(elsewhere, "hijacked.lock")
+	if err := os.Symlink(evilLock, s.lockPath(providerDir, key)); err != nil {
+		t.Fatalf("symlink lock path: %v", err)
+	}
+
+	err = s.Stage(drv, key, sampleCredential("rt"), provider.AddMeta{Email: "lock-symlink@example.com"})
+	if err == nil {
+		t.Fatal("Stage should reject a symlinked lock path")
+	}
+	if _, statErr := os.Stat(evilLock); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("lock file was created through the symlink outside the store: %v", statErr)
+	}
+}
+
+// TestRemoveRejectsDirectoryAtLockPath is N4's other half: a directory
+// planted at the lock path (instead of a symlink) must be rejected rather
+// than wedging every future Stage/Remove on this profile permanently.
+func TestRemoveRejectsDirectoryAtLockPath(t *testing.T) {
+	s := openStore(t)
+	key := AccountKey("lock-dir@example.com")
+	dir, err := s.Create("claude", key, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	providerDir := filepath.Dir(dir)
+	if err := os.MkdirAll(s.lockPath(providerDir, key), 0o700); err != nil {
+		t.Fatalf("plant directory at lock path: %v", err)
+	}
+
+	if err := s.Remove("claude", key); err == nil {
+		t.Fatal("Remove should reject a non-regular file at the lock path instead of hanging or silently ignoring it")
+	}
+	if _, statErr := os.Stat(dir); statErr != nil {
+		t.Fatalf("profile should remain intact when Remove is rejected for a bad lock path: %v", statErr)
 	}
 }
 
