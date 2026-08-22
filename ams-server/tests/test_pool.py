@@ -1047,3 +1047,43 @@ def test_sweep_pool_is_a_no_op_without_data(app_env):
     with _db() as db:
         assert pool.sweep_pool(db) == 0
     assert _recs(tenant_id) == []
+
+
+def test_freshly_delivered_account_is_not_marked_stale_observation(app_env):
+    """재배정 직후에는 새 서버가 아직 보고하지 않아 창에 이전 관측만 남는다.
+    그 구간을 부적격으로 적으면 멀쩡한 계정이 "관측 두절"로 보인다 — F1·F3와
+    같은 리스 시작 유예를 준다(08-22 운영 확인).
+    """
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1")
+    account_id = _account(tenant_id, "just-moved@x.example.com")
+    _assign(tenant_id, account_id, server_id)
+
+    # 마지막 관측은 낡았지만(45분 전) 리스는 방금 시작됐다.
+    _observe(
+        tenant_id, server_id, _report("just-moved@x.example.com", five=40, seven=20),
+        reported_at=_now() - timedelta(minutes=45),
+    )
+
+    stale_after = timedelta(minutes=30)
+    with _db() as db:
+        account = db.get(Account, account_id)
+        windows = _windows(tenant_id, account_id)
+        fresh_lease = pool.ineligible_reason(
+            account,
+            unusable=set(),
+            windows=windows,
+            now=_now(),
+            stale_after=stale_after,
+            lease_started_at=_now() - timedelta(minutes=1),
+        )
+        old_lease = pool.ineligible_reason(
+            account,
+            unusable=set(),
+            windows=windows,
+            now=_now(),
+            stale_after=stale_after,
+            lease_started_at=_now() - timedelta(hours=3),
+        )
+    assert fresh_lease is None
+    assert old_lease == "stale_observation"

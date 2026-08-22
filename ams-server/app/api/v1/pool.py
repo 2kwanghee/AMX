@@ -108,6 +108,9 @@ def get_pool(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
             windows=windows.get(account.id, []),
             now=now,
             stale_after=stale_after,
+            lease_started_at=(
+                (assignment.delivered_at or assignment.created_at) if assignment else None
+            ),
         )
         pool_accounts.append(
             schemas.PoolAccount(
