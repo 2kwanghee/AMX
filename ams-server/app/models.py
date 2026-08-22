@@ -716,11 +716,17 @@ class SessionUsage(Base):
     observation. Retention is a plain 90-day age purge
     (``session_usage.sweep_session_usage_retention``) — nothing integrates over this
     table, so it needs no settlement guard.
+
+    ``server_id`` and ``project`` follow the same nullable-no-FK convention, resolved
+    from the hook's ``hostname``/``cwd`` (``session_usage.resolve_server_id`` and
+    ``_project_from_cwd``) — a hostname with no matching server, or a session run
+    outside any project directory, is still a valid observation.
     """
 
     __tablename__ = "session_usage"
     __table_args__ = (
         Index("ix_session_usage_tenant_ended", "tenant_id", "ended_at"),
+        Index("ix_session_usage_tenant_server", "tenant_id", "server_id"),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -733,6 +739,11 @@ class SessionUsage(Base):
     # message.model as the transcript reports it ("unknown" when absent).
     model: Mapped[str] = mapped_column(Text, primary_key=True)
     account_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    # hostname을 servers.hostname과 대조해 해석한 결과. 매칭 실패·미등록 서버는 NULL.
+    server_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    # cwd의 마지막 경로 요소(예: "/mnt/c/workspace/AMX" → "AMX"). cwd가 없거나 빈
+    # 문자열로 접히면 NULL.
+    project: Mapped[str | None] = mapped_column(Text, nullable=True)
     input_tokens: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
     )

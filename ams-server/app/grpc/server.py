@@ -480,6 +480,11 @@ class ControlPlaneServicer(pb_grpc.AmxControlPlaneServicer):
             server.agent_version = reg.agent_version
         if reg.tsamx_version:
             server.tsamx_version = reg.tsamx_version
+        # 에이전트가 os.Hostname()으로 보낸 값이 관리자 수동 입력보다 우선한다.
+        # session_usage 훅이 같은 socket.gethostname()을 보내므로, 이 값이 맞아야
+        # 세션이 서버로 귀속된다(services.session_usage.resolve_server_id).
+        if reg.hostname:
+            server.hostname = reg.hostname
         server.status = "online"
         server.last_seen_at = _now()
         server.updated_at = _now()

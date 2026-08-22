@@ -33,6 +33,8 @@ const ALLOWLIST: RegExp[] = [
   new RegExp(`^tenants/${ID}/usage/cost$`),
   new RegExp(`^tenants/${ID}/usage/langfuse$`),
   new RegExp(`^tenants/${ID}/usage/sessions$`),
+  // 대시보드 집계 통계(design-notes/dashboard-redesign-plan.md 부록 A).
+  new RegExp(`^tenants/${ID}/stats/(summary|timeseries|flows|accounts|servers|heatmap)$`),
   new RegExp(`^tenants/${ID}/alerts$`),
   new RegExp(`^tenants/${ID}/alerts/${ID}:ack$`),
   new RegExp(`^tenants/${ID}/audit-logs$`),

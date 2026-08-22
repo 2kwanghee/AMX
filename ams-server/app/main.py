@@ -24,6 +24,7 @@ from app.api.v1 import (
     langfuse,
     pool,
     servers,
+    stats,
     tenants,
     usage,
 )
@@ -58,6 +59,8 @@ def create_app() -> FastAPI:
     app.include_router(billing.router, prefix=API_PREFIX)
     app.include_router(usage.router, prefix=API_PREFIX)
     app.include_router(langfuse.router, prefix=API_PREFIX)
+    # 대시보드 집계 통계(dashboard-redesign-plan.md 부록 A) — 읽기 전용, 조작 없음.
+    app.include_router(stats.router, prefix=API_PREFIX)
     # 계정 풀 P1(관측만): 조회·정책·수동 개입만이고 명령은 내지 않는다.
     app.include_router(pool.router, prefix=API_PREFIX)
     # Token-gated, no admin bearer and no TenantScope: an unattended agent hook

@@ -21,6 +21,7 @@ Claude Code는 세션 트랜스크립트의 ``assistant`` 레코드마다 ``mess
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -34,7 +35,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from app import schemas
 from app.config import get_settings
 from app.db import try_advisory_xact_lock as _try_advisory_xact_lock
-from app.models import Account, SessionUsage
+from app.models import Account, Server, SessionUsage
 
 _logger = logging.getLogger(__name__)
 
@@ -101,6 +102,48 @@ def resolve_account_id(db: Session, tenant_id: uuid.UUID, email: str | None) -> 
     )
 
 
+def resolve_server_id(
+    db: Session, tenant_id: uuid.UUID, hostname: str | None
+) -> uuid.UUID | None:
+    """hostname을 해당 테넌트의 서버 id로 해석한다. 못 찾으면 None(거부하지 않는다).
+
+    ``servers``에는 테넌트 안에서 hostname 유일성 제약이 없어 여러 서버가 같은
+    hostname을 보고할 수 있다 — 그럴 땐 ``last_seen_at``이 가장 최근인 서버를 고른다
+    (지금 활동 중인 쪽이 이 세션을 보낸 서버일 가능성이 가장 높다).
+    """
+    if not hostname:
+        return None
+    return db.scalar(
+        select(Server.id)
+        .where(Server.tenant_id == tenant_id, func.lower(Server.hostname) == hostname.lower())
+        .order_by(Server.last_seen_at.desc().nulls_last())
+        .limit(1)
+    )
+
+
+_DRIVE_ROOT = re.compile(r"[A-Za-z]:")
+
+
+def _project_from_cwd(cwd: str | None) -> str | None:
+    """cwd의 마지막 경로 요소를 프로젝트 이름으로 뽑는다.
+
+    훅은 tsamx가 실행된 플랫폼 그대로의 cwd를 보내므로 POSIX(``/``)·Windows(``\\``)
+    구분자를 모두 받아들이고, UNC 경로(``//srv/share/x``)도 같은 분리자 규칙으로
+    마지막 조각을 취한다. 앞뒤 공백과 끝 구분자를 지운 뒤 남는 게 없으면(공백만·루트
+    ``/``) NULL이다. 마지막 조각이 드라이브 문자(``C:``) 하나뿐이면 그건 프로젝트가
+    아니라 볼륨 루트이므로 역시 NULL이다.
+    """
+    if not cwd:
+        return None
+    trimmed = cwd.strip().rstrip("/\\")
+    if not trimmed:
+        return None
+    tail = re.split(r"[/\\]", trimmed)[-1]
+    if not tail or _DRIVE_ROOT.fullmatch(tail):
+        return None
+    return tail
+
+
 def record_session_usage(
     db: Session, tenant_id: uuid.UUID, payload: schemas.SessionUsageIngest
 ) -> tuple[int, bool]:
@@ -114,6 +157,8 @@ def record_session_usage(
     ``ON CONFLICT``로 자기 자신을 갱신할 수 없어 실패하므로, 문장에 넣기 전에 접는다.
     """
     account_id = resolve_account_id(db, tenant_id, payload.account_email)
+    server_id = resolve_server_id(db, tenant_id, payload.hostname)
+    project = _project_from_cwd(payload.cwd)
     now = _now()
 
     by_model: dict[str, dict] = {}
@@ -123,6 +168,8 @@ def record_session_usage(
             "session_id": payload.session_id,
             "model": stat.model,
             "account_id": account_id,
+            "server_id": server_id,
+            "project": project,
             "input_tokens": stat.input_tokens,
             "output_tokens": stat.output_tokens,
             "cache_read_tokens": stat.cache_read_tokens,
@@ -150,6 +197,8 @@ def record_session_usage(
             constraint="pk_session_usage",
             set_={
                 "account_id": stmt.excluded.account_id,
+                "server_id": stmt.excluded.server_id,
+                "project": stmt.excluded.project,
                 "input_tokens": stmt.excluded.input_tokens,
                 "output_tokens": stmt.excluded.output_tokens,
                 "cache_read_tokens": stmt.excluded.cache_read_tokens,

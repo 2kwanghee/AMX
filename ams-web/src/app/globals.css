@@ -1360,3 +1360,166 @@ tbody tr.usage-detail-row:hover > td { background: var(--surface-2); }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* charts */
+/* 대시보드 개편(dashboard-redesign-plan.md §4·§5)에 쓰는 차트 프리미티브 공통
+   스타일. path 자체의 진입·보간 애니메이션은 useCountUp·useInterpolatedPath가
+   JS(rAF)로 처리하므로, 여기서는 CSS 트랜지션·순수 CSS 애니메이션(히트맵
+   stagger)만 담당한다. 색은 전부 기존 토큰(--kpi-*·--ok/warn/crit·--accent·
+   --muted·--border·--surface)만 쓴다. */
+
+.chart-empty {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 120px; color: var(--muted); font-size: 13px;
+  border: 1px dashed var(--border); border-radius: 10px;
+}
+
+/* -- KPI 타일 ---------------------------------------------------------- */
+.chart-kpi {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 16px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; text-align: left; font: inherit; color: inherit;
+  box-shadow: var(--shadow); cursor: default;
+}
+button.chart-kpi { cursor: pointer; transition: border-color var(--m-fast), box-shadow var(--m-fast); }
+button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb(15 118 110 / .12); }
+.chart-kpi-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.chart-kpi-icon { display: inline-flex; flex: 0 0 auto; }
+.chart-kpi-teal .chart-kpi-icon { color: var(--kpi-teal); }
+.chart-kpi-indigo .chart-kpi-icon { color: var(--kpi-indigo); }
+.chart-kpi-amber .chart-kpi-icon { color: var(--kpi-amber); }
+.chart-kpi-rose .chart-kpi-icon { color: var(--kpi-rose); }
+.chart-kpi-value {
+  font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums;
+  color: var(--ink); line-height: 1.1;
+}
+.chart-kpi-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 26px; }
+.chart-kpi-delta { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.chart-kpi-delta.up { color: var(--ok); }
+.chart-kpi-delta.down { color: var(--crit); }
+.chart-kpi-arrow { font-size: 10px; }
+.chart-kpi-spark { color: var(--accent); line-height: 0; }
+.chart-kpi-teal .chart-kpi-spark { color: var(--kpi-teal); }
+.chart-kpi-indigo .chart-kpi-spark { color: var(--kpi-indigo); }
+.chart-kpi-amber .chart-kpi-spark { color: var(--kpi-amber); }
+.chart-kpi-rose .chart-kpi-spark { color: var(--kpi-rose); }
+
+/* -- 누적 영역 시계열 ---------------------------------------------------- */
+.chart-area-wrap { position: relative; }
+.chart-area-svg { display: block; width: 100%; height: auto; }
+.chart-area-band { opacity: .88; }
+.chart-grid-line { stroke: var(--border); stroke-width: 1; }
+.chart-axis-label { font-size: 10px; fill: var(--muted); }
+.chart-crosshair { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+.chart-tooltip {
+  position: absolute; transform: translateX(-4px); min-width: 140px;
+  padding: 8px 10px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 22px rgb(26 35 50 / .14); pointer-events: none;
+  font-size: 11.5px; z-index: 5;
+}
+.chart-tooltip-head { color: var(--muted); margin-bottom: 6px; font-size: 10.5px; }
+.chart-tooltip-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.chart-tooltip-swatch { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+.chart-tooltip-label { flex: 1 1 auto; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-tooltip-value { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+/* -- 도넛 ---------------------------------------------------------------- */
+.chart-donut-wrap { display: flex; align-items: center; gap: 16px; }
+.chart-donut-svg { flex: 0 0 auto; }
+.chart-donut-seg {
+  transform-box: fill-box; transform-origin: center; cursor: default;
+  transition: transform var(--m-fast) var(--ease-out), opacity var(--m-fast);
+}
+.chart-donut-seg.hover { transform: scale(1.05); }
+.chart-donut-big { font-size: 20px; font-weight: 700; fill: var(--ink); }
+.chart-donut-small { font-size: 10.5px; fill: var(--muted); }
+.chart-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.chart-legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 4px; border-radius: 6px; }
+.chart-legend-item.hover { background: var(--surface-2); }
+.chart-legend-swatch { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+.chart-legend-label { flex: 1 1 auto; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-legend-value { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* -- 순위 바(FLIP) --------------------------------------------------------- */
+.chart-rank { display: flex; flex-direction: column; }
+.chart-rank-row { display: grid; grid-template-columns: 96px 1fr 64px; align-items: center; gap: 10px; will-change: transform; }
+.chart-rank-label { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-rank-track { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.chart-rank-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--m-base) var(--ease-out); }
+.chart-rank-value { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+/* -- 원형 잔여 게이지 ------------------------------------------------------ */
+.chart-ring { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.chart-ring-track { stroke: var(--surface-2); }
+.chart-ring-fill { stroke: var(--accent); transition: stroke-dashoffset var(--m-base) var(--ease-out), stroke var(--m-fast); }
+.chart-ring-fill.warn { stroke: var(--warn); }
+.chart-ring-fill.crit { stroke: var(--crit); }
+.chart-ring-text { font-size: 15px; font-weight: 700; fill: var(--ink); font-variant-numeric: tabular-nums; }
+.chart-ring-window { font-size: 10.5px; color: var(--muted); }
+.chart-ring-caption { font-size: 11px; color: var(--ink); }
+
+/* -- 히트맵 --------------------------------------------------------------- */
+.chart-heatmap { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted); }
+.chart-heatmap-hours { display: grid; grid-template-columns: repeat(24, 1fr); padding-left: 28px; }
+.chart-heatmap-hour-label { text-align: center; }
+.chart-heatmap-row { display: flex; align-items: center; gap: 4px; }
+.chart-heatmap-day-label { width: 24px; flex: 0 0 auto; text-align: right; }
+.chart-heatmap-cells { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; flex: 1 1 auto; }
+.chart-heatmap-cell {
+  aspect-ratio: 1; border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) calc(var(--intensity, 0) * 100%), var(--surface-2));
+  animation: chart-heatmap-in var(--m-move) var(--ease-out) both;
+}
+@keyframes chart-heatmap-in {
+  from { transform: scale(.4); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* -- 상키(서버→계정 흐름) --------------------------------------------------- */
+.chart-sankey-svg { display: block; width: 100%; height: auto; }
+.chart-sankey-link {
+  fill: none; stroke: var(--accent); stroke-opacity: .35;
+  transition: stroke-opacity var(--m-fast), stroke var(--m-fast);
+  cursor: default;
+}
+.chart-sankey-link.hover { stroke-opacity: .8; stroke: var(--kpi-indigo); }
+.chart-sankey-link.dim { stroke-opacity: .12; }
+.chart-sankey-node { fill: var(--ink); opacity: .85; }
+.chart-sankey-node.account { fill: var(--kpi-indigo); }
+.chart-sankey-node-label { font-size: 10.5px; fill: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-heatmap-cell { animation: none; }
+  .chart-donut-seg,
+  .chart-rank-fill,
+  .chart-ring-fill,
+  .chart-sankey-link,
+  button.chart-kpi {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* -- 대시보드 홈 레이아웃 (dashboard-redesign-plan.md §4) ------------------- */
+.dash-range-row { display: flex; justify-content: flex-end; margin-bottom: 14px; }
+
+/* 계정 잔여 게이지 격자 — 카드 하나에 5h/7d 링 두 개. */
+.dash-gauge-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px;
+}
+.dash-gauge-card {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 10px; background: var(--surface-2); border-radius: 10px;
+}
+.dash-gauge-card-email {
+  font-size: 11.5px; color: var(--ink); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dash-gauge-card-rings { display: flex; gap: 10px; }
+
+/* 계정 순위 바 밑 부제 목록(최다 모델·프로젝트·서버) — RankBars 라벨 칸은
+   96px 고정폭이라 부제까지 넣을 자리가 없어 별도 목록으로 붙인다. */
+.dash-rank-notes { list-style: none; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--border); }
+.dash-rank-notes li {
+  display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 12px;
+}
+.dash-rank-notes-email { flex: 0 0 auto; color: var(--ink); font-weight: 600; }
