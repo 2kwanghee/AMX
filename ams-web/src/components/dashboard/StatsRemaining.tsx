@@ -11,17 +11,34 @@ import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
 import { RingGauge } from '@/components/charts';
 import { fmtRemainingWindow } from '@/lib/usage-format';
+import { StaleBadge } from '@/components/common';
 import type { AccountPage, AccountUsageWindowSummary } from '@/lib/api-client/types';
 
 const MAX_ROWS = 6;
 
-function Window({ label, w }: { label: string; w: AccountUsageWindowSummary | null | undefined }) {
+// stale·fetchedAt은 창(window)이 아니라 계정 usage 요약 전체의 신선도라, 두 창
+// (5h/7d)에 같은 값을 그대로 넘겨받는다(F2, 08-22 — 동결된 값이 표시 없이
+// 나가던 사고의 재발 방지).
+function Window({
+  label,
+  w,
+  stale,
+  fetchedAt,
+}: {
+  label: string;
+  w: AccountUsageWindowSummary | null | undefined;
+  stale?: boolean;
+  fetchedAt?: string | null;
+}) {
   return (
     <span className="dash-remain-cell">
       <RingGauge pct={w?.pct ?? NaN} windowLabel={label} size={44} strokeWidth={5} compact />
       <span className="dash-remain-meta">
         <span className="dash-remain-win">{label}</span>
-        <span className="dash-remain-text">{fmtRemainingWindow(w)}</span>
+        <span className="dash-remain-text">
+          {fmtRemainingWindow(w)}
+          {stale && <StaleBadge fetchedAt={fetchedAt} />}
+        </span>
       </span>
     </span>
   );
@@ -49,8 +66,18 @@ export function StatsRemaining({ tenantId }: { tenantId: string }) {
               <li key={a.id} className="dash-remain-row">
                 <span className="dash-remain-email" title={a.email}>{a.email}</span>
                 <span className="dash-remain-gauges">
-                  <Window label="5시간" w={a.usage?.fiveHour} />
-                  <Window label="7일" w={a.usage?.sevenDay} />
+                  <Window
+                    label="5시간"
+                    w={a.usage?.fiveHour}
+                    stale={a.usage?.stale}
+                    fetchedAt={a.usage?.fetchedAt}
+                  />
+                  <Window
+                    label="7일"
+                    w={a.usage?.sevenDay}
+                    stale={a.usage?.stale}
+                    fetchedAt={a.usage?.fetchedAt}
+                  />
                 </span>
               </li>
             ))}

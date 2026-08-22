@@ -350,7 +350,8 @@ export type AlertKind =
   | 'dangerous_command'
   | 'credential_unusable'
   | 'account_window_high'
-  | 'pool_chain_failed';
+  | 'pool_chain_failed'
+  | 'pool_usage_stale';
 export type AlertSeverity = 'critical' | 'warning';
 export type AlertStatus = 'open' | 'acked' | 'resolved';
 
@@ -703,7 +704,8 @@ export type IneligibleReason =
   | 'unusable'
   | 'pinned'
   | 'held'
-  | 'no_observation';
+  | 'no_observation'
+  | 'stale_observation';
 
 export interface WindowState {
   windowId: string;

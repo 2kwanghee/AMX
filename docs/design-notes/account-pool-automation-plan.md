@@ -89,6 +89,14 @@ P1에서 멈춰도 가치가 있다. 지금은 운영자가 "누가 언제 풀�
 
 P0~P3 전 단계가 브랜치에 올라왔다. P0/P0' `feat/pool-p0-usage-windows`, P1 `feat/pool-server-p1`, P2·P3 `feat/pool-server-p3`(권고·체인·자동 실행·일시정지), 웹 화면 `feat/pool-web`. 컨트롤러 동작은 환경변수로 조율한다. `AMX_POOL_WINDOW_HIGH_PCT=80`(계정 단위 고사용 경보 임계), `AMX_POOL_OBSERVATION_GRACE_MINUTES=15`(충전소 복귀 관측 유예), `AMX_POOL_CHAIN_STEP_TIMEOUT_MINUTES=10`(체인 한 단계 시간 초과), `AMX_POOL_MAX_CONCURRENT_CHAINS=3`(테넌트 동시 체인 상한), `AMX_POOL_WINDOW_STALE_MINUTES=30`(관측이 낡았다고 보는 경계), `AMX_POOL_EVENT_RETENTION_DAYS=90`(pool_events 보존). 값은 서버 배포 환경에서 덮어쓴다.
 
+### 관측 두절 대응 (2026-08-22, modarra9 83% 동결 사고)
+
+tsamx가 계정을 `relogin_required`로 격리하면 usage 창 보고가 멈추는데, 스왑 트리거는 `(_fresh_pct or -1.0) >= swap_at`(`pool.py` compute_states)이라 관측이 미상으로 빠지는 순간 조용히 불발됐다. modarra9 계정이 83%에서 동결된 채 85% 스왑이 걸리지 않아 실제로는 100%까지 소진된 사고로 드러났다. 세 가지를 더했다: **F1** `pool_usage_stale` 경보 — leased 계정의 창이 전부 stale/미상이고 **지금 그 계정을 들고 있는 서버**(재배정 전 서버가 아니라)가 online이면 열고, 신선한 관측이 돌아오면 자동으로 닫힌다. **F2** 계정 잔여 표시(계정 메뉴·대시보드·상황판)에 stale이면 값 옆에 "N분 전" 배지를 붙여 동결된 값을 신선도 표시 없이 보여주지 않는다. **F3** 같은 판정이 성립하면 소진 임박과 동일하게 취급해 기존 swap 추천/체인 경로를 그대로 태운다 — `min_lease_minutes`·후보 선정·mode 게이트는 전부 그대로이고, 근거만 pct 대신 "마지막 관측 pct + 두절 경과 분"으로 바뀐다. 여러 계정이 함께 두절이면 마지막 pct가 높은 쪽, 같으면 두절이 더 오래된 쪽을 결정적으로 먼저 고른다.
+
+두 번째 리뷰(08-22)에서 두 가지를 더 손봤다. 하나, 두절 시계의 기준을 "마지막 관측"과 "지금 리스가 시작된 시각" 중 늦은 쪽으로 잡는다 — 재배정 직후에는 새 서버가 아직 한 번도 보고하지 않아 창에 이전 서버의 낡은 값이 남아 있는데, 그 값만 보면 리스 초반부터 stale로 오판한다. 둘, `ineligible_reason`에 `stale_observation`을 추가해 신선한 관측이 없는 계정은 **교체 대상(후보)에서도** 뺀다 — 안 그러면 관측이 끊긴 계정이 다른 계정을 대신 넘겨받는 역설이 생기고, 관측 파이프라인 전체가 죽었을 때 신선한 후보가 하나도 없어 F3가 자연히 조용해지며 `pool_usage_stale` 경보만 남는다(동시 교체 폭주 방지). 디바운스는 stale 판정(30분 무관측) 자체가 맡고, 체인이 도는 서버는 `build_recommendations`가 건너뛰므로 중복 개시는 없다.
+
+잔여 위험: `stale_after`(기본 30분)가 지나기 전에 일어나는 고속 소진(예: 5분 만에 0→100%)은 이 판정으로 못 막는다 — 관측 주기 자체가 짧아야 하는 문제라 F1~F3의 범위 밖이다. 그리고 관측이 두절된 동안 `account_window_high`(동결된 옛 pct 기준)와 `pool_usage_stale`이 동시에 열려 있는 것은 버그가 아니라 의도된 동작이다 — 전자는 "마지막으로 본 값이 위험했다", 후자는 "그 값을 더는 믿을 수 없다"로 서로 다른 사실을 말한다.
+
 ## 4. 기존 코드와 부딪히는 지점
 
 1. **unique 제약** — 회수가 detached로 수렴하기 전에는 같은 계정을 다시 INSERT 못 한다. 컨트롤러는 `RECALLING` 계정을 후보에서 빼고, 수렴은 reconcile에 맡긴다.

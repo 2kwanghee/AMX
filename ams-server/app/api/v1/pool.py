@@ -15,13 +15,14 @@ pin/hold 가 별도 컬럼이 아니라 ``pool_state`` 의 값인 이유는 스�
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Query
 from sqlalchemy import select
 
 from app import schemas
 from app.api.deps import AdminPrincipal, DbSession, TenantScope
+from app.config import get_settings
 from app.core.errors import conflict, not_found
 from app.models import (
     Account,
@@ -96,11 +97,17 @@ def get_pool(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
         windows.setdefault(row.account_id, []).append(row)
 
     unusable = pool._unusable_account_ids(db, tenant_id)
+    now = _now()
+    stale_after = timedelta(minutes=get_settings().pool_window_stale_minutes)
     pool_accounts = []
     for account in accounts:
         assignment = by_account.get(account.id)
         reason = pool.ineligible_reason(
-            account, unusable=unusable, windows=windows.get(account.id, [])
+            account,
+            unusable=unusable,
+            windows=windows.get(account.id, []),
+            now=now,
+            stale_after=stale_after,
         )
         pool_accounts.append(
             schemas.PoolAccount(

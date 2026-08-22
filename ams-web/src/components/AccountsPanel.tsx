@@ -8,19 +8,21 @@ import { fmtRemainingWindow } from '@/lib/usage-format';
 import { DirectImport } from './accounts/DirectImportModal';
 import { EditAccount } from './accounts/EditAccountModal';
 import { RegisterModal } from './accounts/RegisterModal';
-import { Badge, EmailChip, LiveDot, ProviderTag, TimeCell, krLabel, relTime, useAction, useMarkOnData } from './common';
+import { Badge, EmailChip, LiveDot, ProviderTag, StaleBadge, TimeCell, krLabel, useAction, useMarkOnData } from './common';
 
 const POLL = 8000;
 
 // 잔여(5h/7d) 셀. 값은 usage-format.fmtRemainingWindow 로 "잔여 62% · 14:30 리셋"
-// 한 줄씩 두 줄로 쌓는다. stale이면 흐림 처리하고, 마지막 관측 경과를 툴팁으로
-// 붙인다(§2단계 — 값 자체는 숨기지 않는다).
+// 한 줄씩 두 줄로 쌓는다. stale이면 흐림 처리하고 값 옆에 "N분 전" 배지를 붙인다
+// (§2단계 — 값 자체는 숨기지 않는다. F2, 08-22).
 function UsageCell({ usage }: { usage?: AccountUsageSummary | null }) {
   if (!usage) return <span className="muted">—</span>;
-  const title = usage.stale && usage.fetchedAt ? `${relTime(usage.fetchedAt)} 관측` : undefined;
   return (
-    <div className={`account-usage-cell${usage.stale ? ' muted' : ''}`} title={title}>
-      <span>5h {fmtRemainingWindow(usage.fiveHour)}</span>
+    <div className={`account-usage-cell${usage.stale ? ' muted' : ''}`}>
+      <span>
+        5h {fmtRemainingWindow(usage.fiveHour)}
+        {usage.stale && <StaleBadge fetchedAt={usage.fetchedAt} />}
+      </span>
       <span>7d {fmtRemainingWindow(usage.sevenDay)}</span>
     </div>
   );

@@ -1,7 +1,8 @@
 """계정 풀 P1 리뷰 반영분 — 격리·신선도·사용 불가·보존·입력 파싱.
 
 검증: 창 정규화가 터져도 UsageReport 는 저장된다 / 한 테넌트의 스윕 실패가 다른
-테넌트를 롤백하지 않는다 / 낡은 관측(기본 30분)은 미상이라 교체를 트리거하지 않는다 /
+테넌트를 롤백하지 않는다 / 낡은 관측(기본 30분)은 미상이라 pct 임계(hot) 교체는
+트리거하지 않는다 — 대신 두절 자체가 F3(08-22) 선제 교체를 트리거한다 /
 pct 를 못 읽은 계정은 후보에서 빠진다 / 오프라인 서버에는 권고가 없다 / 사용 불가
 계정은 즉시 교체 권고 대상이고 회수 뒤 held 로 남는다 / 사라진 권고가 이벤트로 남고
 보존 스윕이 낡은 이벤트를 지운다 / pin 은 ready·cooling 에서만, hold 는 어디서나 /
@@ -336,14 +337,20 @@ def test_one_tenant_failure_does_not_roll_back_another(app_env, monkeypatch):
 
 
 # -- 3a) 신선도 ---------------------------------------------------------------
-def test_stale_observation_does_not_trigger_a_swap(app_env):
+def test_stale_observation_triggers_a_stale_swap_not_a_hot_one(app_env):
+    """F3(08-22 modarra9 사고) 이전에는 낡은 고사용 관측이 아무 권고도 만들지
+    않는다고 확인했다. 지금은 다르다 — leased 계정의 관측이 전부 낡으면 그
+    자체가 선제 교체 트리거이므로, "아무 일도 안 일어난다"가 아니라 "pct 임계
+    (hot)가 아니라 두절이 근거인 swap이 걸린다"가 맞는 기대다.
+    """
     tenant_id = _tenant()
     server_id = _server(tenant_id, "s1", {"mode": "auto", "target_leases": 2})
     hot_id = _account(tenant_id, "stalehot@x.example.com")
     cool_id = _account(tenant_id, "stalecool@x.example.com")
     _assign(tenant_id, hot_id, server_id)
     _assign(tenant_id, cool_id, server_id)
-    # 40분 전의 93% 는 이미 리셋됐을 수도 있는 값이다.
+    # 40분 전의 93% 는 이미 리셋됐을 수도 있는 값이라 pct 임계(hot) 트리거는 안
+    # 걸리지만, 관측 자체가 두절됐으므로 F3 트리거가 대신 걸린다.
     _observe(
         tenant_id,
         server_id,
@@ -352,13 +359,14 @@ def test_stale_observation_does_not_trigger_a_swap(app_env):
     )
     _observe(tenant_id, server_id, _std("stalecool@x.example.com", five=5, seven=5))
 
-    assert _build(tenant_id) == []
-
-    # 같은 값이 지금 관측으로 다시 들어오면 그때 교체한다.
-    _observe(tenant_id, server_id, _std("stalehot@x.example.com", five=93, seven=40))
     recs = _build(tenant_id)
     assert [r.kind for r in recs] == ["swap"]
     assert recs[0].from_account_id == hot_id
+    # trigger_pct는 지금 값이 아니라 마지막으로 알려진 관측값(93)이다 — pct가
+    # 임계를 넘었다고 주장하는 게 아니라 두절이 근거라는 뜻.
+    assert recs[0].trigger_pct == 93
+    assert "두절" in recs[0].reason and "선제 교체" in recs[0].reason
+    assert "임계" not in recs[0].reason
 
 
 def test_unreadable_pct_is_unknown_not_zero(app_env):
