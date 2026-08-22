@@ -23,6 +23,7 @@ from tests.test_grpc_channel import (
     _create_assignment,
     _seed_tenant_account_server,
 )
+from tests.test_sent_recovery import _age_queued, _age_sent, _open_alerts
 
 
 # -- helpers ------------------------------------------------------------------
@@ -382,6 +383,172 @@ def test_force_recall_tenant_admin_forbidden(app_env, client, db):
             )
         ).all()
     assert rows == []
+
+
+# -- pending recall (never delivered) settles straight to detached -----------
+# A ``pending`` assignment has never been delivered, so recall has nothing to
+# undo remotely — request_recall settles it to ``detached`` in place instead of
+# enqueueing a command.
+def test_rest_recall_pending_settles_to_detached_no_command(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1pending@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    assert _assignment(tenant_id, assignment_id).state == "pending"
+
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+
+    assert a.state == "detached"
+    assert a.pending_command_id is None
+    assert a.last_error is None
+    assert a.recall_retry_count == 0
+    assert _account(tenant_id, account_id).status == "available"
+    with get_sessionmaker()() as db:
+        rows = db.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.command_type == "recall",
+            )
+        ).all()
+    assert rows == []  # no command was ever issued to undo
+
+
+def test_rest_recall_after_queued_timeout_pending_settles_to_detached(app_env):
+    # D3: a queued deliver that never got polled ages out and reverts the
+    # assignment to 'pending' (commands._fail_queued_rows). Recall from that
+    # resting state must take the same no-command detach path as a freshly
+    # created pending assignment.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1qtpending@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    # _seed_tenant_account_server stamps last_seen_at so request_deliver's
+    # never-connected guard passes; null it back out here so the short
+    # never-connected sweep tier (rather than the long stale tier) applies —
+    # matching test_sent_recovery's own D3 fixture pattern.
+    with get_sessionmaker()() as db:
+        server = inventory.get_server(db, tenant_id, server_id)
+        server.last_seen_at = None
+        db.commit()
+    _age_queued(command_id, seconds=1000)
+    with get_sessionmaker()() as db:
+        failed = commands.sweep_queued_timeouts(db, timeout_seconds=180, stale_seconds=1800)
+    assert failed == [command_id]
+    reverted = _assignment(tenant_id, assignment_id)
+    assert reverted.state == "pending"
+    assert reverted.last_error == "queued_timeout"
+
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+
+    assert a.state == "detached"
+    assert a.pending_command_id is None
+    assert a.last_error is None
+    assert _account(tenant_id, account_id).status == "available"
+    with get_sessionmaker()() as db:
+        rows = db.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.command_type == "recall",
+            )
+        ).all()
+    assert rows == []
+
+
+def test_rest_recall_after_sent_ack_timeout_pending_preserves_alert_and_error(app_env):
+    # D2: a deliver stuck 'sent' past its ack timeout means the agent may have
+    # already picked up and installed the payload before the ack was lost — a
+    # stranded remote install is possible. sweep_sent_timeouts reverts this to
+    # 'pending' (last_error='sent_ack_timeout') and opens command_send_failed.
+    # Recall from THIS pending must still detach + free the account (the
+    # operator explicitly asked), but — unlike the plain-pending and
+    # queued_timeout cases — must NOT wipe the only visible signal of a
+    # possible remnant: last_error stays, and command_send_failed stays open.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1sentpending@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    _age_sent(command_id, seconds=1000, send_attempts=5)
+    with get_sessionmaker()() as db:
+        commands.sweep_sent_timeouts(db, timeout_seconds=90, max_attempts=5)
+
+    reverted = _assignment(tenant_id, assignment_id)
+    assert reverted.state == "pending"
+    assert reverted.last_error == "sent_ack_timeout"
+    assert len(_open_alerts(server_id, "command_send_failed")) == 1
+
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+
+    assert a.state == "detached"
+    assert a.pending_command_id is None
+    assert a.acked_at is None  # never actually acked
+    # last_error preserved — the only visible sign of a possible remnant.
+    assert a.last_error == "sent_ack_timeout"
+    # command_send_failed stays open; only a fresh reconcile drift check (the
+    # agent reporting the account still present) should ever clear a genuine
+    # remnant.
+    assert len(_open_alerts(server_id, "command_send_failed")) == 1
+    assert _account(tenant_id, account_id).status == "available"
+    with get_sessionmaker()() as db:
+        rows = db.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.command_type == "recall",
+            )
+        ).all()
+    assert rows == []
+
+
+@pytest.mark.parametrize("state", ["delivering", "active", "inactive", "quarantined"])
+def test_rest_recall_installed_states_unchanged(app_env, state):
+    # Sanity: the new pending fast-path must not disturb the existing in-flight
+    # recall behaviour for every other recallable state — a real command is
+    # still enqueued and the assignment moves to 'recalling'.
+    tenant_id, account_id, server_id = _seed_tenant_account_server(
+        f"d1installed{state}@ex.com"
+    )
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, state)
+
+    with get_sessionmaker()() as db:
+        a = commands.request_recall(db, tenant_id, assignment_id)
+
+    assert a.state == "recalling"
+    assert a.pending_command_id is not None
+    with get_sessionmaker()() as db:
+        rows = db.scalars(
+            select(AgentCommand).where(
+                AgentCommand.assignment_id == assignment_id,
+                AgentCommand.command_type == "recall",
+            )
+        ).all()
+    assert len(rows) == 1
+
+
+def test_new_assignment_after_pending_recall_detach(app_env):
+    # The account freed by a pending-recall detach must be immediately
+    # re-assignable, exactly like a normal recall-to-detached.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d1reassign@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    with get_sessionmaker()() as db:
+        commands.request_recall(db, tenant_id, assignment_id)
+    assert _account(tenant_id, account_id).status == "available"
+
+    new_id = _create_assignment(tenant_id, account_id, server_id)
+    assert new_id != assignment_id
+    assert _assignment(tenant_id, new_id).state == "pending"
+    assert _account(tenant_id, account_id).status == "assigned"
 
 
 # -- stale recall ack does not resurrect a bogus alert ------------------------

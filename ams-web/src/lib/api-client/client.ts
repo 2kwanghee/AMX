@@ -381,7 +381,11 @@ export type PoolAccountVerb = 'pin' | 'unpin' | 'hold' | 'release';
 export function allowedAssignmentActions(state: AssignmentState): AssignmentActionVerb[] {
   switch (state) {
     case 'pending':
-      return ['deliver'];
+      // 전달 실패(queued_timeout/sent_ack_timeout/REJECTED)로 pending에 복귀한
+      // 배정은 아직 전달 전이므로 서버가 즉시 detached로 정산한다
+      // (commands.py request_recall). 사용자가 재전달 대신 제거를 택할 수
+      // 있어야 한다.
+      return ['deliver', 'recall'];
     case 'active':
       return ['deactivate', 'recall', 'switch-now'];
     case 'inactive':
