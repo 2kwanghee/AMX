@@ -30,6 +30,7 @@ import {
   allowedPoolActions,
   chainStepLabel,
   coolingProgress,
+  coolingReasonText,
   coolingRemainingMs,
   diffChanged,
   fmtElapsed,
@@ -364,6 +365,7 @@ function PoolColumn({
             now={now}
             serverNameOf={serverNameOf}
             policy={a.leasedServerId ? policyOfServer.get(a.leasedServerId) : undefined}
+            policyOfServer={policyOfServer}
             move={moves.get(a.accountId)}
             moveReason={moveReasonOf.get(a.accountId)}
             busy={busy}
@@ -381,6 +383,7 @@ function PoolCard({
   now,
   serverNameOf,
   policy,
+  policyOfServer,
   move,
   moveReason,
   busy,
@@ -390,6 +393,7 @@ function PoolCard({
   now: number;
   serverNameOf: Map<string, string>;
   policy?: PoolPolicy;
+  policyOfServer: Map<string, PoolPolicy>;
   move?: CardMove;
   moveReason?: string;
   busy: boolean;
@@ -436,6 +440,11 @@ function PoolCard({
       )}
       {serverName && <div className="pool-card-server">{serverName}</div>}
       {a.poolState === 'cooling' && <CoolingClock a={a} />}
+      {a.poolState === 'cooling' && (
+        <div className="pool-cool-reason muted" title="충전소 진입 사유">
+          {coolingReasonText(a, policyOfServer) ?? '판정 사유 없음'}
+        </div>
+      )}
       <div className="pool-win">
         {windowIds.map((id) => {
           const w = winById.get(id);
@@ -547,7 +556,7 @@ function ServerTable({
           <thead>
             <tr>
               <th>서버</th><th>상태</th><th>모드</th><th>목표 대여</th>
-              <th>교체 임계</th><th>미리 전달 임계</th>
+              <th>교체 임계</th><th>미리 전달 임계</th><th>복귀 임계</th>
               <th>대여 계정</th><th>최대 pct</th><th>수렴</th><th></th>
             </tr>
           </thead>
@@ -562,6 +571,7 @@ function ServerTable({
                   <td className="mono">{s.poolPolicy.targetLeases}</td>
                   <td className="mono">{s.poolPolicy.swapAtPct}%</td>
                   <td className="mono">{s.poolPolicy.prefetchAtPct}%</td>
+                  <td className="mono">{s.poolPolicy.readyReturnPct}%</td>
                   <td className="muted">{emails.length > 0 ? emails.join(', ') : '없음'}</td>
                   <td className="mono">{s.maxPct == null ? '없음' : `${Math.round(s.maxPct)}%`}</td>
                   <td>{s.inFlight ? <span className="warn">진행 중</span> : <span className="muted">대기</span>}</td>
@@ -578,7 +588,7 @@ function ServerTable({
               );
             })}
             {servers.length === 0 && (
-              <tr><td colSpan={10} className="muted">서버가 없습니다.</td></tr>
+              <tr><td colSpan={11} className="muted">서버가 없습니다.</td></tr>
             )}
           </tbody>
         </table>

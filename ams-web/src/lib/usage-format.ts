@@ -46,7 +46,7 @@ export function fmtCalls(n: number): string {
 // (types.ts UsagePayload 주석 참조). 모달 JSX 에 박히면 테스트가 어려워서 키를
 // 읽는 순수 함수를 여기로 뺀다. event-format.ts·fmt* 와 같은 이유다.
 
-import type { UsageAccount, UsagePayload } from '@/lib/api-client/types';
+import type { AccountUsageWindowSummary, UsageAccount, UsagePayload } from '@/lib/api-client/types';
 
 /** 풀 최대 사용률(%). 값이 없으면 undefined 이며 호출부가 표기 폴백을 정한다. */
 export function poolMaxUtilization(p: UsagePayload | undefined): number | undefined {
@@ -120,4 +120,28 @@ export function usageAccountView(a: UsageAccount): UsageAccountView {
     isCurrent: a.is_current === true,
     windows: accountWindows(a),
   };
+}
+
+// -- 계정 잔여 사용량 요약(schemas.Account.usage) ------------------------------
+// account-remaining-usage-plan.md. 게이지는 기존 "사용률 %" 표기를 유지하고,
+// 여기 텍스트 라벨만 "잔여"를 병기한다(결정 사항 — 값 자체를 뒤집지 않는다).
+
+/** 리셋 시각 24시간제 HH:MM(로컬 타임존). 파싱 불가·미상이면 undefined. */
+export function fmtResetClock(iso: string | null | undefined): string | undefined {
+  if (!iso) return undefined;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toLocaleTimeString('ko-KR', { hour12: false, hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * 창 하나를 "잔여 62% · 14:30 리셋" 한 줄로. pct 미상은 "—"(계정 메뉴 §2단계
+ * 규칙). 리셋 시각이 없는 창(공급자가 안 준 경우, pool.py의 AccountUsageWindow.resets_at
+ * 주석 참조)은 리셋 문구를 뺀다 — 없는 시각을 지어내지 않는다.
+ */
+export function fmtRemainingWindow(w: AccountUsageWindowSummary | null | undefined): string {
+  if (!w || w.pct == null) return '—';
+  const remaining = Math.max(0, Math.min(100, Math.round(100 - w.pct)));
+  const reset = fmtResetClock(w.resetsAt);
+  return reset ? `잔여 ${remaining}% · ${reset} 리셋` : `잔여 ${remaining}%`;
 }

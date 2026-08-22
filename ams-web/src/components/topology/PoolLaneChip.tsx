@@ -2,8 +2,9 @@
 
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PoolAccount } from '@/lib/api-client/types';
-import { coolingProgress, coolingRemainingMs, fmtRemainingPrecise, windowLabel } from '@/lib/pool';
+import type { PoolAccount, PoolPolicy } from '@/lib/api-client/types';
+import { coolingProgress, coolingRemainingMs, coolingReasonText, fmtRemainingPrecise, windowLabel } from '@/lib/pool';
+import { fmtResetClock } from '@/lib/usage-format';
 import { Icon, krLabel, RobotAvatar } from '../common';
 import type { IconName } from '../common';
 
@@ -77,6 +78,7 @@ function usePaneArrivals(items: Array<{ id: string; lane: LaneKind }>): [Set<str
 export function PoolLanes({
   cooling,
   ready,
+  policyOfServer,
   rects,
   dragging,
   resizing,
@@ -86,6 +88,9 @@ export function PoolLanes({
 }: {
   cooling: PoolAccount[];
   ready: PoolAccount[];
+  // cooling 판정 사유 문구의 임계 재료(서버별 swapAtPct). GET /pool이 이미
+  // servers[].poolPolicy로 내려주는 값을 TopologyView가 조인해 넘긴다.
+  policyOfServer: Map<string, PoolPolicy>;
   rects: Record<LaneKind, LaneRect>;
   dragging: string | null;
   resizing: string | null;
@@ -104,6 +109,7 @@ export function PoolLanes({
         kind="cooling"
         accounts={cooling}
         now={now}
+        policyOfServer={policyOfServer}
         rect={rects.cooling}
         dragging={dragging === 'lane:cooling'}
         resizing={resizing === 'lane:cooling'}
@@ -117,6 +123,7 @@ export function PoolLanes({
         kind="ready"
         accounts={ready}
         now={0}
+        policyOfServer={policyOfServer}
         rect={rects.ready}
         dragging={dragging === 'lane:ready'}
         resizing={resizing === 'lane:ready'}
@@ -134,6 +141,7 @@ function PoolLaneBox({
   kind,
   accounts,
   now,
+  policyOfServer,
   rect,
   dragging,
   resizing,
@@ -146,6 +154,7 @@ function PoolLaneBox({
   kind: LaneKind;
   accounts: PoolAccount[];
   now: number;
+  policyOfServer: Map<string, PoolPolicy>;
   rect: LaneRect;
   dragging: boolean;
   resizing: boolean;
@@ -174,6 +183,7 @@ function PoolLaneBox({
             a={a}
             kind={kind}
             now={now}
+            policyOfServer={policyOfServer}
             // 아래쪽 칩은 툴팁을 위로 뒤집어 캔버스 하단 잘림을 피한다.
             flip={accounts.length > 2 && i >= accounts.length - 2}
             entering={fresh.has(a.accountId)}
@@ -195,6 +205,7 @@ function PoolLaneChip({
   a,
   kind,
   now,
+  policyOfServer,
   flip,
   entering,
   onSettle,
@@ -202,6 +213,7 @@ function PoolLaneChip({
   a: PoolAccount;
   kind: LaneKind;
   now: number;
+  policyOfServer: Map<string, PoolPolicy>;
   flip: boolean;
   entering: boolean;
   onSettle: () => void;
@@ -238,7 +250,7 @@ function PoolLaneChip({
           <span className="topo-pool-gauge-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
         </span>
       )}
-      <PoolLaneTip a={a} kind={kind} progress={progress} remMs={remMs} done={done} />
+      <PoolLaneTip a={a} kind={kind} policyOfServer={policyOfServer} progress={progress} remMs={remMs} done={done} />
     </div>
   );
 }
@@ -247,22 +259,33 @@ function PoolLaneChip({
 function PoolLaneTip({
   a,
   kind,
+  policyOfServer,
   progress,
   remMs,
   done,
 }: {
   a: PoolAccount;
   kind: LaneKind;
+  policyOfServer: Map<string, PoolPolicy>;
   progress: number | null;
   remMs: number;
   done: boolean;
 }) {
   if (kind === 'cooling') {
+    // 판정 사유(4단계) — 진행률과 무관하게 관측이 있으면 보여준다.
+    const reason = coolingReasonText(a, policyOfServer);
     // 시작·완료 시각이 온전치 않으면 진행률이 null이라 관측값 없음만 적는다.
     if (progress === null) {
       return (
         <div className="topo-pool-tip" role="presentation">
-          <div className="topo-pool-tip-row muted">관측값 없음</div>
+          {reason ? (
+            <div className="topo-pool-tip-row">
+              <span>사유</span>
+              <span className="mono">{reason}</span>
+            </div>
+          ) : (
+            <div className="topo-pool-tip-row muted">관측값 없음</div>
+          )}
         </div>
       );
     }
@@ -274,6 +297,12 @@ function PoolLaneTip({
     return (
       <div className="topo-pool-tip" role="presentation">
         <div className="topo-pool-tip-head">{a.coolingWindowId ? `${windowLabel(a.coolingWindowId)} 창` : '충전 중'}</div>
+        {reason && (
+          <div className="topo-pool-tip-row">
+            <span>사유</span>
+            <span className="mono">{reason}</span>
+          </div>
+        )}
         <div className="topo-pool-tip-row">
           <span>충전 진행</span>
           <span className="mono">{done ? '복귀 대기' : `${Math.round(progress * 100)}%`}</span>
@@ -297,12 +326,17 @@ function PoolLaneTip({
     <div className="topo-pool-tip" role="presentation">
       <div className="topo-pool-tip-head">창별 사용률</div>
       {wins.length === 0 && <div className="topo-pool-tip-row muted">관측값 없음</div>}
-      {wins.map((w) => (
-        <div className="topo-pool-tip-row" key={w.windowId}>
-          <span>{windowLabel(w.windowId)}</span>
-          <span className="mono">{Math.round(w.pct as number)}%</span>
-        </div>
-      ))}
+      {wins.map((w) => {
+        const reset = fmtResetClock(w.resetsAt);
+        return (
+          <div className="topo-pool-tip-row" key={w.windowId}>
+            <span>{windowLabel(w.windowId)}</span>
+            <span className="mono">
+              {Math.round(w.pct as number)}%{reset ? ` · ${reset} 리셋` : ''}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

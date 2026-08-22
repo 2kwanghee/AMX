@@ -8,18 +8,79 @@ contain credential material even if a caller asked for it.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Query, Request, Response, status
+from sqlalchemy import select
 
 from app import models, schemas
 from app.api.deps import AdminPrincipal, DbSession, PageSize, PageToken, TenantScope, next_page_token, offset_from_token
 from app.config import get_settings
 from app.core import crypto
 from app.core.errors import bad_request
+from app.models import AccountUsageWindow
 from app.services import inventory
 from app.services import oauth_enroll
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["accounts"], dependencies=[TenantScope])
+
+# window_minutes 값 → 요약 슬롯. tsamx 가 실제로 보내는 값(five_hour=300,
+# seven_day=10080, pool.py:107-108 의 WINDOW_FIVE_HOUR/WINDOW_SEVEN_DAY 와 같은
+# 창)만 매칭하고 그 외 창(window_id 가 무엇이든)은 요약에서 뺀다.
+_FIVE_HOUR_MINUTES = 300
+_SEVEN_DAY_MINUTES = 10080
+
+
+def _usage_window_summary(window: AccountUsageWindow) -> schemas.AccountUsageWindowSummary:
+    return schemas.AccountUsageWindowSummary(pct=window.pct, resets_at=window.resets_at)
+
+
+def _usage_summary_for(
+    windows: list[AccountUsageWindow], *, now: datetime, stale_after: timedelta
+) -> schemas.AccountUsageSummary:
+    """계정 하나의 잔여 요약. 규칙 SSOT는 app/services/pool.py:412-426 ``_fresh_pct``
+    — 여기서는 그 함수를 그대로 부르는 대신(순환 임포트는 없지만, 풀 자동화
+    모듈 전체를 계정 조회 경로에 끌어들이지 않도록) 같은 상수(pool_window_stale_minutes)
+    를 참조하는 국소 판정을 쓴다."""
+    five = next((w for w in windows if w.window_minutes == _FIVE_HOUR_MINUTES), None)
+    seven = next((w for w in windows if w.window_minutes == _SEVEN_DAY_MINUTES), None)
+    matched = [w for w in (five, seven) if w is not None]
+    fetched_at = max(
+        (w.usage_fetched_at for w in matched if w.usage_fetched_at is not None),
+        default=None,
+    )
+    # 매칭된 창 중 하나라도 "신선"하면(값이 있고, 보고 시각이 stale_after 이내)
+    # 전체를 신선으로 본다 — pool.py._fresh_pct 와 같은 두 조건.
+    fresh = any(
+        w.pct is not None and w.reported_at is not None and now - w.reported_at <= stale_after
+        for w in matched
+    )
+    return schemas.AccountUsageSummary(
+        five_hour=_usage_window_summary(five) if five is not None else None,
+        seven_day=_usage_window_summary(seven) if seven is not None else None,
+        fetched_at=fetched_at,
+        stale=not fresh,
+    )
+
+
+def _attach_usage(db: DbSession, tenant_id: uuid.UUID, accounts: list[schemas.Account]) -> None:
+    if not accounts:
+        return
+    account_ids = [a.id for a in accounts]
+    stale_after = timedelta(minutes=get_settings().pool_window_stale_minutes)
+    now = datetime.now(UTC)
+    by_account: dict[uuid.UUID, list[AccountUsageWindow]] = {}
+    for row in db.scalars(
+        select(AccountUsageWindow).where(
+            AccountUsageWindow.tenant_id == tenant_id,
+            AccountUsageWindow.account_id.in_(account_ids),
+        )
+    ).all():
+        by_account.setdefault(row.account_id, []).append(row)
+    for account in accounts:
+        account.usage = _usage_summary_for(
+            by_account.get(account.id, []), now=now, stale_after=stale_after
+        )
 
 
 def _validate_provider(provider: str) -> str:
@@ -44,8 +105,10 @@ def list_accounts(
     items, total = inventory.list_accounts(
         db, tenant_id, status=status_filter, limit=pageSize, offset=offset
     )
+    wire_items = [schemas.Account.model_validate(a) for a in items]
+    _attach_usage(db, tenant_id, wire_items)
     return schemas.AccountPage(
-        items=[schemas.Account.model_validate(a) for a in items],
+        items=wire_items,
         page_info=schemas.PageInfo(
             next_page_token=next_page_token(offset, pageSize, total), total_size=total
         ),
@@ -71,7 +134,9 @@ def create_account(tenant_id: uuid.UUID, body: schemas.AccountCreate, db: DbSess
 
 @router.get("/accounts/{account_id}", response_model=schemas.Account)
 def get_account(tenant_id: uuid.UUID, account_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
-    return schemas.Account.model_validate(inventory.get_account(db, tenant_id, account_id))
+    wire = schemas.Account.model_validate(inventory.get_account(db, tenant_id, account_id))
+    _attach_usage(db, tenant_id, [wire])
+    return wire
 
 
 @router.patch("/accounts/{account_id}", response_model=schemas.Account)

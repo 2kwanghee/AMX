@@ -4,6 +4,7 @@ import {
   allowedPoolActions,
   chainStepLabel,
   coolingProgress,
+  coolingReasonText,
   coolingRemainingMs,
   diffChanged,
   fmtElapsed,
@@ -23,7 +24,19 @@ import {
   windowLabel,
   windowPct,
 } from '@/lib/pool';
-import type { PoolAccount } from '@/lib/api-client/types';
+import type { PoolAccount, PoolPolicy } from '@/lib/api-client/types';
+
+function policy(over: Partial<PoolPolicy> = {}): PoolPolicy {
+  return {
+    mode: 'auto',
+    targetLeases: 1,
+    swapAtPct: 85,
+    prefetchAtPct: 70,
+    minLeaseMinutes: 30,
+    readyReturnPct: 20,
+    ...over,
+  };
+}
 
 function acc(over: Partial<PoolAccount>): PoolAccount {
   return {
@@ -220,6 +233,56 @@ describe('창 사용률 조회', () => {
   });
   it('관측이 없는 창(pct null)은 null을 그대로 준다', () => {
     expect(windowPct(a, 'monthly')).toBeNull();
+  });
+});
+
+describe('cooling 판정 사유(coolingReasonText)', () => {
+  it('창 pct와 서버 교체 임계·리셋 시각을 한 줄로 합친다', () => {
+    const a = acc({
+      poolState: 'cooling',
+      coolingWindowId: 'five_hour',
+      coolingUntil: '2026-08-22T14:30:00Z',
+      windows: [
+        { windowId: 'five_hour', pct: 87, reportedAt: '2026-08-22T09:00:00Z', serverId: 's1' },
+      ],
+    });
+    const text = coolingReasonText(a, new Map([['s1', policy({ swapAtPct: 85 })]]));
+    expect(text).toMatch(/^5시간 87% ≥ 85% · \d{2}:\d{2} 리셋$/);
+  });
+
+  it('그 서버의 정책을 못 찾으면 임계 없이 값만 보여준다', () => {
+    const a = acc({
+      poolState: 'cooling',
+      coolingWindowId: 'five_hour',
+      coolingUntil: '2026-08-22T14:30:00Z',
+      windows: [
+        { windowId: 'five_hour', pct: 90, reportedAt: '2026-08-22T09:00:00Z', serverId: 's-unknown' },
+      ],
+    });
+    const text = coolingReasonText(a, new Map());
+    expect(text).toMatch(/^5시간 90% · \d{2}:\d{2} 리셋$/);
+  });
+
+  it('리셋 시각이 없으면 "대기"로 낮춘다(임계도 없을 때만)', () => {
+    const a = acc({
+      poolState: 'cooling',
+      coolingWindowId: 'five_hour',
+      coolingUntil: null,
+      windows: [
+        { windowId: 'five_hour', pct: 90, reportedAt: '2026-08-22T09:00:00Z', serverId: 's-unknown', resetsAt: null },
+      ],
+    });
+    expect(coolingReasonText(a, new Map())).toBe('5시간 90% · 대기');
+  });
+
+  it('coolingWindowId가 없거나 그 창의 pct를 모르면 undefined', () => {
+    expect(coolingReasonText(acc({ poolState: 'cooling' }), new Map())).toBeUndefined();
+    const noPct = acc({
+      poolState: 'cooling',
+      coolingWindowId: 'five_hour',
+      windows: [{ windowId: 'five_hour', pct: null, reportedAt: '2026-08-22T09:00:00Z', serverId: 's1' }],
+    });
+    expect(coolingReasonText(noPct, new Map())).toBeUndefined();
   });
 });
 

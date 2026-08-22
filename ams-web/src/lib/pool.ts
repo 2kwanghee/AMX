@@ -11,6 +11,7 @@ import type {
   RecommendationKind,
 } from './api-client/types';
 import type { PoolAccountVerb } from './api-client/client';
+import { fmtResetClock } from './usage-format';
 
 // -- 라벨 매핑 (없는 값은 원문 폴백) -----------------------------------------
 const POOL_STATE_LABEL: Record<PoolState, string> = {
@@ -69,6 +70,30 @@ const WINDOW_LABEL: Record<string, string> = {
 };
 export function windowLabel(windowId: string): string {
   return WINDOW_LABEL[windowId] ?? windowId;
+}
+
+// cooling 판정 사유 한 줄(account-remaining-usage-plan.md 4단계 — 자동화
+// 가시화). 서버 판정 로직(services/pool.py compute_states의 window_exhausted)은
+// 손대지 않고, 서버가 이미 저장·전달하는 값만 조합한다: coolingWindowId로 그
+// 창의 마지막 pct를 찾고, 그 창을 보고한 서버(w.serverId)의 swapAtPct(서버
+// 정책, GET /pool이 servers[].poolPolicy로 이미 내려준다)를 임계로 붙인다.
+// PoolPanel·PoolLaneChip이 같은 함수를 써서 두 화면의 문구가 어긋나지 않는다.
+// 정책을 못 찾으면(계정을 관측한 서버가 없거나 그 서버 정책이 없음) 임계 없이
+// 낮춰서 "대기"만 보여준다 — 값을 지어내지 않는다.
+export function coolingReasonText(
+  a: PoolAccount,
+  policyOfServer: Map<string, PoolPolicy>,
+): string | undefined {
+  if (!a.coolingWindowId) return undefined;
+  const w = a.windows.find((win) => win.windowId === a.coolingWindowId);
+  if (!w || w.pct == null) return undefined;
+  const label = windowLabel(w.windowId);
+  const pctTxt = `${Math.round(w.pct)}%`;
+  const swapAt = policyOfServer.get(w.serverId)?.swapAtPct;
+  const reset = fmtResetClock(a.coolingUntil ?? w.resetsAt);
+  const head = swapAt != null ? `${label} ${pctTxt} ≥ ${swapAt}%` : `${label} ${pctTxt}`;
+  if (!reset) return swapAt != null ? head : `${head} · 대기`;
+  return `${head} · ${reset} 리셋`;
 }
 
 // 부적격 사유 → 짧은 한글. 카드 배지에 붙는다. 없는 값은 원문 폴백.
