@@ -877,6 +877,7 @@ def ineligible_reason(
     windows: list[AccountUsageWindow],
     now: datetime,
     stale_after: timedelta,
+    lease_started_at: datetime | None = None,
 ) -> str | None:
     """이 계정이 자동화 대상이 **될 수 없는** 이유. 될 수 있으면 None.
 
@@ -906,7 +907,12 @@ def ineligible_reason(
     if _all_pct_unknown(windows):
         return "no_observation"
     if windows and _max_fresh_pct(windows, now, stale_after) is None:
-        return "stale_observation"
+        # 방금 전달된 계정은 새 서버가 아직 한 번도 보고하지 않아 창에 이전 관측만
+        # 남아 있다. 그 구간까지 부적격으로 적으면 재배정 직후마다 멀쩡한 계정이
+        # "관측 두절"로 보인다 — F1 경보·F3 선제 교체와 같은 유예를 준다.
+        started = _aware(lease_started_at) if lease_started_at is not None else None
+        if started is None or now - started > stale_after:
+            return "stale_observation"
     return None
 
 
@@ -937,12 +943,16 @@ def _candidates(
     for account in accounts:
         # 지속적인 부적격 사유(자격증명 유형·제외 플래그·사용 불가·운영자 상태·
         # 미상 관측)는 한 곳에서 판정한다 — 콘솔이 보여 주는 이유와 같은 함수다.
+        live_assignment = live.get(account.id)
         if ineligible_reason(
             account,
             unusable=unusable,
             windows=windows.get(account.id, []),
             now=now,
             stale_after=stale_after,
+            lease_started_at=(
+                _lease_started_at(live_assignment) if live_assignment is not None else None
+            ),
         ) is not None:
             continue
         # 순환의 정상 국면(대여 중·회수 중·충전 중)은 부적격이 아니라 "지금은 아님"이다.
