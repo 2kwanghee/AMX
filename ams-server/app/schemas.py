@@ -826,6 +826,153 @@ class UsageCostResponse(Wire):
     subtotals: list[UsageCostSubtotal]
 
 
+# -- 대시보드 집계 통계 (dashboard-redesign-plan.md 부록 A) --------------------
+# GET /tenants/{id}/stats/*. 공통 쿼리는 range(기본 7d)뿐이고, 응답은 항상
+# range·as_of를 함께 돌려준다. 서버 축(occupancy)은 seconds, 모델·계정 축은
+# tokens — 두 단위를 절대 섞지 않는다(services/stats.py 모듈 docstring).
+StatsRange = Literal["24h", "7d", "30d"]
+StatsTimeseriesBy = Literal["model", "server", "account"]
+# servers.py.ServerStatus + "deleted" — 지금 activity는 있었지만 servers 테이블에는
+# 없는(지워진) 서버, 그리고 server_id가 NULL인 미귀속 세션을 합친 행이 공유한다.
+StatsServerStatus = Literal["online", "offline", "degraded", "deleted"]
+
+
+class StatsValuePrev(Wire):
+    """구간 합계와 직전 같은 길이 구간의 값. summary의 tokens/sessions/alerts_opened이 쓴다."""
+
+    value: int
+    prev: int
+
+
+class StatsCostValue(Wire):
+    # 당월 합계(usage_cost.compute_month_cost)이고 range와 무관하다(부록 A).
+    # prev는 바로 전 달 합계. 통화가 여럿이면 금액이 가장 큰 하나를 대표로 쓴다.
+    value: Decimal
+    currency: str
+    prev: Decimal
+
+
+class StatsSparkline(Wire):
+    tokens: list[int]
+    sessions: list[int]
+
+
+class StatsSummaryResponse(Wire):
+    range: StatsRange
+    as_of: datetime
+    tokens: StatsValuePrev
+    cost: StatsCostValue
+    sessions: StatsValuePrev
+    # 그 구간에 생성된 경보 수, 상태(open/acked/resolved) 무관.
+    alerts_opened: StatsValuePrev
+    # 시간창과 무관하게 지금 status="open"인 경보 총수 — alerts_opened와는
+    # 다른 질문에 답하는 별도 값이라 prev가 없다.
+    alerts_open_now: int
+    # 지금 시점의 상태값이라 prev가 없다(창 구간 합계가 아니다).
+    servers_online: int
+    accounts_active: int
+    # range를 12구간으로 나눈 토큰·세션 합.
+    sparkline: StatsSparkline
+
+
+class StatsSeries(Wire):
+    key: str
+    label: str
+    values: list[float]
+
+
+class StatsTimeseriesResponse(Wire):
+    range: StatsRange
+    as_of: datetime
+    # by=server는 usage_daily_rollup(seconds), by=model|account는 session_usage(tokens).
+    unit: Literal["tokens", "seconds"]
+    buckets: list[datetime]
+    # 합계 상위 8개 + 나머지를 합친 "other"(있을 때만).
+    series: list[StatsSeries]
+
+
+class StatsFlowNode(Wire):
+    id: str
+    kind: Literal["server", "account"]
+    label: str
+
+
+class StatsFlowLink(Wire):
+    source: str
+    target: str
+    value: float
+
+
+class StatsFlowsResponse(Wire):
+    range: StatsRange
+    as_of: datetime
+    unit: Literal["seconds"] = "seconds"
+    nodes: list[StatsFlowNode]
+    links: list[StatsFlowLink]
+
+
+class StatsAccountRow(Wire):
+    account_id: uuid.UUID
+    email: str | None = None
+    provider: str | None = None
+    tokens: int
+    sessions: int
+    messages: int
+    top_model: str | None = None
+    top_server_id: uuid.UUID | None = None
+    # top_server_id가 지금 servers에 없으면(지워진 서버) "(삭제된 서버)".
+    top_server_name: str | None = None
+    top_project: str | None = None
+    held_seconds: float
+    # account_usage_windows의 최신값(신선도 필터 없음) — 없으면 null.
+    remaining_5h_pct: float | None = None
+    remaining_7d_pct: float | None = None
+
+
+class StatsAccountsResponse(Wire):
+    range: StatsRange
+    as_of: datetime
+    # 토큰 내림차순, 상위 50.
+    rows: list[StatsAccountRow]
+
+
+class StatsServerCost(Wire):
+    amount: Decimal
+    currency: str
+
+
+class StatsServerRow(Wire):
+    # None은 "미귀속"(server_id가 NULL인 세션들을 합친 한 행) — 지워진 서버 행과
+    # 함께 status="deleted"를 공유한다(services/stats.py.servers 문서 참고).
+    server_id: uuid.UUID | None = None
+    name: str
+    status: StatsServerStatus
+    held_seconds: float
+    tokens: int
+    sessions: int
+    messages: int
+    top_model: str | None = None
+    top_account_id: uuid.UUID | None = None
+    top_account_email: str | None = None
+    # 당월 합계(usage_cost). 통화가 여럿이면 금액이 가장 큰 하나를 대표로 쓴다.
+    cost: StatsServerCost
+
+
+class StatsServersResponse(Wire):
+    range: StatsRange
+    as_of: datetime
+    # held_seconds 내림차순.
+    rows: list[StatsServerRow]
+
+
+class StatsHeatmapResponse(Wire):
+    range: StatsRange
+    as_of: datetime
+    # cells[요일][시간] = 세션 수. 요일 인덱스는 월요일=0(ISO 기준 isodow-1), 시간은
+    # UTC 0~23시.
+    cells: list[list[int]]
+
+
 # -- Langfuse usage (P4 console monitoring) -----------------------------------
 class LangfuseModelRow(Wire):
     day: date

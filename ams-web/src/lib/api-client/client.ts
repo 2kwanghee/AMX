@@ -33,6 +33,14 @@ import type {
   ServerCreate,
   ServerPage,
   ServerUpdate,
+  StatsAccounts,
+  StatsFlows,
+  StatsHeatmap,
+  StatsRange,
+  StatsServers,
+  StatsSummary,
+  StatsTimeseries,
+  StatsTimeseriesBy,
   SwitchMode,
   Tenant,
   TenantCreate,
@@ -154,6 +162,24 @@ export const api = {
   // 세션 실측 비용구조 — days는 1~90(서버가 범위를 검증한다).
   getSessionUsage: (t: string, days: number) =>
     bff<SessionUsage>('GET', `tenants/${t}/usage/sessions?days=${days}`),
+
+  // 대시보드 집계 통계(design-notes/dashboard-redesign-plan.md 부록 A) — range는
+  // 생략하면 서버 기본값(7d). timeseries는 by가 필수(model|server|account).
+  getStatsSummary: (t: string, range?: StatsRange) =>
+    bff<StatsSummary>('GET', `tenants/${t}/stats/summary${range ? `?range=${range}` : ''}`),
+  getStatsTimeseries: (t: string, by: StatsTimeseriesBy, range?: StatsRange) =>
+    bff<StatsTimeseries>(
+      'GET',
+      `tenants/${t}/stats/timeseries?by=${by}${range ? `&range=${range}` : ''}`,
+    ),
+  getStatsFlows: (t: string, range?: StatsRange) =>
+    bff<StatsFlows>('GET', `tenants/${t}/stats/flows${range ? `?range=${range}` : ''}`),
+  getStatsAccounts: (t: string, range?: StatsRange) =>
+    bff<StatsAccounts>('GET', `tenants/${t}/stats/accounts${range ? `?range=${range}` : ''}`),
+  getStatsServers: (t: string, range?: StatsRange) =>
+    bff<StatsServers>('GET', `tenants/${t}/stats/servers${range ? `?range=${range}` : ''}`),
+  getStatsHeatmap: (t: string, range?: StatsRange) =>
+    bff<StatsHeatmap>('GET', `tenants/${t}/stats/heatmap${range ? `?range=${range}` : ''}`),
 
   // Alerts (Track A backend; UI ready)
   listAlerts: (t: string, status?: string) =>

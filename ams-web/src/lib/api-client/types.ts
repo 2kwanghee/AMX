@@ -434,6 +434,146 @@ export interface UsageCostResponse {
   subtotals: UsageCostSubtotal[];
 }
 
+// -- 대시보드 집계 통계 (dashboard-redesign-plan.md 부록 A) -------------------
+// GET /tenants/{id}/stats/*. 공통 쿼리는 range(기본 7d)뿐이고, 모든 응답이
+// range·asOf를 함께 돌려준다. 서버 축(occupancy)은 seconds, 모델·계정 축은
+// tokens — ams-server/app/services/stats.py 모듈 docstring과 같은 구분이다.
+export type StatsRange = '24h' | '7d' | '30d';
+export type StatsTimeseriesBy = 'model' | 'server' | 'account';
+
+export interface StatsValuePrev {
+  value: number;
+  prev: number;
+}
+
+export interface StatsCostValue {
+  // 당월 합계(usage/cost)이고 range와 무관하다. prev는 바로 전 달 합계.
+  value: string;
+  currency: string;
+  prev: string;
+}
+
+export interface StatsSparkline {
+  tokens: number[];
+  sessions: number[];
+}
+
+export interface StatsSummary {
+  range: StatsRange;
+  asOf: string;
+  tokens: StatsValuePrev;
+  cost: StatsCostValue;
+  sessions: StatsValuePrev;
+  // 그 구간에 생성된 경보 수, 상태(open/acked/resolved) 무관.
+  alertsOpened: StatsValuePrev;
+  // 시간창과 무관하게 지금 open인 경보 총수. alertsOpened와 다른 질문에 답하는
+  // 값이라 prev가 없다.
+  alertsOpenNow: number;
+  // 지금 시점 상태값이라 prev가 없다.
+  serversOnline: number;
+  accountsActive: number;
+  sparkline: StatsSparkline;
+}
+
+export interface StatsSeries {
+  key: string;
+  label: string;
+  values: number[];
+}
+
+export interface StatsTimeseries {
+  range: StatsRange;
+  asOf: string;
+  unit: 'tokens' | 'seconds';
+  buckets: string[];
+  // 합계 상위 8개 + 나머지를 합친 "other"(있을 때만).
+  series: StatsSeries[];
+}
+
+export interface StatsFlowNode {
+  id: string;
+  kind: 'server' | 'account';
+  label: string;
+}
+
+export interface StatsFlowLink {
+  source: string;
+  target: string;
+  value: number;
+}
+
+export interface StatsFlows {
+  range: StatsRange;
+  asOf: string;
+  unit: 'seconds';
+  nodes: StatsFlowNode[];
+  links: StatsFlowLink[];
+}
+
+export interface StatsAccountRow {
+  accountId: string;
+  email?: string | null;
+  provider?: string | null;
+  tokens: number;
+  sessions: number;
+  messages: number;
+  topModel?: string | null;
+  topServerId?: string | null;
+  // topServerId가 지금 서버 목록에 없으면(지워진 서버) "(삭제된 서버)".
+  topServerName?: string | null;
+  topProject?: string | null;
+  heldSeconds: number;
+  // account_usage_windows의 최신값(신선도 필터 없음) — 없으면 null.
+  remaining5HPct?: number | null;
+  remaining7DPct?: number | null;
+}
+
+export interface StatsAccounts {
+  range: StatsRange;
+  asOf: string;
+  // 토큰 내림차순, 상위 50.
+  rows: StatsAccountRow[];
+}
+
+export interface StatsServerCost {
+  amount: string;
+  currency: string;
+}
+
+// servers 테이블에 지금 없는 id(지워진 서버)와 server_id가 NULL인(미귀속) 세션의
+// 합산 행이 status="deleted"를 공유한다 — 둘 다 "살아 있는 서버가 아니다"라는
+// 점은 같고, 스키마에 별도 "unassigned" 상태가 없기 때문(services/stats.py 참고).
+export type StatsServerStatus = 'online' | 'offline' | 'degraded' | 'deleted';
+
+export interface StatsServerRow {
+  // null이면 "(미귀속)" 행 — server_id가 NULL인 세션들을 합친 것.
+  serverId: string | null;
+  name: string;
+  status: StatsServerStatus;
+  heldSeconds: number;
+  tokens: number;
+  sessions: number;
+  messages: number;
+  topModel?: string | null;
+  topAccountId?: string | null;
+  topAccountEmail?: string | null;
+  cost: StatsServerCost;
+}
+
+export interface StatsServers {
+  range: StatsRange;
+  asOf: string;
+  // heldSeconds 내림차순.
+  rows: StatsServerRow[];
+}
+
+export interface StatsHeatmap {
+  range: StatsRange;
+  asOf: string;
+  // cells[요일][시간] = 세션 수. 요일 인덱스는 월요일=0(ISO), 시간은 UTC 0~23시.
+  cells: number[][];
+}
+
 // -- Langfuse 실측 사용량 (P4) ------------------------------------------------
 // GET /tenants/{id}/usage/langfuse?from=YYYY-MM-DD&to=YYYY-MM-DD.
 // 비용 배분(위)과 달리 Langfuse가 관측한 토큰 실측치다. 토큰 값은 정수(Number
