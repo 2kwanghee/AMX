@@ -22,7 +22,7 @@ export interface DonutProps {
  *  자연스럽다. 중앙에는 기본으로 합계를, 세그먼트를 호버하면 그 세그먼트의
  *  값·비율로 바뀐다. 범례는 아래 목록으로 별도 표시(색 판별이 어려운 사용자를
  *  위한 텍스트 대체이기도 하다). */
-export function Donut({ values, size = 160, unit = '', totalLabel = '합계' }: DonutProps) {
+export function Donut({ values, size = 140, unit = '', totalLabel = '합계' }: DonutProps) {
   const [hoverKey, setHoverKey] = useState<string | null>(null);
   const radius = size / 2 - 4;
   const segments = donutArcs(
@@ -69,10 +69,10 @@ export function Donut({ values, size = 160, unit = '', totalLabel = '합계' }: 
             onMouseLeave={() => setHoverKey((k) => (k === seg.key ? null : k))}
           />
         ))}
-        <text className="chart-donut-big" x={0} y={-2} textAnchor="middle">
+        <text className="chart-donut-big" x={0} y={-3} textAnchor="middle">
           {centerBig}
         </text>
-        <text className="chart-donut-small" x={0} y={16} textAnchor="middle">
+        <text className="chart-donut-small" x={0} y={13} textAnchor="middle">
           {centerSmall}
         </text>
       </svg>

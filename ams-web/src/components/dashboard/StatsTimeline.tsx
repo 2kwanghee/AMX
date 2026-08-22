@@ -71,20 +71,24 @@ export function StatsTimeline({ tenantId }: { tenantId: string }) {
     .slice(0, 8);
 
   return (
-    <div className="panel">
-      <h2>최근 활동<LiveDot /></h2>
-      {sorted.length === 0 && <p className="muted">최근 활동이 없습니다.</p>}
-      {sorted.length > 0 && (
-        <div className="activity-list">
-          {sorted.map((e) => (
-            <div className="activity-item" key={e.id}>
-              <span className="activity-time">{fmtClock(e.at)}</span>
-              <span className={`activity-icon ${e.tone}`}><Icon name={e.icon} size={15} /></span>
-              <span className="activity-text">{e.text}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    <section className="panel dash-card dash-span-6">
+      <div className="dash-card-head">
+        <h2>최근 활동<LiveDot /></h2>
+      </div>
+      <div className="dash-card-body">
+        {sorted.length === 0 && <p className="muted">최근 활동이 없습니다.</p>}
+        {sorted.length > 0 && (
+          <div className="activity-list dash-activity">
+            {sorted.map((e) => (
+              <div className="activity-item" key={e.id}>
+                <span className="activity-time">{fmtClock(e.at)}</span>
+                <span className={`activity-icon ${e.tone}`}><Icon name={e.icon} size={15} /></span>
+                <span className="activity-text">{e.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }

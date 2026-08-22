@@ -13,6 +13,9 @@ export interface RingGaugeProps {
   windowLabel?: string;
   size?: number;
   strokeWidth?: number;
+  /** 링만 그리고 아래 라벨·캡션은 호출부가 배치한다(한 줄 목록 레이아웃용).
+   *  접근성 라벨은 그대로 유지된다. */
+  compact?: boolean;
 }
 
 // ServerNode.tsx의 gaugeTone과 같은 90/70 임계 규칙(중복이지만 export되어 있지
@@ -25,7 +28,14 @@ function gaugeTone(pct: number): '' | 'warn' | 'crit' {
 
 /** 원형 잔여 게이지. 채움은 사용률(pct)에 비례해 그리되, 문구는 "잔여"로
  *  뒤집어 보여준다. pct가 없거나 유효하지 않으면 "미보고" 상태로 폴백한다. */
-export function RingGauge({ pct, remainingText, windowLabel, size = 88, strokeWidth = 8 }: RingGaugeProps) {
+export function RingGauge({
+  pct,
+  remainingText,
+  windowLabel,
+  size = 88,
+  strokeWidth = 8,
+  compact = false,
+}: RingGaugeProps) {
   const missing = pct == null || Number.isNaN(pct);
   const clamped = missing ? 0 : Math.max(0, Math.min(100, pct));
   const animatedPct = useCountUp(clamped, 500);
@@ -38,7 +48,11 @@ export function RingGauge({ pct, remainingText, windowLabel, size = 88, strokeWi
   const caption = remainingText ?? (missing ? '메트릭 미보고' : `잔여 ${remaining}%`);
 
   return (
-    <div className="chart-ring" role="img" aria-label={`${windowLabel ? `${windowLabel} ` : ''}${caption}`}>
+    <div
+      className={`chart-ring${compact ? ' compact' : ''}`}
+      role="img"
+      aria-label={`${windowLabel ? `${windowLabel} ` : ''}${caption}`}
+    >
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
         <circle
           className="chart-ring-track"
@@ -62,12 +76,19 @@ export function RingGauge({ pct, remainingText, windowLabel, size = 88, strokeWi
             transform={`rotate(-90 ${size / 2} ${size / 2})`}
           />
         )}
-        <text x={size / 2} y={size / 2 + 5} textAnchor="middle" className="chart-ring-text">
+        <text
+          x={size / 2}
+          y={size / 2}
+          textAnchor="middle"
+          dominantBaseline="central"
+          className="chart-ring-text"
+          style={{ fontSize: Math.max(10, Math.round(size * 0.28)) }}
+        >
           {missing ? '—' : `${remaining}%`}
         </text>
       </svg>
-      {windowLabel && <div className="chart-ring-window">{windowLabel}</div>}
-      <div className="chart-ring-caption">{caption}</div>
+      {!compact && windowLabel && <div className="chart-ring-window">{windowLabel}</div>}
+      {!compact && <div className="chart-ring-caption">{caption}</div>}
     </div>
   );
 }

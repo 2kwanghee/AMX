@@ -2,6 +2,7 @@ export * from './math';
 export * from './palette';
 export { useCountUp } from './useCountUp';
 export { useInterpolatedPath } from './useInterpolatedPath';
+export { useMeasuredWidth } from './useMeasuredWidth';
 export { KpiTile } from './KpiTile';
 export type { KpiTileProps } from './KpiTile';
 export { AreaChart } from './AreaChart';

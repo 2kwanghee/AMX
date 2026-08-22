@@ -12,15 +12,19 @@ export function StatsFlows({ tenantId, range }: { tenantId: string; range: Stats
   const links = data?.links ?? [];
 
   return (
-    <div className="panel">
-      <h2>서버 → 계정 점유 흐름</h2>
-      {links.length > 0 ? (
-        <Sankey nodes={nodes} links={links} unit="초" />
-      ) : (
-        <div className="chart-empty" role="img" aria-label="흐름 데이터 없음">
-          아직 집계된 점유 흐름이 없습니다.
-        </div>
-      )}
-    </div>
+    <section className="panel dash-card dash-span-4">
+      <div className="dash-card-head">
+        <h2>서버 → 계정 점유 흐름</h2>
+      </div>
+      <div className="dash-card-body">
+        {links.length > 0 ? (
+          <Sankey nodes={nodes} links={links} unit="초" height={200} />
+        ) : (
+          <div className="chart-empty" role="img" aria-label="흐름 데이터 없음">
+            아직 집계된 점유 흐름이 없습니다.
+          </div>
+        )}
+      </div>
+    </section>
   );
 }

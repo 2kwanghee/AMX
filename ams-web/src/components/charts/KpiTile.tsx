@@ -48,27 +48,31 @@ export function KpiTile({
   const className = `chart-kpi chart-kpi-${tone}`;
   const ariaLabel = `${label} ${exactText}${hasDelta ? `, 직전 대비 ${deltaDir === 'up' ? '증가' : deltaDir === 'down' ? '감소' : '변동 없음'}` : ''}`;
 
+  // 증감은 백분율을 낼 수 있을 때만 붙인다. prev가 0이면 "몇 % 늘었다"를 말할 수
+  // 없어 화살표만 덩그러니 남는데, 그럴 바엔 빼는 편이 낫다.
+  const showDelta = hasDelta && deltaDir !== 'flat' && deltaPct != null && Number.isFinite(deltaPct);
+
   const body = (
     <>
       <span className="chart-kpi-head">
         {icon && <span className="chart-kpi-icon">{icon}</span>}
         <span className="chart-kpi-label">{label}</span>
       </span>
-      <span className="chart-kpi-value" title={exactText}>
-        {displayText}
-      </span>
-      <span className="chart-kpi-foot">
-        {hasDelta && deltaDir !== 'flat' && (
+      <span className="chart-kpi-main">
+        <span className="chart-kpi-value" title={exactText}>
+          {displayText}
+        </span>
+        {showDelta && (
           <span className={`chart-kpi-delta ${deltaDir}`}>
             <span className="chart-kpi-arrow" aria-hidden="true">
               {deltaDir === 'up' ? '▲' : '▼'}
             </span>
-            {deltaPct != null && Number.isFinite(deltaPct) ? `${Math.abs(deltaPct).toFixed(1)}%` : ''}
+            {`${Math.abs(deltaPct as number).toFixed(0)}%`}
           </span>
         )}
         {sparkline && sparkline.length >= 2 && (
           <span className="chart-kpi-spark">
-            <Sparkline data={sparkline} height={26} />
+            <Sparkline data={sparkline} height={28} />
           </span>
         )}
       </span>

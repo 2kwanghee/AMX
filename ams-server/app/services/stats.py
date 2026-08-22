@@ -505,6 +505,11 @@ class Flows:
     links: list[FlowLink]
 
 
+# 삭제된 서버·계정을 모으는 합성 노드 id. 실제 uuid와 겹치지 않는다.
+_DELETED_SERVER_NODE = "server:deleted"
+_DELETED_ACCOUNT_NODE = "account:deleted"
+
+
 def flows(db: Session, tenant_id: uuid.UUID, range_: str, now: datetime) -> Flows:
     start = range_start(range_, now)
     days = day_buckets(start, now)
@@ -522,18 +527,31 @@ def flows(db: Session, tenant_id: uuid.UUID, range_: str, now: datetime) -> Flow
     names = _server_names(db, tenant_id, server_ids)
     emails = _account_emails(db, tenant_id, account_ids)
 
+    # 지금 accounts/servers 테이블에 없는 id는 종류별로 노드 하나에 몰아넣고
+    # 링크 값을 합산한다. 각각을 노드로 두면 라벨이 전부 "(삭제된 계정)"으로
+    # 같아서, 서로 구별되지 않는 노드만 늘어나고 그래프가 그만큼 빽빽해진다.
     nodes: list[FlowNode] = []
     for sid in sorted(server_ids, key=str):
-        nodes.append(FlowNode(id=f"server:{sid}", kind="server", label=names.get(str(sid), "(삭제된 서버)")))
+        if str(sid) in names:
+            nodes.append(FlowNode(id=f"server:{sid}", kind="server", label=names[str(sid)]))
+    if any(str(sid) not in names for sid in server_ids):
+        nodes.append(FlowNode(id=_DELETED_SERVER_NODE, kind="server", label="(삭제된 서버)"))
     for aid in sorted(account_ids, key=str):
-        nodes.append(FlowNode(id=f"account:{aid}", kind="account", label=emails.get(str(aid), "(삭제된 계정)")))
+        if str(aid) in emails:
+            nodes.append(FlowNode(id=f"account:{aid}", kind="account", label=emails[str(aid)]))
+    if any(str(aid) not in emails for aid in account_ids):
+        nodes.append(FlowNode(id=_DELETED_ACCOUNT_NODE, kind="account", label="(삭제된 계정)"))
 
-    links = [
-        FlowLink(source=f"server:{sid}", target=f"account:{aid}", value=float(held or 0))
-        for sid, aid, held in rows
-        if held
-    ]
-    links.sort(key=lambda link: -link.value)
+    totals: dict[tuple[str, str], float] = {}
+    for sid, aid, held in rows:
+        if not held:
+            continue
+        source = f"server:{sid}" if str(sid) in names else _DELETED_SERVER_NODE
+        target = f"account:{aid}" if str(aid) in emails else _DELETED_ACCOUNT_NODE
+        totals[(source, target)] = totals.get((source, target), 0.0) + float(held)
+
+    links = [FlowLink(source=source, target=target, value=value) for (source, target), value in totals.items()]
+    links.sort(key=lambda link: (-link.value, link.source, link.target))
     return Flows(nodes=nodes, links=links)
 
 

@@ -2,7 +2,14 @@
 // vitest node 환경에서 그대로 테스트한다(컴포넌트 자체는 렌더 테스트가 안 되므로
 // 로직은 최대한 여기로 뺀다).
 
-import { arc as d3Arc, area as d3Area, curveLinear, pie as d3Pie, type PieArcDatum } from 'd3-shape';
+import {
+  arc as d3Arc,
+  area as d3Area,
+  curveLinear,
+  line as d3Line,
+  pie as d3Pie,
+  type PieArcDatum,
+} from 'd3-shape';
 import { sankey as d3Sankey, sankeyLinkHorizontal } from 'd3-sankey';
 import { fmtTokens } from '@/lib/usage-format';
 
@@ -165,6 +172,20 @@ export function areaPath(values: [number, number][], w: number, h: number, maxY:
   return gen(values) ?? '';
 }
 
+/** 누적 밴드의 윗변(y1)만 따라가는 선 경로. areaPath와 좌표계·스케일이 같아서
+ *  같은 값으로 두 번 불러 면 위에 실루엣 선을 겹쳐 얹을 수 있다. 면을 옅게
+ *  깔고 경계만 선으로 세우는 표현에 쓴다. */
+export function topLinePath(values: [number, number][], w: number, h: number, maxY: number): string {
+  if (values.length === 0) return '';
+  const stepX = values.length > 1 ? w / (values.length - 1) : 0;
+  const scaleY = (y: number) => (maxY > 0 ? h - (y / maxY) * h : h);
+  const gen = d3Line<[number, number]>()
+    .x((_d, i) => i * stepX)
+    .y((d) => scaleY(d[1]))
+    .curve(curveLinear);
+  return gen(values) ?? '';
+}
+
 // -- 상키(Sankey) ----------------------------------------------------------------
 
 export interface SankeyLayoutNode {
@@ -226,6 +247,7 @@ export function sankeyLayout(
   links: { source: string; target: string; value: number }[],
   w: number,
   h: number,
+  opts: { nodeWidth?: number; nodePadding?: number } = {},
 ): SankeyLayoutResult {
   if (nodes.length === 0) return { nodes: [], links: [] };
   const idIndex = new Map(nodes.map((n, i) => [n.id, i]));
@@ -244,8 +266,8 @@ export function sankeyLayout(
   const width = Math.max(w, 40);
   const height = Math.max(h, 40);
   const layout = d3Sankey<SankeyRawNode, SankeyRawLink>()
-    .nodeWidth(14)
-    .nodePadding(12)
+    .nodeWidth(opts.nodeWidth ?? 14)
+    .nodePadding(opts.nodePadding ?? 12)
     .extent([
       [1, 1],
       [width - 1, height - 1],
