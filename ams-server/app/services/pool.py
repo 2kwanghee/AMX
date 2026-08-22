@@ -116,10 +116,13 @@ DEFAULT_POLICY: dict[str, Any] = {
     "prefetch_at_pct": 70,
     "min_lease_minutes": 30,
     "ready_return_pct": 20,
-    # 시트 엔진 P1(기획서 §5 결정 1). "owner" 가 기본값이지만 기존 서버·계정은
-    # owner 가 전부 빈 값이라(마이그레이션 직후) 전환 당일 동작은 "server"와
-    # 같다 — 라벨을 붙이는 만큼만 정책이 켜진다.
-    "rotation_scope": "owner",
+    # 시트 엔진 P1(기획서 §5 결정 1, 08-23 설계 리뷰 F1 반영). 기본값은 "server" —
+    # 현행과 동일하게 소유자를 보지 않는다. 기존 데이터에 이미 owner 라벨이 붙은
+    # 계정이 있을 수 있어(운영자가 미리 채워 둔 라벨) "owner"를 기본값으로 두면
+    # 그 계정이 owner 없는 서버 전체에서 후보를 잃고 자동 전환이 조용히 멈춘다
+    # (08-22 실명 스왑 사건과 같은 형태). "owner"는 서버·계정 라벨을 정비한
+    # 뒤 서버별로 거는 옵트인이다.
+    "rotation_scope": "server",
 }
 
 WINDOW_HIGH_KIND = "account_window_high"
@@ -140,13 +143,18 @@ def _aware(dt: datetime | None) -> datetime | None:
 
 
 def _normalize_owner_label(value: str | None) -> str:
-    """owner 라벨 비교용 정규화 — 공백 제거 후 대소문자 무시.
+    """owner 라벨 비교용 정규화 — 공백을 전부 제거(앞뒤뿐 아니라 내부도)한 뒤
+    대소문자를 무시한다.
 
-    운영자가 손으로 입력하는 자유 텍스트라 "Ops" 와 "ops "가 같은 소유자를
-    가리켜야 한다. None 과 빈 문자열은 둘 다 ""(조직 공용)으로 접힌다. 계정
-    owner·서버 owner 양쪽 비교에 이 함수 하나만 쓴다(§5 결정 1).
+    운영자가 손으로 입력하는 자유 텍스트라 "Ops"·"ops "·"O ps"가 같은 소유자를
+    가리켜야 한다. 특히 한글 이름은 "이광희"/"이 광희"처럼 내부 공백만 다른
+    표기가 실수로 흔하다 — ``strip()`` 만으로는 이 둘을 갈라 정책이 조용히
+    쪼개진다(08-23 리뷰 F3-b). ``str.split()`` 은 모든 공백류(스페이스·탭·개행
+    연속 포함)를 기준으로 나누므로, 그 결과를 이어붙이면 내부 공백까지 사라진다.
+    None 과 빈 문자열은 둘 다 ""(조직 공용)으로 접힌다. 계정 owner·서버 owner
+    양쪽 비교에 이 함수 하나만 쓴다(§5 결정 1).
     """
-    return (value or "").strip().casefold()
+    return "".join((value or "").split()).casefold()
 
 
 def resolve_policy(server: Server | None) -> dict[str, Any]:
@@ -941,7 +949,7 @@ def _candidates(
     stale_after: timedelta,
     reserved: set[uuid.UUID] | None = None,
     replacing: bool = False,
-    rotation_scope: str = "owner",
+    rotation_scope: str = "server",
     server_owner: str | None = None,
 ) -> list[Account]:
     """배급처에서 뽑을 수 있는 계정 목록, 기획서 §2.4 의 순서로 정렬해 반환.
@@ -954,13 +962,15 @@ def _candidates(
     Codex 의 서버당 1개 제한을 후보 필터로 쓰지 않는다 — 그 제한 때문에 후보가
     비면, 이미 소진된 Codex 계정을 물고 있는 서버는 영영 교체 상대를 못 찾는다.
 
-    ``rotation_scope="owner"``(기본값, 시트 엔진 P1 §5 결정 1)에서는 소유자
-    범위도 후보 필터다: owner 가 비어 있는 계정(조직 공용)은 항상 후보고, owner
-    가 있는 계정은 같은 owner 의 서버에만 간다. 한 사람 소유 시트를 그 사람의
-    서버들 사이에서 옮기는 것은 §1 법적 판정에서 문제가 없지만, 다른 소유자의
-    서버로 넘기는 것은 로테이션이 사람 경계를 넘는 경우라 여기서 막는다.
-    ``rotation_scope="server"`` 는 이 필터를 걷어낸 현행 그대로다. 이 필터는
-    수동 연결(create_assignment)에는 적용하지 않는다 — 자동화만 강제한다.
+    ``rotation_scope="owner"``(시트 엔진 P1 §5 결정 1, 08-23 리뷰 F1 반영으로
+    DEFAULT_POLICY 기본값은 "server")에서는 소유자 범위도 후보 필터다: owner 가
+    비어 있는 계정(조직 공용)은 항상 후보고, owner 가 있는 계정은 같은 owner 의
+    서버에만 간다. 한 사람 소유 시트를 그 사람의 서버들 사이에서 옮기는 것은
+    §1 법적 판정에서 문제가 없지만, 다른 소유자의 서버로 넘기는 것은 로테이션이
+    사람 경계를 넘는 경우라 여기서 막는다. ``rotation_scope="server"``(기본값)
+    는 이 필터를 걷어낸 현행 그대로다 — 라벨을 정비하기 전까지는 이 값이어야
+    기존 데이터가 조용히 후보를 잃지 않는다. 이 필터는 수동 연결
+    (create_assignment)에는 적용하지 않는다 — 자동화만 강제한다.
     """
     epoch = datetime.min.replace(tzinfo=UTC)
     server_owner_norm = _normalize_owner_label(server_owner)
@@ -2261,6 +2271,16 @@ def _auto_eligible(
         return False
     if unacked_failed_chain(db, server.id) is not None:
         return False
+    # 설계 리뷰 반영(08-23, F2): swap·prefetch 는 "사람 개입 없이 로테이션"이라
+    # auto_switch=False 인 프로바이더(오늘은 Codex)의 자동 착수를 여기서 막는다.
+    # 권고 자체는 지운다. lease·recall_idle(배포·회수)은 기획서 §5 결정 3이
+    # 허용하는 범위라 이 게이트를 타지 않는다. _candidates(replacing=True) 가
+    # per_server_limit 필터를 일부러 건너뛰므로(대체 상대를 찾는 중) codex 도
+    # swap 의 to_account 후보가 될 수 있다 — 그 착수를 막는 지점이 여기다.
+    if recommendation.kind in ("swap", "prefetch") and recommendation.to_account_id is not None:
+        to_account = db.get(Account, recommendation.to_account_id)
+        if to_account is not None and not providers.auto_switch_enabled(to_account.provider):
+            return False
     return True
 
 

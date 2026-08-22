@@ -3,7 +3,9 @@
 import { useState } from 'react';
 import { api } from '@/lib/api-client/client';
 import type { Account } from '@/lib/api-client/types';
-import { Modal, ProviderTag, useAction } from '../common';
+import { Modal, OwnerDatalist, ProviderTag, useAction } from '../common';
+
+const OWNER_LIST_ID = 'account-owner-suggestions';
 
 // 계정 수정 — 소유자·이메일. Codex는 이메일을 바꿀 때 서버가 같은 요청 안의
 // auth.json으로 신원을 다시 확인하므로(account.codex_email_requires_credential),
@@ -11,11 +13,13 @@ import { Modal, ProviderTag, useAction } from '../common';
 export function EditAccount({
   tenantId,
   account,
+  ownerSuggestions,
   onClose,
   onDone,
 }: {
   tenantId: string;
   account: Account;
+  ownerSuggestions?: string[];
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -54,7 +58,9 @@ export function EditAccount({
         onChange={(e) => setOwner(e.target.value)}
         autoComplete="off"
         placeholder="담당자·팀 이름 (비우면 지워집니다)"
+        list={OWNER_LIST_ID}
       />
+      <OwnerDatalist id={OWNER_LIST_ID} options={ownerSuggestions ?? []} />
       <label>이메일</label>
       <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="off" />
       <label>월 구독료 (비우면 미설정)</label>

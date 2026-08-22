@@ -433,6 +433,9 @@ function PoolCard({
         <span className="pool-card-email" title={a.email}>{a.email}</span>
         <ProviderTag value={a.provider} />
       </div>
+      <div className="muted" style={{ fontSize: 12 }}>
+        소유자 {a.owner || '—'}
+      </div>
       {!a.autoEligible && (
         <div className="pool-badge-off" title="자동화 후보에서 제외된 계정">
           부적격{a.ineligibleReason ? ` · ${ineligibleReasonLabel(a.ineligibleReason)}` : ''}
@@ -555,17 +558,19 @@ function ServerTable({
         <table>
           <thead>
             <tr>
-              <th>서버</th><th>상태</th><th>모드</th><th>목표 대여</th>
+              <th>서버</th><th>소유자</th><th>상태</th><th>모드</th><th>목표 대여</th>
               <th>교체 임계</th><th>미리 전달 임계</th><th>복귀 임계</th>
-              <th>대여 계정</th><th>최대 pct</th><th>수렴</th><th></th>
+              <th>대여 계정</th><th>최대 pct</th><th>후보 수</th><th>수렴</th><th></th>
             </tr>
           </thead>
           <tbody>
             {servers.map((s) => {
               const emails = s.leasedAccountIds.map((id) => emailOf.get(id) ?? id.slice(0, 8));
+              const candidateCount = s.candidateCount;
               return (
                 <tr key={s.serverId} style={{ cursor: 'pointer' }} onClick={() => onPick(s)}>
                   <td>{s.name}</td>
+                  <td>{s.owner ? s.owner : <span className="muted">—</span>}</td>
                   <td><Badge value={s.status} /></td>
                   <td><SwitchModePill mode={s.poolPolicy.mode} /></td>
                   <td className="mono">{s.poolPolicy.targetLeases}</td>
@@ -574,6 +579,15 @@ function ServerTable({
                   <td className="mono">{s.poolPolicy.readyReturnPct}%</td>
                   <td className="muted">{emails.length > 0 ? emails.join(', ') : '없음'}</td>
                   <td className="mono">{s.maxPct == null ? '없음' : `${Math.round(s.maxPct)}%`}</td>
+                  <td className="mono">
+                    {candidateCount == null ? (
+                      <span className="muted">—</span>
+                    ) : candidateCount === 0 ? (
+                      <span className="err" title="후보가 없어 이 서버에는 권고가 생기지 않습니다. 소유자 라벨 불일치를 확인하세요.">0</span>
+                    ) : (
+                      candidateCount
+                    )}
+                  </td>
                   <td>{s.inFlight ? <span className="warn">진행 중</span> : <span className="muted">대기</span>}</td>
                   <td>
                     <button
@@ -588,7 +602,7 @@ function ServerTable({
               );
             })}
             {servers.length === 0 && (
-              <tr><td colSpan={11} className="muted">서버가 없습니다.</td></tr>
+              <tr><td colSpan={13} className="muted">서버가 없습니다.</td></tr>
             )}
           </tbody>
         </table>

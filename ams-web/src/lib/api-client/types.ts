@@ -741,6 +741,10 @@ export interface PoolAccount {
   // 대여·충전 같은 순환의 정상 국면은 부적격이 아니라 상태 열이 이미 보여준다.
   autoEligible: boolean;
   ineligibleReason?: IneligibleReason | null;
+  // owner 불일치는 ineligibleReason에 넣지 않는다(서버-계정 쌍의 판정이라
+  // 계정 단위 지속 결격과 성격이 다르다) — 대신 이 라벨을 PoolServer.owner와
+  // 눈으로 대조한다(08-23 리뷰 F3).
+  owner?: string | null;
 }
 
 export interface PoolServer {
@@ -753,6 +757,10 @@ export interface PoolServer {
   // 전달·회수 명령이 아직 수렴 중이면 true. true인 서버엔 새 체인을 걸지 않는다.
   inFlight: boolean;
   maxPct?: number | null;
+  owner?: string | null;
+  // 지금 이 서버가 뽑을 수 있는 후보 계정 수(서버가 그대로 계산해 준다). 0이면
+  // 왜 권고가 안 뜨는지 화면에서 바로 보인다(08-23 리뷰 F3).
+  candidateCount?: number | null;
 }
 
 export interface Recommendation {

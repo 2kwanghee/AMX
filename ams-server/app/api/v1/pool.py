@@ -117,6 +117,7 @@ def get_pool(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
                 account_id=account.id,
                 email=account.email,
                 provider=account.provider,
+                owner=account.owner,
                 pool_state=account.pool_state,
                 cooling_until=account.cooling_until,
                 cooling_window_id=account.cooling_window_id,
@@ -172,16 +173,35 @@ def get_pool(tenant_id: uuid.UUID, db: DbSession, principal: AdminPrincipal):
             for w in windows.get(a.account_id, [])
             if w.pct is not None
         ]
+        policy = pool.resolve_policy(server)
+        # 08-23 리뷰 F3. build_recommendations 가 실제로 보는 것과 같은 후보
+        # 목록을 그대로 세어 보여준다(single source of truth) — owner 라벨
+        # 불일치처럼 ineligible_reason 밖에 있는 사유도 이 숫자 하나로 드러난다.
+        candidate_count = len(
+            pool._candidates(
+                accounts,
+                live=by_account,
+                windows=windows,
+                unusable=unusable,
+                server_has_live=bool(held),
+                now=now,
+                stale_after=stale_after,
+                rotation_scope=str(policy["rotation_scope"]),
+                server_owner=server.owner,
+            )
+        )
         pool_servers.append(
             schemas.PoolServer(
                 server_id=server.id,
                 name=server.name,
                 status=server.status,
-                pool_policy=schemas.PoolPolicy(**pool.resolve_policy(server)),
+                owner=server.owner,
+                pool_policy=schemas.PoolPolicy(**policy),
                 leased_account_ids=leased_ids,
                 active_account_id=active_account_id,
                 in_flight=any(a.state in _IN_FLIGHT for a in held),
                 max_pct=max(pcts) if pcts else None,
+                candidate_count=candidate_count,
             )
         )
 

@@ -3,12 +3,23 @@
 import { useState } from 'react';
 import useSWR from 'swr';
 import { api } from '@/lib/api-client/client';
-import type { Account, AccountPage, AccountUsageSummary } from '@/lib/api-client/types';
+import type { Account, AccountPage, AccountUsageSummary, ServerPage } from '@/lib/api-client/types';
 import { fmtRemainingWindow } from '@/lib/usage-format';
 import { DirectImport } from './accounts/DirectImportModal';
 import { EditAccount } from './accounts/EditAccountModal';
 import { RegisterModal } from './accounts/RegisterModal';
-import { Badge, EmailChip, LiveDot, ProviderTag, StaleBadge, TimeCell, krLabel, useAction, useMarkOnData } from './common';
+import {
+  Badge,
+  EmailChip,
+  LiveDot,
+  ProviderTag,
+  StaleBadge,
+  TimeCell,
+  krLabel,
+  ownerSuggestions,
+  useAction,
+  useMarkOnData,
+} from './common';
 
 const POLL = 8000;
 
@@ -34,12 +45,16 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
     () => api.listAccounts(tenantId),
     { refreshInterval: POLL },
   );
+  // 소유자 입력 자동완성용 — ServersPanel과 같은 SWR 키라 이미 마운트돼 있으면
+  // 캐시를 그대로 공유한다(새 API 없이, 08-23 리뷰 F3-b).
+  const { data: serversData } = useSWR<ServerPage>(['servers', tenantId], () => api.listServers(tenantId));
   const [wizard, setWizard] = useState(false);
   const [direct, setDirect] = useState(false);
   const [editing, setEditing] = useState<Account | null>(null);
   const act = useAction();
   useMarkOnData(data);
   const accounts = data?.items ?? [];
+  const ownerOptions = ownerSuggestions(accounts, serversData?.items ?? []);
 
   return (
     <div className="panel">
@@ -95,12 +110,20 @@ export function AccountsPanel({ tenantId }: { tenantId: string }) {
           </tbody>
         </table>
       </div>
-      {wizard && <RegisterModal tenantId={tenantId} onClose={() => setWizard(false)} onDone={() => { setWizard(false); mutate(); }} />}
+      {wizard && (
+        <RegisterModal
+          tenantId={tenantId}
+          ownerSuggestions={ownerOptions}
+          onClose={() => setWizard(false)}
+          onDone={() => { setWizard(false); mutate(); }}
+        />
+      )}
       {direct && <DirectImport tenantId={tenantId} onClose={() => setDirect(false)} onDone={() => { setDirect(false); mutate(); }} />}
       {editing && (
         <EditAccount
           tenantId={tenantId}
           account={editing}
+          ownerSuggestions={ownerOptions}
           onClose={() => setEditing(null)}
           onDone={() => { setEditing(null); mutate(); }}
         />

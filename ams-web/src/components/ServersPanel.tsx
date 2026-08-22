@@ -24,6 +24,7 @@ import {
   Badge,
   Icon,
   LiveDot,
+  ownerSuggestions,
   SwitchModePill,
   TimeCell,
   useAction,
@@ -68,6 +69,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
   const servers = data?.items ?? [];
 
   const accItems = accountsData?.items ?? [];
+  const ownerOptions = ownerSuggestions(servers, accItems);
   const asgItems = assignData?.items ?? [];
   const emailOf = new Map(accItems.map((a) => [a.id, a.email]));
   const activeByServer = currentActiveByServer(asgItems, accItems);
@@ -267,7 +269,12 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
       )}
 
       {creating && (
-        <CreateServer tenantId={tenantId} onClose={() => setCreating(false)} onDone={() => { setCreating(false); mutate(); }} />
+        <CreateServer
+          tenantId={tenantId}
+          ownerSuggestions={ownerOptions}
+          onClose={() => setCreating(false)}
+          onDone={() => { setCreating(false); mutate(); }}
+        />
       )}
       {usageOf && <UsageModal tenantId={tenantId} server={usageOf} onClose={() => setUsageOf(null)} />}
       {eventsOf && <EventsModal tenantId={tenantId} server={eventsOf} onClose={() => setEventsOf(null)} />}
@@ -291,6 +298,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
         <EditServer
           tenantId={tenantId}
           server={editingOf}
+          ownerSuggestions={ownerOptions}
           onClose={() => setEditingOf(null)}
           onDone={() => { setEditingOf(null); mutate(); }}
         />

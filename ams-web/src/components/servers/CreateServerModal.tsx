@@ -2,14 +2,18 @@
 
 import { useState } from 'react';
 import { api } from '@/lib/api-client/client';
-import { Modal, useAction } from '../common';
+import { Modal, OwnerDatalist, useAction } from '../common';
+
+const OWNER_LIST_ID = 'server-owner-suggestions';
 
 export function CreateServer({
   tenantId,
+  ownerSuggestions,
   onClose,
   onDone,
 }: {
   tenantId: string;
+  ownerSuggestions?: string[];
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -30,7 +34,9 @@ export function CreateServer({
         onChange={(e) => setOwner(e.target.value)}
         autoComplete="off"
         placeholder="담당자·팀 이름"
+        list={OWNER_LIST_ID}
       />
+      <OwnerDatalist id={OWNER_LIST_ID} options={ownerSuggestions ?? []} />
       <p className="muted" style={{ marginTop: -6 }}>
         비워 두면 조직 공용 — 모든 계정을 받을 수 있습니다.
       </p>
