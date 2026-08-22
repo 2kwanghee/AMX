@@ -137,6 +137,9 @@ td.num, th.num { font-variant-numeric: tabular-nums; }
   background: var(--ok-soft); color: var(--ok);
 }
 .badge.online .dot, .badge.active .dot, .badge.available .dot, .badge.resolved .dot { background: var(--ok); }
+/* 틸 = 연결되어 사용 중 (사용 가능(초록)과 구분) */
+.badge.assigned { background: var(--accent-soft); color: var(--accent); }
+.badge.assigned .dot { background: var(--accent); }
 /* 호박 = 진행·주의 */
 .badge.degraded, .badge.delivering, .badge.recalling, .badge.pending, .badge.warning, .badge.open {
   background: var(--warn-soft); color: var(--warn);
