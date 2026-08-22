@@ -24,19 +24,42 @@
 // whole state dir; a pre-planted symlink redirecting a Stage write outside
 // the store root).
 //
-// P2 is deliberately inert: nothing in cmd/ama or the tsamx bridge constructs
-// a Store. Wiring belongs to P3, which must also still resolve (not this
-// package's job, and deliberately not attempted here):
-//   - an email -> accountKey reverse index: AccountKey is one-way, so
-//     resolving an AMS-reported email back to "which profile is that"
-//     without re-deriving the same key requires a caller-side index this
-//     package does not keep.
+// P2 was deliberately inert: nothing in cmd/ama or the tsamx bridge
+// constructed a Store. P3 (design note §3 P3) wires a Switcher on top of this
+// package and resolves the P2 review items that were left open here:
+//   - accountKey -> email lookup (P2 review ②): AccountKey is one-way, so a
+//     caller holding only an accountKey (e.g. from GetActive) cannot recover
+//     the email it hashes without re-reading something StageCredential wrote.
+//     Resolved via provider.Driver.Identity(configDir), NOT by this package
+//     parsing a vendor file itself (that would break the "owns no
+//     vendor-specific knowledge" rule two paragraphs up). Identity reads back
+//     the RAW email StageCredential staged — the same, un-normalized string
+//     the manifest store keys on — so a caller resolving a profile back to a
+//     manifest record via store.Store.FindByProviderEmail (case-sensitive
+//     exact match) does not have to reconcile it against AccountKey's
+//     lowercase-before-hash normalization (P2 review ⑥, first half).
+//   - marker rewrite on observed rotation (P2 review ①): State/Reconcile
+//     below, not a change to Complete (kept for its pinned tests — see its
+//     doc).
+//   - orphaned active-pointer cleanup (P2 review ④) and owner-scope
+//     enforcement (P2 review ⑤): both live in internal/seat's Switcher, one
+//     layer up, not in this package — Switcher is the only intended caller of
+//     SetActive going forward.
 //   - unifying this package's per-profile lock with the deliver lock
-//     (`<configDir>/.amx-deliver.lock`); today the two are independent files
-//     guarding independent critical sections.
-//   - orphaned active-pointer cleanup: this package reports ErrActiveMissing
-//     but never repoints or clears the pointer itself.
-//   - PolicyGuard / owner-scope rotation policy (design note §1, §2).
+//     (`<configDir>/.amx-deliver.lock`) is NOT attempted: P3 instead defines
+//     the deliver lock's anchor independently of any active profile (see
+//     provider.Driver.DefaultConfigHome and internal/tsamx/exec.go's
+//     lockConfigHome) so the two locks stay correct without ever needing to
+//     become the same file.
+//
+// NOT resolved by P3, deliberately: P2 review ⑥'s second half — tsamx keys a
+// slot by (email, organizationUuid) while AccountKey hashes only the email,
+// so a personal and an organization account sharing one email collapse onto
+// the SAME profile directory here. Changing AccountKey's shape is out of
+// scope for a P3-sized change (it would ripple through every already-shipped
+// P2 test and the on-disk layout this package's callers depend on); the risk
+// is carried forward and must be closed before this store is used for an
+// account population where that collision is plausible.
 package profile
 
 import (
@@ -468,14 +491,18 @@ func (s *Store) Stage(drv provider.Driver, accountKey string, credentialJSON []b
 // A profile that is Create()d but never Stage()d, and a Stage that died
 // mid-write, read as !Complete — the runner would hit a login screen.
 //
-// CAUTION for P3 (do not wire !Complete straight through to "not ready"):
-// a credential rotated IN PLACE by the vendor's own runner also reads as
-// !Complete, because the live bytes no longer match what Stage recorded.
-// That is a HEALTHY account, not a broken one — this repo already handles
-// local rotation as a normal event (see internal/resync). Treating every
-// !Complete as not-ready would flip every rotated account to unusable.
-// P3 must distinguish "no/short credential" from "credential present but
-// fingerprint moved", and re-record the marker on an observed rotation.
+// CAUTION (this is the exact trap State/Reconcile below exist to avoid): do
+// NOT wire !Complete straight through to "not ready". A credential rotated
+// IN PLACE by the vendor's own runner also reads as !Complete here, because
+// the live bytes no longer match what Stage recorded. That is a HEALTHY
+// account, not a broken one — this repo already handles local rotation as a
+// normal event (see internal/resync). Treating every !Complete as not-ready
+// would flip every rotated account to unusable. Complete is kept, unchanged,
+// only because its existing tests pin its exact three-way marker/credential
+// comparison; any NEW caller that needs a readiness judgment should call
+// State (which distinguishes "no/short credential" from "credential present
+// but fingerprint moved") and, on StateRotated, Reconcile (which re-records
+// the marker) instead of calling Complete directly.
 func (s *Store) Complete(drv provider.Driver, accountKey string) (bool, error) {
 	dir, _, err := s.resolveProfile(drv.Name(), accountKey)
 	if err != nil {
@@ -498,6 +525,139 @@ func (s *Store) Complete(drv provider.Driver, accountKey string) (bool, error) {
 	defer wipe(credBytes)
 	liveFP := drv.Fingerprint(credBytes)
 	return liveFP != "" && string(markerFP) == liveFP, nil
+}
+
+// State classifies a profile's credential readiness for a caller (P3's
+// Switcher) that needs to tell "nothing usable was ever staged here" apart
+// from "something usable is here, but a local rotation moved it out from
+// under the marker Stage recorded" — the second case is a HEALTHY account
+// (see Complete's CAUTION above), not a broken one.
+type State int
+
+const (
+	// StateAbsent: no credential file exists at all for this profile — never
+	// Stage()d, or wiped (e.g. the vendor's runner cleared it after a failed
+	// refresh). Not ready; nothing to Reconcile.
+	StateAbsent State = iota
+	// StateIncomplete: a credential file exists but drv.HasCredentialMaterial
+	// says it carries no usable token (a logged-out shell). Not ready; fixed
+	// by a real re-login or re-Stage, not by a marker rewrite.
+	StateIncomplete
+	// StateStaged: a credential file exists, carries material, and its
+	// fingerprint matches the marker Stage last recorded. Ready; no action
+	// needed.
+	StateStaged
+	// StateRotated: a credential file exists and carries material, but its
+	// fingerprint does not match the recorded marker (including the case
+	// where no marker was ever recorded despite usable material being
+	// present, e.g. a manual login into a Create()d-but-never-Stage()d
+	// profile). This is the healthy in-place-rotation case — ready to use
+	// as-is. Reconcile re-stamps the marker so a later State/Complete call
+	// reads StateStaged.
+	StateRotated
+)
+
+// String renders State for logs; never for filesystem paths or equality
+// checks (compare the State value itself for those).
+func (st State) String() string {
+	switch st {
+	case StateAbsent:
+		return "absent"
+	case StateIncomplete:
+		return "incomplete"
+	case StateStaged:
+		return "staged"
+	case StateRotated:
+		return "rotated"
+	default:
+		return "unknown"
+	}
+}
+
+// State reports the credential readiness of (drv.Name(), accountKey). It
+// never writes anything (see Reconcile for the write path) and holds no
+// lock, so a concurrent Stage/Remove on the same profile can change the
+// answer between this read and a caller's next action — a caller that needs
+// to act on StateRotated should call Reconcile directly rather than
+// State-then-decide-then-Reconcile, since Reconcile re-verifies under its
+// own lock instead of trusting a State call result that may already be
+// stale by the time it is used.
+func (s *Store) State(drv provider.Driver, accountKey string) (State, error) {
+	dir, _, err := s.resolveProfile(drv.Name(), accountKey)
+	if err != nil {
+		return StateAbsent, err
+	}
+	return stateLocked(drv, dir)
+}
+
+// Reconcile observes the same readiness State reports and, when it is
+// StateRotated, re-stamps the marker with the credential's CURRENT
+// fingerprint — accepting the observed rotation as the new baseline — so a
+// subsequent State/Complete call reads StateStaged. This is the "마커를
+// 재기록하는 경로" the design note (P3, resolving P2 review item ①) asks for.
+// StateAbsent/StateIncomplete are returned unchanged, with no write: there is
+// nothing to reconcile when no usable credential is present. It takes the
+// same per-profile lock Stage takes, so it can never interleave with a
+// concurrent Stage/Remove of the same profile, and re-derives State fresh
+// under that lock rather than trusting any State call a caller made earlier.
+func (s *Store) Reconcile(drv provider.Driver, accountKey string) (State, error) {
+	dir, providerDir, err := s.resolveProfile(drv.Name(), accountKey)
+	if err != nil {
+		return StateAbsent, err
+	}
+	lock, err := s.lock(providerDir, accountKey)
+	if err != nil {
+		return StateAbsent, err
+	}
+	defer lock.Unlock()
+
+	st, credBytes, liveFP, err := stateWithFingerprint(drv, dir)
+	if err != nil {
+		return StateAbsent, err
+	}
+	defer wipe(credBytes)
+	if st != StateRotated {
+		return st, nil // absent/incomplete: nothing to reconcile; staged: already matches
+	}
+	if err := atomicWrite(filepath.Join(dir, stagedMarkerName), []byte(liveFP), 0o600); err != nil {
+		return StateAbsent, err
+	}
+	return StateStaged, nil
+}
+
+// stateLocked is State's body, factored out so Reconcile can call the same
+// classification under its own lock via stateWithFingerprint.
+func stateLocked(drv provider.Driver, dir string) (State, error) {
+	st, credBytes, _, err := stateWithFingerprint(drv, dir)
+	wipe(credBytes)
+	return st, err
+}
+
+// stateWithFingerprint reads the live credential at dir and classifies it,
+// also returning the raw credential bytes (caller must wipe) and the live
+// fingerprint (only meaningful when the returned State is StateRotated or
+// StateStaged) so Reconcile does not need to re-read the credential file a
+// second time under its lock.
+func stateWithFingerprint(drv provider.Driver, dir string) (State, []byte, string, error) {
+	credBytes, err := os.ReadFile(drv.CredentialPath(dir))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return StateAbsent, nil, "", nil
+		}
+		return StateAbsent, nil, "", err
+	}
+	if !drv.HasCredentialMaterial(credBytes) {
+		return StateIncomplete, credBytes, "", nil
+	}
+	liveFP := drv.Fingerprint(credBytes)
+	markerFP, rerr := os.ReadFile(filepath.Join(dir, stagedMarkerName))
+	if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		return StateAbsent, credBytes, "", rerr
+	}
+	if rerr == nil && liveFP != "" && string(markerFP) == liveFP {
+		return StateStaged, credBytes, liveFP, nil
+	}
+	return StateRotated, credBytes, liveFP, nil
 }
 
 // Remove deletes the profile for (providerKey, accountKey). Idempotent: a
@@ -645,6 +805,44 @@ func (s *Store) SetActive(providerKey, accountKey string) error {
 // real AccountKey output at all — a distinct failure from ErrActiveMissing,
 // since that content could not have come from a legitimate SetActive call
 // and is never used to build a path.
+//
+// POINTER FORMAT — canonical rule (adversarial review F2, tightened by N3;
+// this is the ONE place this rule is defined, and it MUST match the
+// independent reimplementation in deploy/amx-claude's active-pointer case
+// pattern byte-for-byte, or the two readers disagree about which profile is
+// active — which is exactly the "runner bills one account, [a reader
+// elsewhere] attributes the cost to another" bug F2 reproduced): the file's
+// content must be, after stripping ANY NUMBER of trailing "\n" bytes (zero or
+// more — see N3 below), exactly `^[0-9a-f]{64}$` and nothing else. Anything
+// remaining after that stripping — leading whitespace, internal whitespace, a
+// trailing "\r", any other stray byte — is rejected as an invalid pointer,
+// NOT silently trimmed.
+//
+// N3 (adversarial review): an earlier revision used strings.TrimSuffix, which
+// removes AT MOST ONE trailing "\n", while deploy/amx-claude's `$(cat ...)`
+// command substitution removes ALL trailing newlines per POSIX shell
+// semantics — so a pointer file containing "KEY\n\n" (two trailing newlines)
+// was accepted by the shell reader and rejected by this one, the exact
+// two-readers-disagree bug F2 exists to prevent. strings.TrimRight strips
+// every trailing "\n", matching `$(cat ...)`'s behavior exactly; this is the
+// deliberate choice over teaching the shell side to reject 2+ trailing
+// newlines, since the shell has no cheap way to see how many newlines a file
+// ORIGINALLY had once `$(...)` has already collapsed them all away — matching
+// its existing behavior is strictly simpler than reproducing byte-exact
+// newline counting in POSIX sh.
+//
+// atomicWrite (see SetActive) never appends a trailing newline on this
+// package's own write path, so the "\n"-tolerant behavior exists only for a
+// pointer file some other tool wrote by hand. strings.TrimSpace would ALSO
+// strip leading whitespace, which must stay rejected (that half of the F2 bug
+// is unrelated to trailing-newline counting and is not being loosened here).
+//
+// deploy/langfuse/session_usage_hook.py used to be a third independent
+// reimplementation of this same parsing, but adversarial review F3 removed
+// its pointer re-read entirely (it now reads the session's own
+// CLAUDE_CONFIG_DIR instead of asking "what's active right now" — see that
+// file's _session_config_home_email doc) — so it is no longer a party to
+// this rule at all, not a third place that must be kept in sync with it.
 func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err error) {
 	dir, err := s.resolveProviderDir(providerKey)
 	if err != nil {
@@ -657,7 +855,7 @@ func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err
 		}
 		return "", "", rerr
 	}
-	key := strings.TrimSpace(string(raw))
+	key := strings.TrimRight(string(raw), "\n")
 	if key == "" {
 		return "", "", ErrNoActive
 	}

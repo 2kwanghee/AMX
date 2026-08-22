@@ -70,6 +70,7 @@ import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -87,6 +88,9 @@ _DEFER_MAX_SECONDS = 15.0
 _DEFER_POLL_INTERVAL_SECONDS = 0.5
 # tsamx 조회 타임아웃(초). 실패하면 계정 없이 보낸다(엔드포인트가 NULL을 받는다).
 _TSAMX_TIMEOUT_SECONDS = 2.0
+# 계정 identity 파일(.claude.json) 읽기 크기 상한. deploy/amx-claude의 F1 수정과
+# 같은 값 — 정상적인 .claude.json은 수 KB다. 크면 조용히 포기한다(계정 없이 전송).
+_IDENTITY_FILE_MAX_BYTES = 1 << 20  # 1MB
 # 트랜스크립트 스캔 줄 수 상한. 병리적으로 긴 파일이 훅 실행 시간을 좌우하지 못하게
 # 한다(초과분은 버리고 상태 파일에 1줄 남긴다).
 _MAX_LINES = 500_000
@@ -441,19 +445,172 @@ def build_models(by_model: dict[str, dict]) -> list[dict]:
     return out
 
 
+def _read_bounded_regular_file(path: str, max_bytes: int) -> bytes | None:
+    """FIFO/네임드파이프여도 절대 블로킹하지 않는 경계 읽기 (adversarial review
+    F1: ``open()``에 아무 방어도 없으면 그 경로가 FIFO거나 멎은 네트워크
+    마운트일 때 훅 프로세스 전체가 영구 정지한다 — 실측 재현됨).
+
+    두 겹 방어:
+      1. ``os.stat``으로 사전에 정규 파일·크기를 확인한다 — TOCTOU 창이 있지만
+         (검사와 open 사이에 바뀌치기당할 수 있다) 싸고 빠르며, 정상 경로에서
+         파이썬이 굳이 파일을 열지 않고도 대부분의 비정상 입력을 걸러낸다.
+      2. 실제 open은 ``O_NONBLOCK``으로 연다 — POSIX 규약상 라이터가 없는
+         FIFO를 ``O_RDONLY|O_NONBLOCK``으로 열면 즉시 리턴하고(블로킹하지
+         않고), 그 이후 그 fd에서 읽을 데이터가 없으면 ``BlockingIOError``를
+         던진다(역시 블로킹하지 않는다). 사전 검사를 통과한 뒤에도 무언가가
+         그 사이 FIFO로 바꿔치기했을 경우조차 이 open 자체는 블로킹하지 않는다
+         — 그래서 이 함수에는 외부 타임아웃(``signal.alarm``이나 서브프로세스
+         ``timeout``)이 필요 없다.
+    정규 파일이 아니거나, 상한을 넘거나, 어떤 단계에서든 ``OSError``가 나면
+    ``None``이다 — 호출자는 그대로 폴백한다.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > max_bytes:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except (BlockingIOError, OSError):
+                return None  # 블로킹 없이 읽을 데이터가 없음: 정규 파일이 아니었거나 사라짐
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+_ACCOUNT_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _resolve_config_home() -> str | None:
+    """이 프로세스가 물려받은 Claude config home. ``CLAUDE_CONFIG_DIR``이
+    비어 있으면 ``deploy/amx-claude``와 같은 기본값(``$HOME/.claude``)으로
+    떨어진다. 둘 다 못 구하면 ``None``.
+    """
+    config_home = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if config_home:
+        return config_home
+    home = os.environ.get("HOME", "").strip()
+    if not home:
+        return None
+    return os.path.join(home, ".claude")
+
+
+def _is_profile_config_home(config_home: str) -> bool:
+    """config_home이 P3 프로파일 레이아웃
+    (``<stateDir>/profiles/<provider>/<64자 소문자 16진수>``) 경로 **모양**인지
+    만 구조적으로 본다 — 그 디렉터리가 실제 있는지, 안에 뭐가 있는지는
+    ``_read_bounded_regular_file``이 파일을 열 때 자연히 걸러진다.
+
+    adversarial review N2: 이 판정이 있어야 이 함수가 "프로파일 모드"만
+    맞히고, 프로파일을 전혀 쓰지 않는 순수 기존 배포에서는(CLAUDE_CONFIG_DIR
+    이 우연히 accountKey 모양의 디렉터리를 가리키는 사실상 불가능한 경우가
+    아닌 한) 항상 거짓을 돌려준다.
+    """
+    normalized = config_home.rstrip(os.sep)
+    account_key = os.path.basename(normalized)
+    if not _ACCOUNT_KEY_RE.fullmatch(account_key):
+        return False
+    provider_dir = os.path.dirname(normalized)
+    if not os.path.basename(provider_dir):
+        return False
+    profiles_dir = os.path.dirname(provider_dir)
+    return os.path.basename(profiles_dir) == "profiles"
+
+
+def _identity_email_from_config_home(config_home: str) -> str | None:
+    """config_home의 ``.claude.json``에서 ``oauthAccount.emailAddress``를
+    읽는다. 실패(파일 없음·FIFO·크기초과·JSON 깨짐·필드 없음)는 모두 ``None``.
+    """
+    raw = _read_bounded_regular_file(
+        os.path.join(config_home, ".claude.json"), _IDENTITY_FILE_MAX_BYTES
+    )
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("oauthAccount")
+    if not isinstance(oauth, dict):
+        return None
+    email = oauth.get("emailAddress")
+    if isinstance(email, str) and email.strip():
+        return email.strip()[:320]
+    return None
+
+
+def _session_config_home_email() -> str | None:
+    """이 세션이 실제로 쓴 config home이 P3 프로파일 디렉터리일 때만 그 홈의
+    identity를 읽는다. 그 외(순수 기존 배포의 공유 풀 홈, 개인 ``~/.claude``
+    등)에는 손대지 않고 ``None``을 돌려줘 호출자가 tsamx로 폴백하게 한다.
+
+    adversarial review F3 + N2: F3의 목적(Stop 훅이 세션 **종료** 시점에 P3
+    활성 포인터를 다시 읽지 않는다 — 세션 도중 전환되면 방금 끝난 세션의
+    비용이 엉뚱한 계정에 붙는다)은 유지하되, N2가 실측한 회귀를 되돌린다:
+    이 함수가 프로파일이 아닌 모든 CLAUDE_CONFIG_DIR까지 신뢰해버리면, 프로파일을
+    전혀 안 쓰는 순수 기존 배포에서 이 파일이 tsamx보다 먼저 채택돼 풀의 SSOT
+    (tsamx)를 로컬 파일이 가로챈다 — 08-22 풀 실명 스왑 사건과 같은 형태로
+    두 값이 조용히 어긋날 수 있는 바로 그 경로다. ``_is_profile_config_home``
+    으로 "이 config home은 P3가 실제로 관리하는 프로파일 디렉터리"인 경우만
+    걸러내면, 프로파일 모드에서는 F3의 이득(포인터 재조회 없음)을 그대로
+    누리면서 현행 배포(프로파일 미사용)에서는 이 함수가 항상 None을 돌려줘
+    ``active_account_email``의 동작이 F3 이전과 글자 그대로 같아진다.
+    """
+    config_home = _resolve_config_home()
+    if not config_home or not _is_profile_config_home(config_home):
+        return None
+    return _identity_email_from_config_home(config_home)
+
+
 def active_account_email() -> str | None:
-    """현재 활성 계정 이메일. ``tsamx status --json``의 ``active.email``.
+    """현재 활성 계정 이메일.
 
-    설치 시점의 값을 박아두지 않고 매번 물어보는 이유: 계정은 전환되고, 박아둔 값은
-    전환 즉시 거짓이 된다. ``CLAUDE_CONFIG_DIR``이 이미 설정 홈을 가리키므로 tsamx는
-    같은 홈을 본다(``deploy/amx-claude``와 같은 조회다).
+    조회 순서(design note P3, P2 리뷰 ② + adversarial review F3/N2 해소):
+    명시적 pin(``LANGFUSE_USER_ID``) > **config home이 P3 프로파일
+    디렉터리 모양일 때만** 그 홈의 identity(``_session_config_home_email``)
+    > ``tsamx status --json``의 ``active.email`` > 없음.
 
-    실패(tsamx 없음·타임아웃·JSON 깨짐·필드 없음)는 모두 ``None``이다 — 계정 없이
-    보내면 서버가 ``account_id`` NULL로 받아들인다.
+    프로파일을 쓰지 않는 순수 기존 배포에서는 두 번째 단계가 항상 None이라
+    (N2) tsamx가 계속 SSOT다 — F3 이전과 글자 그대로 같은 동작. 프로파일
+    모드에서만 두 번째 단계가 이기고, 그 경우도 F3의 이유 그대로 포인터를
+    다시 읽지 않는다(세션 도중 전환되면 방금 끝난 세션의 비용이 엉뚱한
+    계정에 붙는 것을 막는다).
+
+    tsamx 폴백이 여전히 매번 다시 조회하는 이유는 그대로다: 계정은 전환되고,
+    박아둔 값은 전환 즉시 거짓이 된다. ``CLAUDE_CONFIG_DIR``이 이미 설정
+    홈을 가리키므로 tsamx는 같은 홈을 본다(``deploy/amx-claude``와 같은
+    조회다) — 이 폴백 경로 자체가 P3 이전부터 안고 있던 "세션 도중 전환되면
+    최신 계정을 본다"는 한계는 이번 수정 범위 밖이다.
+
+    실패(config home 없음·tsamx 없음·타임아웃·JSON 깨짐·필드 없음)는 모두
+    ``None``이다 — 계정 없이 보내면 서버가 ``account_id`` NULL로 받아들인다.
     """
     pinned = os.environ.get("LANGFUSE_USER_ID", "").strip()
     if pinned:
         return pinned[:320]
+    session_email = _session_config_home_email()
+    if session_email:
+        return session_email
     try:
         proc = subprocess.run(
             ["tsamx", "status", "--json"],

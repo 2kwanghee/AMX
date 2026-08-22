@@ -88,6 +88,12 @@ func (stubDriver) Env(configDir string) []string {
 }
 func (stubDriver) BinaryName() string { return "tsamx" }
 
+// Identity: stub, unused by any golden contract assertion in this file — added
+// only so stubDriver keeps satisfying provider.Driver after P3 (design note)
+// added the method to the interface. Not part of the fixed contract this file
+// pins.
+func (stubDriver) Identity(configDir string) (string, error) { return "", nil }
+
 var _ provider.Driver = stubDriver{}
 
 // stubBridge returns an ExecBridge wired to a fresh stub script: exitCode is

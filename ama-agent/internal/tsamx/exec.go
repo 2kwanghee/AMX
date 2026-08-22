@@ -181,6 +181,21 @@ func (b *ExecBridge) Add(ctx context.Context, req provider.AddRequest) error {
 // driver's conventional home) so both sides flock the SAME file even when the
 // daemon has no explicit ConfigDir — otherwise the flock would be silently
 // ineffective (B1b review item 3).
+//
+// FIXED ANCHOR, P3 invariant (design note P3, resolving P2 review item ③):
+// this MUST stay independent of any seat/profile.Store active-profile
+// pointer. b.ConfigDir here is this bridge's own, single, un-overridden
+// config home — nothing in this file ever consults an active-profile pointer
+// to build it — so this function keeps resolving the SAME value regardless
+// of whether some OTHER account has an active profile pointer pointing
+// somewhere else. The matching half of this invariant lives in
+// deploy/amx-claude: its wrapper captures its own CONFIG_DIR/LOCK_FILE from
+// CLAUDE_CONFIG_DIR before ever consulting an active-profile pointer, and
+// never lets that pointer's override reach CONFIG_DIR/LOCK_FILE afterward.
+// If this bridge is ever wired to a per-profile ConfigDir in a later phase,
+// the deliver lock must keep resolving from this same fixed formula (or from
+// Driver.DefaultConfigHome() directly) rather than from that profile's
+// directory — do not change this function to read an active pointer.
 func (b *ExecBridge) lockConfigHome() string {
 	if b.ConfigDir != "" {
 		return b.ConfigDir

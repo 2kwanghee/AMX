@@ -38,6 +38,15 @@ set -eu
 # AMX_CODEX_HOME (what the agent stages into), else codex's own default. A
 # mismatch between the two envs silently voids the lock — set both to the same
 # directory (agent-run.sh --codex-home exports AMX_CODEX_HOME only).
+#
+# FIXED ANCHOR (design note P3, review item ③ — checked for Codex too):
+# Codex is NOT a seat/profile.Store target (design note §3 P2/P3: "Codex는
+# 기존 단일 디렉터리 방식을 유지" — one config home, one account, no
+# per-account profile directories). This wrapper never overrides CODEX_HOME
+# for a profile, so there is no "before/after an override" ordering concern
+# here the way deploy/amx-claude has — CONFIG_DIR/LOCK_FILE are computed once,
+# from the environment as given, and nothing later in this file touches
+# either variable or CODEX_HOME/AMX_CODEX_HOME again.
 CONFIG_DIR="${CODEX_HOME:-${AMX_CODEX_HOME:-$HOME/.codex}}"
 LOCK_FILE="$CONFIG_DIR/.amx-deliver.lock"
 

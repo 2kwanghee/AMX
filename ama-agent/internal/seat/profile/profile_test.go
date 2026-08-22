@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,6 +328,119 @@ func TestGetActiveRejectsTamperedPointerContent(t *testing.T) {
 		t.Fatalf("GetActive must not return a path for invalid pointer content, got %q", dir)
 	}
 	_ = key
+}
+
+// TestGetActiveRejectsLeadingWhitespace is the adversarial-review F2
+// reproduction: a leading space (or any other stray byte) in the pointer
+// content must be REJECTED, not silently trimmed the way strings.TrimSpace
+// used to. Before this fix, this exact content made deploy/amx-claude reject
+// the pointer (its case pattern rejects any non-hex byte anywhere) while the
+// old TrimSpace-based GetActive/session_usage_hook.py's .strip() accepted
+// it — the three-reader disagreement F2 reproduced end to end.
+func TestGetActiveRejectsLeadingWhitespace(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("leading-space@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-lw"), provider.AddMeta{Email: "leading-space@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(" "+key), 0o600); err != nil {
+		t.Fatalf("write pointer with leading whitespace: %v", err)
+	}
+	_, dir, err := s.GetActive("claude")
+	if err == nil {
+		t.Fatalf("GetActive must reject a pointer with leading whitespace, got dir=%q", dir)
+	}
+	if errors.Is(err, ErrActiveMissing) || errors.Is(err, ErrNoActive) {
+		t.Fatalf("a leading-whitespace pointer must be its own error kind (invalid format), got %v", err)
+	}
+}
+
+// TestGetActiveAcceptsAnyNumberOfTrailingNewlines confirms the N3-tightened
+// rule: GetActive strips ALL trailing "\n" bytes (strings.TrimRight), not
+// just one — matching deploy/amx-claude's `$(cat ...)` command substitution,
+// which POSIX shell semantics make strip every trailing newline regardless of
+// count. Before N3 this package used strings.TrimSuffix (at most one), so a
+// pointer file containing "KEY\n\n" was accepted by the shell reader and
+// rejected here — the exact two-readers-disagree shape adversarial review F2
+// exists to prevent, reintroduced by an earlier fix for F2 itself.
+func TestGetActiveAcceptsAnyNumberOfTrailingNewlines(t *testing.T) {
+	for _, n := range []int{0, 1, 2, 5} {
+		n := n
+		t.Run(fmt.Sprintf("trailing_newlines=%d", n), func(t *testing.T) {
+			s := openStore(t)
+			drv := claude.New()
+			email := fmt.Sprintf("trailing-newline-%d@example.com", n)
+			key := AccountKey(email)
+			if err := s.Stage(drv, key, sampleCredential("rt-tn"), provider.AddMeta{Email: email}); err != nil {
+				t.Fatalf("Stage: %v", err)
+			}
+			providerDir, err := s.resolveProviderDir("claude")
+			if err != nil {
+				t.Fatalf("resolveProviderDir: %v", err)
+			}
+			content := key + strings.Repeat("\n", n)
+			if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(content), 0o600); err != nil {
+				t.Fatalf("write pointer with %d trailing newlines: %v", n, err)
+			}
+			got, dir, err := s.GetActive("claude")
+			if err != nil {
+				t.Fatalf("GetActive with %d trailing newlines: %v", n, err)
+			}
+			if got != key || dir == "" {
+				t.Fatalf("GetActive = (%q, %q), want (%q, non-empty)", got, dir, key)
+			}
+		})
+	}
+}
+
+// TestGetActiveRejectsNonTrailingWhitespace confirms the OTHER half of the F2
+// rule is untouched by N3's trailing-newline loosening: leading whitespace, a
+// trailing "\r", and internal whitespace must still be rejected outright, not
+// silently trimmed.
+func TestGetActiveRejectsNonTrailingWhitespace(t *testing.T) {
+	names := []string{"leading_space", "leading_tab", "trailing_cr", "internal_newline"}
+	s := openStore(t)
+	drv := claude.New()
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	for _, name := range names {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			email := name + "@example.com"
+			key := AccountKey(email)
+			if err := s.Stage(drv, key, sampleCredential("rt-"+name), provider.AddMeta{Email: email}); err != nil {
+				t.Fatalf("Stage: %v", err)
+			}
+			var content string
+			switch name {
+			case "leading_space":
+				content = " " + key
+			case "leading_tab":
+				content = "\t" + key
+			case "trailing_cr":
+				content = key + "\r"
+			case "internal_newline":
+				content = key[:32] + "\n" + key[32:]
+			}
+			if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(content), 0o600); err != nil {
+				t.Fatalf("write pointer: %v", err)
+			}
+			_, _, err := s.GetActive("claude")
+			if err == nil {
+				t.Fatalf("GetActive must reject pointer content %q", content)
+			}
+			if errors.Is(err, ErrActiveMissing) || errors.Is(err, ErrNoActive) {
+				t.Fatalf("must be its own error kind, got %v", err)
+			}
+		})
+	}
 }
 
 // --- Pre-existing permissive directory / symlink -------------------------
@@ -801,6 +915,186 @@ func TestReStageDyingMidwayLeavesCompleteFalse(t *testing.T) {
 	}
 	if done {
 		t.Fatal("Complete should be false when a re-Stage was interrupted after invalidating the old marker but before writing the new one")
+	}
+}
+
+// --- State / Reconcile ------------------------------------------------
+
+func TestStateAbsentBeforeAnyStage(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("never-staged@example.com")
+	if _, err := s.Create(drv.Name(), key, Template{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateAbsent {
+		t.Fatalf("State = %v, want StateAbsent for a Create()-only profile", st)
+	}
+}
+
+func TestStateStagedAfterStage(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("staged@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-staged"), provider.AddMeta{Email: "staged@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateStaged {
+		t.Fatalf("State = %v, want StateStaged right after a successful Stage", st)
+	}
+}
+
+// TestStateRotatedIsNotIncompleteOrAbsent is the P2-review-①-mandated case:
+// a credential the vendor's own runner rotated in place (fingerprint moved,
+// but still carries real material) must classify as StateRotated, NOT
+// StateAbsent/StateIncomplete — those would make a healthy, freshly-rotated
+// account look broken (see Complete's CAUTION doc).
+func TestStateRotatedIsNotIncompleteOrAbsent(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("rotated@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-old"), provider.AddMeta{Email: "rotated@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	dir, _, err := s.resolveProfile(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("resolveProfile: %v", err)
+	}
+	// Simulate the vendor's runner rotating the refresh token in place —
+	// exactly what Complete's !Complete-after-rotation case models.
+	if err := drv.StageCredential(dir, sampleCredential("rt-new"), provider.AddMeta{Email: "rotated@example.com"}); err != nil {
+		t.Fatalf("simulate in-place rotation: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateRotated {
+		t.Fatalf("State = %v, want StateRotated for a healthy in-place rotation", st)
+	}
+	// Sanity: this is exactly the scenario where naive !Complete would read
+	// "not ready" — assert that trap is real so this test would fail if
+	// someone reintroduced it as the readiness signal.
+	if done, err := s.Complete(drv, key); err != nil || done {
+		t.Fatalf("Complete after rotation = (%v, %v), want (false, nil) — confirms State, not Complete, is the readiness signal to use", done, err)
+	}
+}
+
+func TestStateIncompleteForBlankCredential(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("blank@example.com")
+	dir, err := s.Create(drv.Name(), key, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// A logged-out shell: the token keys exist but are blank.
+	blank := []byte(`{"claudeAiOauth":{"accessToken":"","refreshToken":""}}`)
+	if err := os.WriteFile(drv.CredentialPath(dir), blank, 0o600); err != nil {
+		t.Fatalf("write blank credential: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateIncomplete {
+		t.Fatalf("State = %v, want StateIncomplete for a logged-out (blank) credential", st)
+	}
+}
+
+func TestReconcileRestampsMarkerOnRotationAndBecomesStaged(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("reconcile@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-before"), provider.AddMeta{Email: "reconcile@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	dir, _, err := s.resolveProfile(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("resolveProfile: %v", err)
+	}
+	if err := drv.StageCredential(dir, sampleCredential("rt-after"), provider.AddMeta{Email: "reconcile@example.com"}); err != nil {
+		t.Fatalf("simulate in-place rotation: %v", err)
+	}
+	if st, err := s.State(drv, key); err != nil || st != StateRotated {
+		t.Fatalf("precondition: State = (%v, %v), want (StateRotated, nil)", st, err)
+	}
+
+	st, err := s.Reconcile(drv, key)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if st != StateStaged {
+		t.Fatalf("Reconcile returned %v, want StateStaged", st)
+	}
+
+	// The marker must now match the NEW (post-rotation) fingerprint, so a
+	// plain re-read of State/Complete agrees without Reconcile running again.
+	if st, err := s.State(drv, key); err != nil || st != StateStaged {
+		t.Fatalf("State after Reconcile = (%v, %v), want (StateStaged, nil)", st, err)
+	}
+	if done, err := s.Complete(drv, key); err != nil || !done {
+		t.Fatalf("Complete after Reconcile = (%v, %v), want (true, nil)", done, err)
+	}
+	markerFP, err := os.ReadFile(filepath.Join(dir, stagedMarkerName))
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(markerFP) != drv.Fingerprint(sampleCredential("rt-after")) {
+		t.Fatalf("marker = %q, want the fingerprint of the rotated (post-rotation) credential", markerFP)
+	}
+}
+
+func TestReconcileIsNoOpOnAbsentAndIncomplete(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+
+	absentKey := AccountKey("reconcile-absent@example.com")
+	if _, err := s.Create(drv.Name(), absentKey, Template{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if st, err := s.Reconcile(drv, absentKey); err != nil || st != StateAbsent {
+		t.Fatalf("Reconcile(absent) = (%v, %v), want (StateAbsent, nil)", st, err)
+	}
+
+	incompleteKey := AccountKey("reconcile-incomplete@example.com")
+	dir, err := s.Create(drv.Name(), incompleteKey, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blank := []byte(`{"claudeAiOauth":{"accessToken":"","refreshToken":""}}`)
+	if err := os.WriteFile(drv.CredentialPath(dir), blank, 0o600); err != nil {
+		t.Fatalf("write blank credential: %v", err)
+	}
+	if st, err := s.Reconcile(drv, incompleteKey); err != nil || st != StateIncomplete {
+		t.Fatalf("Reconcile(incomplete) = (%v, %v), want (StateIncomplete, nil)", st, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stagedMarkerName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Reconcile must not write a marker for an incomplete credential: stat err = %v", err)
+	}
+}
+
+func TestReconcileAlreadyStagedIsIdempotent(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("already-staged@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-idem"), provider.AddMeta{Email: "already-staged@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	st, err := s.Reconcile(drv, key)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if st != StateStaged {
+		t.Fatalf("Reconcile on an already-staged profile = %v, want StateStaged", st)
 	}
 }
 

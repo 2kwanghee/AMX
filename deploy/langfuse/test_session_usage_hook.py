@@ -13,7 +13,9 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import time
 
 import pytest
 
@@ -244,6 +246,11 @@ def test_active_account_email_swallows_tsamx_failure(monkeypatch, tmp_path):
     mod = _load_module()
     monkeypatch.setenv("CC_SESSION_USAGE_STATE_FILE", str(tmp_path / "state"))
     monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    # Isolate from the REAL host's CLAUDE_CONFIG_DIR/~/.claude — this test
+    # wants every case to fall through to the tsamx mock below, so
+    # _session_config_home_email must resolve to nothing on this host too.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
 
     def _boom(*a, **kw):
         raise FileNotFoundError("tsamx")
@@ -271,6 +278,161 @@ def test_active_account_email_swallows_tsamx_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **kw: _Junk())
     assert mod.active_account_email() is None
+
+
+def _write_claude_json(config_home, email):
+    config_home.mkdir(parents=True, exist_ok=True)
+    (config_home / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"emailAddress": email}})
+    )
+
+
+# P3 프로파일 레이아웃(<stateDir>/profiles/<provider>/<64hex>) 모양의 경로를
+# 만드는 헬퍼. N2 이후 _session_config_home_email은 이 모양이 아닌
+# CLAUDE_CONFIG_DIR을 전부 무시하므로, "프로파일 모드"를 시험하는 테스트는
+# 반드시 이 헬퍼로 만든 경로를 써야 실제로 그 코드 경로를 태운다.
+_KEY_A = "a" * 64
+_KEY_B = "b" * 64
+
+
+def _profile_config_home(tmp_path, key):
+    return tmp_path / "amx-state" / "profiles" / "claude" / key
+
+
+def test_active_account_email_prefers_profile_config_home_over_tsamx(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    config_home = _profile_config_home(tmp_path, _KEY_A)
+    _write_claude_json(config_home, "profile-user@example.com")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
+
+    def _boom(*a, **kw):
+        raise AssertionError("tsamx must not be consulted when a profile config home resolves")
+
+    monkeypatch.setattr(mod.subprocess, "run", _boom)
+    assert mod.active_account_email() == "profile-user@example.com"
+
+
+def test_active_account_email_falls_back_to_tsamx_when_config_home_has_no_identity(
+    monkeypatch, tmp_path
+):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    # Profile-shaped path, but nothing staged there yet (no .claude.json).
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_profile_config_home(tmp_path, _KEY_A)))
+
+    class _Proc:
+        returncode = 0
+        stdout = b'{"active": {"email": "tsamx-user@example.com"}}'
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **kw: _Proc())
+    assert mod.active_account_email() == "tsamx-user@example.com"
+
+
+def test_active_account_email_pin_beats_profile_config_home(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.setenv("LANGFUSE_USER_ID", "pinned@example.com")
+    config_home = _profile_config_home(tmp_path, _KEY_A)
+    _write_claude_json(config_home, "profile-user@example.com")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
+    assert mod.active_account_email() == "pinned@example.com"
+
+
+# N2 (adversarial review, real reproduction): a pure pre-P3 deployment — no
+# profiles ever created, no AMX_STATE_DIR — with a STALE identity sitting in
+# ~/.claude/.claude.json (exactly the shape of the 08-22 pool blind-swap
+# incident: a local file quietly disagreeing with the pool's actual state)
+# and tsamx (the pool's SSOT) reporting the TRUE active account. A
+# non-profile-shaped config home must never preempt tsamx — this is the
+# regression F3 introduced and N2 closes.
+def test_active_account_email_pure_existing_env_prefers_tsamx_over_stale_home_file(
+    monkeypatch, tmp_path
+):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_claude_json(tmp_path / ".claude", "stale-identity@x.io")
+
+    class _Proc:
+        returncode = 0
+        stdout = b'{"active": {"email": "TRUE-POOL-ACCOUNT@x.io"}}'
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **kw: _Proc())
+    assert mod.active_account_email() == "TRUE-POOL-ACCOUNT@x.io"
+
+
+def test_is_profile_config_home_accepts_only_profile_shaped_paths(tmp_path):
+    mod = _load_module()
+    assert mod._is_profile_config_home(str(_profile_config_home(tmp_path, _KEY_A)))
+    assert not mod._is_profile_config_home(str(tmp_path / ".claude"))
+    assert not mod._is_profile_config_home(str(tmp_path / "profiles" / "claude"))
+    assert not mod._is_profile_config_home(str(tmp_path / "profiles" / "claude" / "not-hex"))
+    assert not mod._is_profile_config_home(
+        str(tmp_path / "some-other-dir" / "claude" / _KEY_A)
+    )  # grandparent must be literally "profiles"
+
+
+def test_session_config_home_email_size_cap(monkeypatch, tmp_path):
+    mod = _load_module()
+    config_home = _profile_config_home(tmp_path, _KEY_A)
+    config_home.mkdir(parents=True)
+    payload = json.dumps(
+        {"oauthAccount": {"emailAddress": "big@example.com"}, "pad": "x" * (2 * 1024 * 1024)}
+    )
+    (config_home / ".claude.json").write_text(payload)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
+    assert mod._session_config_home_email() is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo not available on this platform")
+def test_session_config_home_email_never_blocks_on_fifo(monkeypatch, tmp_path):
+    """adversarial review F1 reproduction: a FIFO at .claude.json must return
+    None promptly, never block the Stop hook."""
+    mod = _load_module()
+    config_home = _profile_config_home(tmp_path, _KEY_A)
+    config_home.mkdir(parents=True)
+    fifo_path = config_home / ".claude.json"
+    os.mkfifo(fifo_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
+
+    start = time.monotonic()
+    result = mod._session_config_home_email()
+    elapsed = time.monotonic() - start
+
+    assert result is None
+    assert elapsed < 2.0, f"_session_config_home_email blocked on a FIFO for {elapsed:.2f}s"
+
+
+# F3 (adversarial review): the Stop hook must NOT re-read the P3 active
+# pointer at session-end time — it must use the config home the session
+# ACTUALLY inherited (CLAUDE_CONFIG_DIR), even when a *different* profile
+# looks "active" by the time the hook runs (the switcher moved on mid-session,
+# which is exactly the scenario that would misattribute a running session's
+# cost to the wrong account if the hook re-queried the pointer).
+def test_active_account_email_ignores_a_pointer_that_moved_mid_session(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+
+    session_home = _profile_config_home(tmp_path, _KEY_A)
+    _write_claude_json(session_home, "session-started-with@example.com")
+    other_home = _profile_config_home(tmp_path, _KEY_B)
+    _write_claude_json(other_home, "switched-to@example.com")
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(session_home))
+
+    def _boom(*a, **kw):
+        raise AssertionError("tsamx must not be consulted in profile mode")
+
+    monkeypatch.setattr(mod.subprocess, "run", _boom)
+    # No AMX_STATE_DIR/pointer machinery exists in this module any more (F3
+    # removed it) -- there is nothing left to point at `other_home` even if
+    # some external switcher activated it. Confirm the session's own config
+    # home wins regardless.
+    assert mod.active_account_email() == "session-started-with@example.com"
+    assert not hasattr(mod, "_active_profile_email"), (
+        "F3: the pointer-reread function must be removed, not merely bypassed"
+    )
 
 
 # -- iterations 귀속 ----------------------------------------------------------
