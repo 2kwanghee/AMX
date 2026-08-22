@@ -1561,7 +1561,16 @@ def _advance_deliver(db: Session, chain: PoolChain, now: datetime) -> bool:
         return _fail(db, chain, "대상 계정이 다른 서버에 배정돼 있다.", now=now)
 
     if assignment.state == "pending":
-        commands.request_deliver(db, chain.tenant_id, assignment.id)
+        # D3 만료 검사(아래 delivering 분기와 동일한 판단). ack REJECTED 로 배정이
+        # pending 으로 되돌아오면 이 분기가 매 틱 request_deliver 를 재발행한다.
+        # 대상 서버 에이전트가 없거나 구버전이라 영영 못 받으면 이 재발행이 무한
+        # 반복된다 — 만료됐으면 재발행 대신 실패로 접는다.
+        if _expired(chain, now):
+            return _fail(db, chain, "deliver 단계 제한 시간 초과", now=now)
+        try:
+            commands.request_deliver(db, chain.tenant_id, assignment.id)
+        except ApiError as exc:
+            return _fail(db, chain, f"전달 명령 거부: {exc.code}", now=now)
         return _touch(db, chain, step="deliver", now=now, assignment_id=str(assignment.id))
 
     if assignment.state in _INSTALLED_STATES:

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
+from app.core.errors import ApiError
 from app.db import get_sessionmaker
 from app.models import AgentCommand, Alert
 from app.services import commands, inventory, reconcile
@@ -43,6 +45,21 @@ def _age_sent(command_id, *, seconds, send_attempts=None):
         cmd.sent_at = datetime.now(UTC) - timedelta(seconds=seconds)
         if send_attempts is not None:
             cmd.send_attempts = send_attempts
+        db.commit()
+
+
+def _age_queued(command_id, *, seconds):
+    """Force a still-``queued`` command's ``created_at`` into the past.
+
+    Models a command a poll loop never once claimed (``fetch_queued`` only
+    ever sees ``queued`` rows for an *online* server — the D3 case is a server
+    whose agent never opens a session, so nothing ever claims the row).
+    """
+    with get_sessionmaker()() as db:
+        cmd = db.scalar(
+            select(AgentCommand).where(AgentCommand.command_id == command_id)
+        )
+        cmd.created_at = datetime.now(UTC) - timedelta(seconds=seconds)
         db.commit()
 
 
@@ -424,3 +441,127 @@ def test_reconcile_ignores_inflight_delivering_assignment(app_env):
             select(AgentCommand).where(AgentCommand.assignment_id == assignment_id)
         ).all()
     assert len(rows) == 1 and rows[0].command_type == "deliver"
+
+
+# -- D3 queued-never-sent recovery ---------------------------------------------
+def test_queued_timeout_deliver_fails_and_reverts_to_pending(app_env):
+    # A command a poll loop never claimed (agent missing/too old to open a
+    # session) stays ``queued`` forever without this sweep: pending_command_id
+    # never clears and the console shows "동기화중" indefinitely.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d3queued@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    assert _command(command_id).status == "queued"
+    _age_queued(command_id, seconds=1000)
+
+    with get_sessionmaker()() as db:
+        failed = commands.sweep_queued_timeouts(db, timeout_seconds=180)
+    assert failed == [command_id]
+
+    cmd = _command(command_id)
+    assert cmd.status == "failed"
+    assert cmd.detail == "queued_timeout"
+    a = _assignment(tenant_id, assignment_id)
+    assert a.state == "pending"  # re-issuable
+    assert a.pending_command_id is None
+    assert a.last_error == "queued_timeout"
+
+
+def test_fresh_queued_is_not_swept(app_env):
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d3fresh@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    _age_queued(command_id, seconds=5)  # well within the 180s timeout
+
+    with get_sessionmaker()() as db:
+        failed = commands.sweep_queued_timeouts(db, timeout_seconds=180)
+    assert failed == []
+    assert _command(command_id).status == "queued"
+
+
+def test_sweep_sent_timeouts_also_sweeps_queued(app_env):
+    # sweep_sent_timeouts is the only sweep the gRPC sweeper loop registers, so
+    # it must fold the queued-timeout sweep into its own return value or D3
+    # never actually runs against a live deployment.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d3folded@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+        command_id = db.scalar(
+            select(AgentCommand.command_id).where(
+                AgentCommand.assignment_id == assignment_id
+            )
+        )
+    _age_queued(command_id, seconds=1000)
+
+    with get_sessionmaker()() as db:
+        requeued, failed = commands.sweep_sent_timeouts(
+            db, timeout_seconds=90, queued_timeout_seconds=180
+        )
+    assert requeued == []
+    assert failed == [command_id]
+    assert _command(command_id).status == "failed"
+
+
+def test_deliver_to_never_connected_server_is_refused(app_env):
+    # D3: a server whose agent has never once connected (last_seen_at NULL —
+    # not installed, or too old to complete session setup) would never poll
+    # for a queued deliver command; reject up front instead of letting it sit
+    # queued until the sweep ages it out.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d3never@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        server = inventory.get_server(db, tenant_id, server_id)
+        server.last_seen_at = None
+        db.commit()
+
+    with get_sessionmaker()() as db:
+        with pytest.raises(ApiError) as exc_info:
+            commands.request_deliver(db, tenant_id, assignment_id)
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == "assignment.server_never_connected"
+    # The assignment was not touched — still pending, no command enqueued.
+    a = _assignment(tenant_id, assignment_id)
+    assert a.state == "pending"
+    assert a.pending_command_id is None
+    with get_sessionmaker()() as db:
+        rows = db.scalars(
+            select(AgentCommand).where(AgentCommand.assignment_id == assignment_id)
+        ).all()
+    assert rows == []
+
+
+def test_deliver_to_previously_connected_offline_server_is_allowed(app_env):
+    # status == "offline" alone must NOT be rejected — that also covers an
+    # agent that connected before and is merely between sessions, which
+    # recovers on its own and should not block deliver.
+    tenant_id, account_id, server_id = _seed_tenant_account_server("d3offline@ex.com")
+    assignment_id = _create_assignment(tenant_id, account_id, server_id)
+    _set_state(tenant_id, assignment_id, "pending")
+    with get_sessionmaker()() as db:
+        server = inventory.get_server(db, tenant_id, server_id)
+        server.status = "offline"
+        db.commit()
+
+    with get_sessionmaker()() as db:
+        commands.request_deliver(db, tenant_id, assignment_id)
+
+    a = _assignment(tenant_id, assignment_id)
+    assert a.state == "delivering"
+    assert a.pending_command_id is not None

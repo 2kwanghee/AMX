@@ -65,6 +65,11 @@ def _server(tenant_id: uuid.UUID, name: str, policy: dict | None = None) -> uuid
             db, tenant_id, name=name, hostname=None, switch_mode="auto"
         )
         server.status = "online"
+        # D3 (feat/sync-queued-timeout): request_deliver now 409s a server whose
+        # agent has never connected (last_seen_at NULL). This helper already
+        # simulates an online server via status; last_seen_at must agree or the
+        # pool chain's own deliver step 409s on the very first tick.
+        server.last_seen_at = _now()
         if policy is not None:
             server.pool_policy = policy
         db.commit()
@@ -458,6 +463,41 @@ def test_step_timeout_fails_chain_and_opens_alert(app_env):
     assert _assignment_of(tenant_id, account_id) is None
     with _db() as db:
         assert db.get(Account, account_id).status == "available"
+
+
+def test_pending_redelivery_past_timeout_fails_instead_of_reissuing(app_env):
+    # D3: reconcile's ack-REJECTED path reverts a delivering assignment back to
+    # pending (reconcile.py) without touching the chain's step clock. Before
+    # this fix, ``_advance_deliver``'s pending branch had no expiry check and
+    # re-issued ``request_deliver`` on every tick forever if the target
+    # server's agent never acked. This proves the pending branch now honours
+    # the same step timeout as the delivering branch, instead of looping.
+    tenant_id = _tenant()
+    server_id = _server(tenant_id, "s1", AUTO)
+    account_id = _account(tenant_id, "reject@x.example.com")
+    _observe(tenant_id, server_id, "reject@x.example.com", five=1, seven=1)
+
+    chain = _start(_build(tenant_id)[0].id)
+    assert chain.step == "deliver"
+    assignment = _assignment_of(tenant_id, account_id)
+    assert assignment is not None
+    assert assignment.state == "delivering"
+
+    # Simulate reconcile's ack-REJECTED revert: assignment back to pending,
+    # pending_command_id cleared, but chain.step_started_at is untouched — it
+    # still reflects the original chain start.
+    _set_assignment_state(assignment.id, "pending")
+
+    assert _advance(now=_now() + timedelta(minutes=11)) == 1
+    failed = _chain(chain.id)
+    assert failed.step == "failed"
+    assert "제한 시간" in failed.error
+
+    # No second deliver command was issued for the reverted-to-pending
+    # assignment — only the original (now aborted) one exists.
+    delivers = _commands(tenant_id, "deliver")
+    assert len(delivers) == 1
+    assert delivers[0].status == "failed"
 
 
 def test_failed_chain_blocks_auto_until_acked(app_env):

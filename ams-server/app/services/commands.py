@@ -37,6 +37,14 @@ MAX_SEND_ATTEMPTS = int(os.environ.get("AMX_MAX_SEND_ATTEMPTS", "5"))
 # forever; past the cap the action 409s and only opens a ``recall_failed`` alert.
 MAX_RECALL_RETRIES = int(os.environ.get("AMX_MAX_RECALL_RETRIES", "3"))
 
+# D3 queued-never-sent recovery. ``deliver`` has no server-online gate, so a
+# command aimed at a server whose agent is missing or too old to open a session
+# is never polled: it stays ``queued`` forever, ``pending_command_id`` never
+# clears, and the console shows "동기화중" indefinitely. This sweep ages out a
+# ``queued`` row past the timeout the same way the sent-ack sweeper ages out a
+# stuck ``sent`` row.
+QUEUED_TIMEOUT_SECONDS = float(os.environ.get("AMX_QUEUED_TIMEOUT", "180"))
+
 # Command types that never set assignment.pending_command_id (§6.3: non-state
 # commands). For these a None/mismatched marker is not a settle/supersede signal —
 # they have no successor — so their cap-exhausted final failure alerts regardless
@@ -111,6 +119,21 @@ def request_deliver(
         raise conflict(
             "assignment.not_deliverable",
             f"deliver requires state 'pending'; assignment is '{assignment.state}'.",
+        )
+    # D3 queued-never-sent recovery: a server whose agent has never once
+    # connected (``last_seen_at`` NULL — not installed, or too old to complete
+    # session setup, grpc/server.py FAILED_PRECONDITION) will never poll for
+    # this command, so it would sit ``queued`` forever with no sweep able to
+    # tell "about to connect" from "will never connect". Reject up front instead.
+    # ``status == "offline"`` alone is NOT rejected here — that also covers an
+    # agent that connected before and is merely between sessions, which recovers
+    # on its own and should not block deliver.
+    server = inventory.get_server(db, tenant_id, assignment.server_id)
+    if server.last_seen_at is None:
+        raise conflict(
+            "assignment.server_never_connected",
+            f"deliver requires a server the agent has connected to at least "
+            f"once; server '{server.id}' has never connected.",
         )
     # `pinned` is AMS-internal and is translated into desired_status here rather
     # than shipped on the wire (proto DeliverAccount §5.2): a pinned assignment
@@ -479,6 +502,7 @@ def sweep_sent_timeouts(
     *,
     timeout_seconds: float = SENT_ACK_TIMEOUT_SECONDS,
     max_attempts: int = MAX_SEND_ATTEMPTS,
+    queued_timeout_seconds: float = QUEUED_TIMEOUT_SECONDS,
 ) -> tuple[list[str], list[str]]:
     """Re-queue or fail commands stuck in ``sent`` past the ack timeout.
 
@@ -501,6 +525,11 @@ def sweep_sent_timeouts(
     here belongs to an in-flight assignment (delivering/recalling) or is
     server-scoped, so the two never move the same row. The caller need not commit —
     this commits its own transaction. Returns ``(requeued_ids, failed_ids)``.
+
+    Also runs :func:`sweep_queued_timeouts` (D3) on the same tick, folding its
+    failures into ``failed_ids`` — this is the only sweep the gRPC process's
+    periodic sweeper loop registers, so a ``queued`` row aging out otherwise
+    never gets swept in production without a second timer registration.
     """
     cutoff = _now() - timedelta(seconds=timeout_seconds)
     stuck = db.scalars(
@@ -527,7 +556,45 @@ def sweep_sent_timeouts(
             _open_send_failure_alert(db, command, assignment)
             failed.append(command.command_id)
     db.commit()
+    failed.extend(sweep_queued_timeouts(db, timeout_seconds=queued_timeout_seconds))
     return requeued, failed
+
+
+# -- D3 queued-never-sent recovery ---------------------------------------------
+def sweep_queued_timeouts(
+    db: Session, *, timeout_seconds: float = QUEUED_TIMEOUT_SECONDS
+) -> list[str]:
+    """Fail commands stuck in ``queued`` past ``timeout_seconds`` and revert them.
+
+    Unlike :func:`sweep_sent_timeouts` there is no re-queue step: a ``queued``
+    row this old was never claimed by any poll loop (a claimed row is ``sent``),
+    so re-queuing it changes nothing — the condition that stranded it (no agent
+    ever polling this server: not installed, or too old to complete session
+    setup) will just strand the re-queued row the same way. This fails it
+    straight to ``failed`` and reverts its assignment exactly like a send-retry
+    exhaustion (:func:`_revert_assignment_on_send_failure`), so
+    ``pending_command_id`` clears and the console stops showing "동기화중"
+    forever. Returns the list of failed command ids.
+    """
+    cutoff = _now() - timedelta(seconds=timeout_seconds)
+    stuck = db.scalars(
+        select(AgentCommand).where(
+            AgentCommand.status == "queued",
+            AgentCommand.created_at < cutoff,
+        )
+    ).all()
+    failed: list[str] = []
+    for command in stuck:
+        command.status = "failed"
+        command.detail = "queued_timeout"
+        command.updated_at = _now()
+        assignment = _revert_assignment_on_send_failure(
+            db, command, reason="queued_timeout"
+        )
+        _open_send_failure_alert(db, command, assignment)
+        failed.append(command.command_id)
+    db.commit()
+    return failed
 
 
 def _open_send_failure_alert(
@@ -579,9 +646,14 @@ def _open_send_failure_alert(
 
 
 def _revert_assignment_on_send_failure(
-    db: Session, command: AgentCommand
+    db: Session, command: AgentCommand, *, reason: str = "sent_ack_timeout"
 ) -> Assignment | None:
-    """Revert the assignment of a permanently-failed ``sent`` command.
+    """Revert the assignment of a permanently-failed ``sent`` or ``queued`` command.
+
+    ``reason`` becomes ``assignment.last_error`` — the sent-ack sweeper passes
+    the default; the queued-timeout sweeper (:func:`sweep_queued_timeouts`)
+    passes ``"queued_timeout"`` so the operator-visible error names the actual
+    failure instead of a misleading "sent" label.
 
     Mirrors the DIVERGED/REJECTED ack handling in ``reconcile.apply_ack``: only
     the assignment still pointing at this command (``pending_command_id`` match) is
@@ -621,7 +693,7 @@ def _revert_assignment_on_send_failure(
         # and do not alert (return None so the caller opens none). A marker-less
         # type (switch_now) skips this and still alerts on final failure.
         return None
-    assignment.last_error = "sent_ack_timeout"
+    assignment.last_error = reason
     assignment.pending_command_id = None
     if command.command_type == "deliver":
         assignment.state = "pending"

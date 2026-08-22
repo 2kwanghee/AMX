@@ -13,6 +13,7 @@ import asyncio
 import json
 import time
 import uuid
+from datetime import UTC, datetime
 
 import grpc
 import pytest
@@ -50,6 +51,13 @@ def _seed_tenant_account_server(email: str = "a@example.com"):
         server = inventory.create_server(
             db, tenant.id, name="s-" + uuid.uuid4().hex[:8], hostname="h", switch_mode="auto"
         )
+        # D3 (feat/sync-queued-timeout): request_deliver now 409s a server whose
+        # agent has never connected (last_seen_at NULL). Most callers of this
+        # helper deliver against the seeded server without first driving a real
+        # session through _Harness, so stamp it here — this fixture models an
+        # already-onboarded fleet member, not a fresh never-installed one.
+        server.last_seen_at = datetime.now(UTC)
+        db.commit()
         return tenant.id, account.id, server.id
 
 

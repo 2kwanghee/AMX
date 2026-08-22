@@ -230,6 +230,8 @@ const KR_API_ERROR: Record<string, string> = {
   // 같은 어휘를 쓴다.
   'assignment.not_deliverable':
     '전달은 대기 상태의 할당에만 가능합니다. 이미 전달된 할당이면 회수한 뒤 다시 시도하세요.',
+  'assignment.server_never_connected':
+    '이 서버의 에이전트가 아직 한 번도 접속하지 않았습니다. 에이전트를 설치·기동해 접속을 확인한 뒤 다시 전달하세요.',
   'assignment.not_recallable':
     '회수는 자격증명이 설치된 할당에만 가능합니다. 대기나 해제됨 상태에는 회수할 것이 없습니다.',
   'assignment.not_activatable':
@@ -371,6 +373,10 @@ export function allowedAssignmentActions(state: AssignmentState): AssignmentActi
     case 'quarantined':
       return ['recover', 'recall'];
     case 'delivering':
+      // 서버 request_recall은 delivering 배정의 회수를 이미 받아준다
+      // (commands.py request_recall). 에이전트가 없거나 구버전이라 전달이
+      // 영영 안 끝나는 경우 사용자가 직접 회수할 수 있어야 한다.
+      return ['recall'];
     case 'recalling':
     case 'detached':
     default:

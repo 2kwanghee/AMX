@@ -23,6 +23,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import UTC, datetime
 
 import grpc
 import pytest
@@ -60,6 +61,11 @@ def _seed(email: str):
         server = inventory.create_server(
             db, tenant.id, name="s-" + uuid.uuid4().hex[:8], hostname="h", switch_mode="auto"
         )
+        # D3 (feat/sync-queued-timeout): request_deliver now 409s a server whose
+        # agent has never connected (last_seen_at NULL); this helper delivers
+        # before the harness session runs, so stamp it as already-onboarded.
+        server.last_seen_at = datetime.now(UTC)
+        db.commit()
         return tenant.id, account.id, server.id
 
 
