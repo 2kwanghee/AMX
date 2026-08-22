@@ -1,16 +1,35 @@
 package autoswitch
 
-// Strategy selects how Decide picks a switch target once the threshold gate
-// and cooldown clear the way for a switch. The two literals are contract
-// C1's `switch --strategy best|next-available` values (docs/design-notes/
-// tsamx-rewrite-feasibility.md "재작성 시 반드시 지켜야 할 계약" table, row
-// "CLI 동사") — see the package doc for why Decide reinterprets them as
-// engine strategies rather than the manual-switch CLI strategies they
-// originate from.
+// Strategy selects how Decide ranks candidates once the threshold gate and
+// cooldown clear the way for a switch. Corrected in review C3: the FIRST
+// version of this file wrongly reused contract C1's manual
+// `switch --strategy best|next-available` literals as tick strategies.
+// tsamx's real tick-strategy field is AutoSwitchSettings.strategy
+// (tsamx/src/tsamx/settings.py:47-50), a plain string documented as
+// `"best" (most headroom) or "consume-first" (soonest weekly reset)` —
+// next-available never appears there at all; it is exclusively the manual
+// `switch --strategy` / SwitchNow default-strategy literal (internal/
+// command/handlers.go:524-527,635-641, amxv1.SwitchNow_SwitchStrategy).
+// Decide accepts only StrategyBest/StrategyConsumeFirst; see Decide's doc
+// for what happens if StrategyNextAvailable is passed anyway.
 type Strategy string
 
 const (
-	StrategyBest          Strategy = "best"
+	// StrategyBest ports tsamx's default "best" tick ranking: most headroom,
+	// gated by HysteresisPct (see decide.go/select.go).
+	StrategyBest Strategy = "best"
+	// StrategyConsumeFirst ports tsamx's "consume-first" tick ranking:
+	// spend the soonest-resetting weekly (7-day) quota first, moving to any
+	// candidate whose seven-day window resets strictly sooner than the
+	// active account's (autoswitch.py:1846-1856).
+	StrategyConsumeFirst Strategy = "consume-first"
+	// StrategyNextAvailable is contract C1's MANUAL switch-strategy literal
+	// (`switch --strategy next-available`) — never a valid tsamx tick
+	// strategy (see this type's doc). Kept as a named constant purely so a
+	// caller that receives this literal from the wire (e.g. a
+	// misconfigured default_strategy meant for switch_now) can recognize it
+	// by name; Decide rejects it explicitly rather than silently
+	// reinterpreting it (see Decide's doc, review C3).
 	StrategyNextAvailable Strategy = "next-available"
 )
 
@@ -34,6 +53,16 @@ type Policy struct {
 	ThresholdPct    float64
 	HysteresisPct   float64
 	CooldownSeconds float64
+	// UnhealthyTicks mirrors AutoSwitchSettings.unhealthy_ticks (settings.py:
+	// 52, default 3): the number of consecutive ticks the active account's
+	// usage may stay unreadable before Decide fails over to any healthy
+	// candidate (trigger "failover", autoswitch.py:999-1011). Added in
+	// review C2 — the first version of this package had no such counter and
+	// a dead active token froze the whole pool on NoAction/exit-2 forever.
+	// Callers should set this to >=1 (tsamx bounds it 1-100,
+	// settings.py:131); Decide never fails over on its own if this is <=0
+	// (see Decide's doc).
+	UnhealthyTicks int
 }
 
 // The four constants below are copied verbatim (same names translated,

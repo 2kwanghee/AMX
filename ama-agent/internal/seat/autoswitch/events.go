@@ -10,10 +10,14 @@ const EventSchemaVersion = 1
 
 // AccountRef is the {"number":N,"email":"..."} shape tsamx's _ref() helper
 // builds (autoswitch.py:593-594) and every event's from/to/active field
-// carries.
+// carries, extended with AccountKey — the profile.AccountKey(email)-shaped
+// identifier internal/seat.Switcher.Switch's targetKey and
+// internal/seat/usage's store key both key on (review C4). Added so a
+// consumer of this event stream never has to re-derive it from Email.
 type AccountRef struct {
-	Number int    `json:"number"`
-	Email  string `json:"email"`
+	Number     int    `json:"number"`
+	Email      string `json:"email"`
+	AccountKey string `json:"accountKey,omitempty"`
 }
 
 // Event is implemented by every event type below. ToJSON's payload shape —
@@ -110,35 +114,46 @@ func (e NoSwitchEvent) ToJSON() map[string]any {
 // (internal/scheduler/scheduler.go:291-303) — this event is emitted at the
 // moment WriteState persists that same new entry (see quarantine.go), one
 // layer above the file-watch AMA's tsamx path uses today.
+// Number/AccountKey both identify the slot: Number for human-readable
+// logging (tsamx's own QuarantineEvent used the slot number, autoswitch.py:
+// 386), AccountKey (review C4) for anything that needs to act on it (e.g.
+// look the row up in internal/seat/usage's store or pass it to
+// internal/seat.Switcher).
 type QuarantineEvent struct {
-	Ts     time.Time
-	Number string
-	Email  string
-	Reason string
+	Ts         time.Time
+	Number     int
+	AccountKey string
+	Email      string
+	Reason     string
 }
 
 func (e QuarantineEvent) Kind() string { return "account-quarantined" }
 func (e QuarantineEvent) ToJSON() map[string]any {
 	m := baseJSON(e.Kind(), e.Ts)
 	m["number"] = e.Number
+	m["accountKey"] = e.AccountKey
 	m["email"] = e.Email
 	m["reason"] = e.Reason
 	return m
 }
 
 // UnquarantineEvent ports autoswitch.py:400-411 (UnquarantineEvent) — a
-// quarantined slot's status recovered (see ShouldRelease).
+// quarantined slot's credential was replaced (see ShouldRelease; reason is
+// "account-replaced" or "credentials-replaced", NEVER a status-recovery —
+// review C1).
 type UnquarantineEvent struct {
-	Ts     time.Time
-	Number string
-	Email  string
-	Reason string
+	Ts         time.Time
+	Number     int
+	AccountKey string
+	Email      string
+	Reason     string
 }
 
 func (e UnquarantineEvent) Kind() string { return "account-unquarantined" }
 func (e UnquarantineEvent) ToJSON() map[string]any {
 	m := baseJSON(e.Kind(), e.Ts)
 	m["number"] = e.Number
+	m["accountKey"] = e.AccountKey
 	m["email"] = e.Email
 	m["reason"] = e.Reason
 	return m

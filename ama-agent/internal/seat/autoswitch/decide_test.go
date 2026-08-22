@@ -1,10 +1,12 @@
 package autoswitch
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
+	"github.com/2kwanghee/AMX/ama-agent/internal/seat/profile"
 	seatusage "github.com/2kwanghee/AMX/ama-agent/internal/seat/usage"
 )
 
@@ -19,9 +21,20 @@ func usage(pct float64, resetsAt string) *provider.Usage {
 	}
 }
 
+// usageWeekly builds a provider.Usage with an explicit seven-day window
+// (for consume-first tests, which rank on that window's reset).
+func usageWeekly(fiveHourPct, sevenDayPct float64, sevenDayResetsAt string) *provider.Usage {
+	return &provider.Usage{
+		FiveHour: &provider.Window{Pct: fiveHourPct},
+		SevenDay: &provider.Window{Pct: sevenDayPct, ResetsAt: sevenDayResetsAt},
+	}
+}
+
 func acct(number int, email string, pct float64, resetsAt string) provider.AccountRow {
 	return provider.AccountRow{Number: number, Email: email, Usage: usage(pct, resetsAt), UsageStatus: "ok"}
 }
+
+func key(email string) string { return profile.AccountKey(email) }
 
 var t0 = time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
 
@@ -35,6 +48,9 @@ func mustSwitch(t *testing.T, d Decision, err error, wantTo int) {
 	}
 	if d.To == nil || d.To.Number != wantTo {
 		t.Fatalf("to = %+v, want account %d", d.To, wantTo)
+	}
+	if d.To.AccountKey == "" {
+		t.Fatalf("to.AccountKey is empty, want profile.AccountKey(email)")
 	}
 }
 
@@ -67,8 +83,7 @@ func mustNoAction(t *testing.T, d Decision, err error, wantReason string) {
 // --- 임계값(threshold) 경계 ---------------------------------------------
 
 func TestDecide_ThresholdBoundary(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300}
-	// utilization 89.999 < 90 -> below-threshold (strict <, autoswitch.py:944).
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300, UnhealthyTicks: 3}
 	below := Input{
 		Accounts:     []provider.AccountRow{acct(1, "a@x", 89.999, ""), acct(2, "b@x", 0, "")},
 		ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0,
@@ -76,8 +91,6 @@ func TestDecide_ThresholdBoundary(t *testing.T) {
 	d, err := Decide(below)
 	mustNoAction(t, d, err, "below-threshold")
 
-	// utilization == 90 -> triggers (not "< threshold"), and account 2 has
-	// enough headroom (100) to clear the hysteresis margin, so it switches.
 	at := below
 	at.Accounts = []provider.AccountRow{acct(1, "a@x", 90.0, ""), acct(2, "b@x", 0, "")}
 	d, err = Decide(at)
@@ -87,13 +100,7 @@ func TestDecide_ThresholdBoundary(t *testing.T) {
 // --- 안티 플랩 1: hysteresis_pct 경계 (< vs ==) --------------------------
 
 func TestDecide_HysteresisBoundary(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300}
-	// active headroom = 100-95 = 5. Candidate headroom must be >= 5+10 = 15
-	// to qualify (autoswitch.py:1861: `h - active_headroom < hysteresis_pct`
-	// rejects; NOT rejecting on equality means qualifying at exactly 15).
-	// Neither account is all-above-threshold here (candidate utilization
-	// 85 < 90), so this exercises the plain hysteresis gate, not the
-	// recovery escape.
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300, UnhealthyTicks: 3}
 	qualifies := Input{
 		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), acct(2, "b@x", 85, "")}, // headroom 15
 		ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0,
@@ -101,7 +108,6 @@ func TestDecide_HysteresisBoundary(t *testing.T) {
 	d, err := Decide(qualifies)
 	mustSwitch(t, d, err, 2)
 
-	// headroom 14.999 (one thousandth under the margin) -> rejected.
 	rejects := qualifies
 	rejects.Accounts = []provider.AccountRow{acct(1, "a@x", 95, ""), acct(2, "b@x", 85.001, "")}
 	d, err = Decide(rejects)
@@ -111,25 +117,19 @@ func TestDecide_HysteresisBoundary(t *testing.T) {
 // --- 안티 플랩 2: cooldown_seconds 경계 (< vs ==) -------------------------
 
 func TestDecide_CooldownBoundary(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 120}
-	accounts := []provider.AccountRow{acct(1, "a@x", 95, ""), acct(2, "b@x", 80, "")} // headroom 20, clears margin easily
-	// exactly 120s since last switch: `(now-last) < cooldown` is false at
-	// equality (autoswitch.py:2123-2127) -> cooldown has ended, switch allowed.
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 120, UnhealthyTicks: 3}
+	accounts := []provider.AccountRow{acct(1, "a@x", 95, ""), acct(2, "b@x", 80, "")}
 	last := t0.Add(-120 * time.Second)
 	in := Input{Accounts: accounts, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0, LastSwitchAt: &last}
 	d, err := Decide(in)
 	mustSwitch(t, d, err, 2)
 
-	// 119s since last switch: still in cooldown -> NoAction.
 	last2 := t0.Add(-119 * time.Second)
 	in2 := in
 	in2.LastSwitchAt = &last2
 	d, err = Decide(in2)
 	mustNoAction(t, d, err, "cooldown")
 
-	// at-limit (headroom<=0) bypasses cooldown entirely (module docstring
-	// autoswitch.py:17, "bypassed only when the active account is hard at
-	// its limit").
 	atLimit := []provider.AccountRow{acct(1, "a@x", 100, ""), acct(2, "b@x", 80, "")}
 	in3 := Input{Accounts: atLimit, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0, LastSwitchAt: &last2}
 	d, err = Decide(in3)
@@ -142,14 +142,7 @@ func TestDecide_CooldownBoundary(t *testing.T) {
 // --- 안티 플랩 3: 전원 임계 초과 탈출(_recovery_is_useful) 및 전원 소진 --
 
 func TestDecide_RecoveryEscape(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0}
-	// Both active and the candidate are ABOVE the threshold (headroom 5 each,
-	// utilization 95 >= 90) -> all_above engages, ranking switches to the
-	// recovery axis (autoswitch.py:1793-1845). Active's five_hour resets in
-	// 10h (outside the 4h RecoveryHorizonS); candidate's resets in 2h
-	// (inside it) -> recoveryIsUseful is true for the candidate via the
-	// horizon clause alone (headroom 5 > SpentHeadroomPct 3, so the "both
-	// spent" branch does not apply).
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
 	activeResets := t0.Add(10 * time.Hour).Format(time.RFC3339)
 	candResets := t0.Add(2 * time.Hour).Format(time.RFC3339)
 	escapes := Input{
@@ -165,11 +158,6 @@ func TestDecide_RecoveryEscape(t *testing.T) {
 		t.Fatalf("trigger = %q, want proactive", d.Trigger)
 	}
 
-	// Recovery hysteresis boundary: candidate must clear
-	// activeRecoveryTs-300s STRICTLY (autoswitch.py:1829: `recovery_ts >=
-	// active_recovery_ts - RECOVERY_HYSTERESIS_S` rejects on >=). Pick an
-	// active reset 10000s out and a candidate reset exactly 300s sooner
-	// (9700s out) -> rejected (boundary is inclusive against the candidate).
 	activeAt := t0.Add(10000 * time.Second).Format(time.RFC3339)
 	candAtBoundary := t0.Add(9700 * time.Second).Format(time.RFC3339) // == active-300, rejected
 	boundary := Input{
@@ -182,7 +170,6 @@ func TestDecide_RecoveryEscape(t *testing.T) {
 	d, err = Decide(boundary)
 	mustBlocked(t, d, err, "no-qualifying-candidate")
 
-	// One second sooner clears the margin -> switches.
 	candAtPass := t0.Add(9699 * time.Second).Format(time.RFC3339)
 	pass := boundary
 	pass.Accounts = []provider.AccountRow{
@@ -192,8 +179,6 @@ func TestDecide_RecoveryEscape(t *testing.T) {
 	d, err = Decide(pass)
 	mustSwitch(t, d, err, 2)
 
-	// Truly exhausted (every account, active included, at headroom<=0) ->
-	// BLOCKED "all-exhausted" -> ResultCode 3 (전원 소진 시 코드 3).
 	exhausted := Input{
 		Accounts: []provider.AccountRow{
 			acct(1, "a@x", 100, ""),
@@ -208,7 +193,7 @@ func TestDecide_RecoveryEscape(t *testing.T) {
 	}
 }
 
-// --- 격리: relogin_required는 격리, token_expired는 격리 아님 ------------
+// --- 격리 판정 (ShouldQuarantine): relogin_required만 격리 ---------------
 
 func TestShouldQuarantine_ReloginVsExpired(t *testing.T) {
 	if !ShouldQuarantine(seatusage.StatusReloginRequired) {
@@ -222,8 +207,8 @@ func TestShouldQuarantine_ReloginVsExpired(t *testing.T) {
 	}
 }
 
-func TestDecide_QuarantineSweep(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0}
+func TestDecide_NewQuarantineSweep(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
 	dead := acct(2, "dead@x", 0, "")
 	dead.UsageStatus = seatusage.StatusReloginRequired
 	dead.Usage = nil // contract C4: usage==null alongside relogin_required
@@ -238,34 +223,198 @@ func TestDecide_QuarantineSweep(t *testing.T) {
 	}
 	d, err := Decide(in)
 	mustSwitch(t, d, err, 4)
-	if len(d.NewQuarantine) != 1 || d.NewQuarantine[0].Number != "2" {
-		t.Fatalf("NewQuarantine = %+v, want exactly slot 2", d.NewQuarantine)
+	if len(d.NewQuarantine) != 1 || d.NewQuarantine[0].AccountKey != key("dead@x") {
+		t.Fatalf("NewQuarantine = %+v, want exactly dead@x's key", d.NewQuarantine)
 	}
 	if len(d.Released) != 0 {
 		t.Fatalf("Released = %+v, want none", d.Released)
 	}
+}
 
-	// Release: slot 2 was quarantined last tick, but its status has since
-	// recovered to "ok" -> released and eligible again.
-	recovered := acct(2, "dead@x", 30, "") // headroom 70, best target now
-	in2 := Input{
-		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), recovered, expired, healthy},
+// --- C1 회귀: 격리 해제는 지문/계정교체로만, 상태 회복만으로는 해제 금지 --
+
+func TestDecide_QuarantineRelease_StatusAloneDoesNotRelease(t *testing.T) {
+	// The account is quarantined; its usageStatus has since gone back to
+	// "ok" (e.g. it simply stopped being fetched, or P4 reported something
+	// other than relogin_required this tick) but NEITHER its email nor its
+	// fingerprint changed. Review C1: this must NOT release the quarantine
+	// — a dead refresh-token lineage does not heal itself just because the
+	// reported status changed.
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+	recoveredStatus := acct(2, "dead@x", 30, "") // headroom 70 if it were a candidate
+	recoveredStatus.UsageStatus = "ok"
+	healthy := acct(3, "healthy@x", 80, "") // headroom 20
+
+	in := Input{
+		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), recoveredStatus, healthy},
 		ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0,
-		Quarantine: map[string]QuarantineEntry{"2": {Email: "dead@x"}},
+		Quarantine: map[string]QuarantineEntry{
+			key("dead@x"): {Email: "dead@x", Reason: "relogin_required", RefreshTokenFingerprint: "fp-1"},
+		},
+		// No Fingerprints supplied -> "not computed this tick", so the
+		// fingerprint check alone can never release (see ShouldRelease doc).
 	}
-	d, err = Decide(in2)
-	mustSwitch(t, d, err, 2) // 70 headroom beats healthy's 20
-	if len(d.Released) != 1 || d.Released[0].Number != "2" {
-		t.Fatalf("Released = %+v, want exactly slot 2", d.Released)
+	d, err := Decide(in)
+	// account 2 (headroom 70) must NOT be selected — it stays quarantined,
+	// so the only candidate is account 3 (headroom 20).
+	mustSwitch(t, d, err, 3)
+	if len(d.Released) != 0 {
+		t.Fatalf("Released = %+v, want none (status recovery alone must not release, review C1)", d.Released)
 	}
+}
+
+func TestDecide_QuarantineRelease_FingerprintChanged(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+	replaced := acct(2, "dead@x", 30, "") // headroom 70, best target once released
+	in := Input{
+		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), replaced, acct(3, "healthy@x", 80, "")},
+		ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0,
+		Quarantine: map[string]QuarantineEntry{
+			key("dead@x"): {Email: "dead@x", Reason: "relogin_required", RefreshTokenFingerprint: "old-fp"},
+		},
+		Fingerprints: map[string]string{key("dead@x"): "new-fp"},
+	}
+	d, err := Decide(in)
+	mustSwitch(t, d, err, 2) // released and picked: headroom 70 beats account 3's 20
+	if len(d.Released) != 1 || d.Released[0].Reason != "credentials-replaced" {
+		t.Fatalf("Released = %+v, want exactly one credentials-replaced entry", d.Released)
+	}
+}
+
+func TestDecide_QuarantineRelease_AccountRemoved(t *testing.T) {
+	// The quarantined slot no longer appears in Accounts at all (removed
+	// from the pool) -> released as "account-replaced" (review 발견물: a
+	// removed account's quarantine entry must not persist forever).
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+	in := Input{
+		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), acct(3, "healthy@x", 80, "")},
+		ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0,
+		Quarantine: map[string]QuarantineEntry{
+			key("gone@x"): {Email: "gone@x", Reason: "relogin_required"},
+		},
+	}
+	d, err := Decide(in)
+	mustSwitch(t, d, err, 3)
+	if len(d.Released) != 1 || d.Released[0].Reason != "account-replaced" {
+		t.Fatalf("Released = %+v, want exactly one account-replaced entry", d.Released)
+	}
+}
+
+// --- C2 회귀: unhealthy_ticks 페일오버로 영구 동결 탈출 -------------------
+
+func TestDecide_UnhealthyTicksFailover(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+	unreadableActive := provider.AccountRow{Number: 1, Email: "a@x", UsageStatus: "unavailable", Usage: nil}
+	healthy := acct(2, "b@x", 50, "") // headroom 50, clearly healthy
+
+	accounts := []provider.AccountRow{unreadableActive, healthy}
+
+	// tick 1: 0 -> 1, still below UnhealthyTicks(3) -> NoAction.
+	d, err := Decide(Input{Accounts: accounts, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0, ConsecutiveUnhealthyTicks: 0})
+	mustNoAction(t, d, err, "active-usage-unknown")
+	if d.UnhealthyTicks != 1 || d.Detail != "1/3 before failover" {
+		t.Fatalf("tick1 UnhealthyTicks/Detail = %d/%q, want 1/\"1/3 before failover\"", d.UnhealthyTicks, d.Detail)
+	}
+
+	// tick 2: 1 -> 2, still below threshold -> NoAction.
+	d, err = Decide(Input{Accounts: accounts, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0, ConsecutiveUnhealthyTicks: 1})
+	mustNoAction(t, d, err, "active-usage-unknown")
+	if d.UnhealthyTicks != 2 {
+		t.Fatalf("tick2 UnhealthyTicks = %d, want 2", d.UnhealthyTicks)
+	}
+
+	// tick 3: 2 -> 3, reaches UnhealthyTicks(3) -> failover, escapes to the
+	// healthy candidate. This is the exact scenario review C2 flagged as a
+	// permanent freeze in the first version (exit code 2 forever, never
+	// escalating) — must now switch.
+	d, err = Decide(Input{Accounts: accounts, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0, ConsecutiveUnhealthyTicks: 2})
+	mustSwitch(t, d, err, 2)
+	if d.Trigger != "failover" {
+		t.Fatalf("trigger = %q, want failover", d.Trigger)
+	}
+	if d.UnhealthyTicks != 3 {
+		t.Fatalf("tick3 UnhealthyTicks = %d, want 3", d.UnhealthyTicks)
+	}
+
+	// Once the active account's usage becomes readable again, the counter
+	// resets to 0 (autoswitch.py:941).
+	readableAgain := acct(1, "a@x", 50, "")
+	d, err = Decide(Input{Accounts: []provider.AccountRow{readableAgain, healthy}, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0, ConsecutiveUnhealthyTicks: 2})
+	mustNoAction(t, d, err, "below-threshold")
+	if d.UnhealthyTicks != 0 {
+		t.Fatalf("UnhealthyTicks after recovery = %d, want 0", d.UnhealthyTicks)
+	}
+}
+
+// --- C3 회귀: next-available은 tick 전략이 아니라 명시적으로 거부 --------
+
+func TestDecide_NextAvailableRejected(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+	in := Input{
+		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), acct(2, "b@x", 50, "")},
+		ActiveNumber: 1, Strategy: StrategyNextAvailable, Policy: pol, Now: t0,
+	}
+	d, err := Decide(in)
+	if !errors.Is(err, ErrNextAvailableIsManualOnly) {
+		t.Fatalf("err = %v, want ErrNextAvailableIsManualOnly", err)
+	}
+	if d.Outcome != OutcomeNoAction || d.To != nil || d.From != nil || len(d.Events) != 0 {
+		t.Fatalf("d = %+v, want zero Decision on rejection", d)
+	}
+	if d.ResultCode(err) != CodeError {
+		t.Fatalf("ResultCode = %d, want CodeError", d.ResultCode(err))
+	}
+}
+
+// --- C3: consume-first 전략 이식 -----------------------------------------
+
+func TestDecide_ConsumeFirstStrategy(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+
+	// Below threshold (util 50 < 90), but consume-first still evaluates:
+	// the candidate's weekly window resets sooner than the active's ->
+	// switches, trigger "consume-first".
+	activeReset := t0.Add(100000 * time.Second).Format(time.RFC3339)
+	soonerReset := t0.Add(50000 * time.Second).Format(time.RFC3339)
+	sooner := Input{
+		Accounts: []provider.AccountRow{
+			{Number: 1, Email: "a@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, activeReset)},
+			{Number: 2, Email: "b@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, soonerReset)},
+		},
+		ActiveNumber: 1, Strategy: StrategyConsumeFirst, Policy: pol, Now: t0,
+	}
+	d, err := Decide(sooner)
+	mustSwitch(t, d, err, 2)
+	if d.Trigger != "consume-first" {
+		t.Fatalf("trigger = %q, want consume-first", d.Trigger)
+	}
+
+	// Candidate resets LATER than active -> stays (NoAction, not Blocked —
+	// this is a healthy hold, not an exhaustion state, autoswitch.py:
+	// 1224-1230).
+	laterReset := t0.Add(200000 * time.Second).Format(time.RFC3339)
+	later := sooner
+	later.Accounts = []provider.AccountRow{
+		{Number: 1, Email: "a@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, activeReset)},
+		{Number: 2, Email: "b@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, laterReset)},
+	}
+	d, err = Decide(later)
+	mustNoAction(t, d, err, "already-consuming-soonest")
+
+	// Active's own weekly reset is unknown -> "reset-unknown", NoAction.
+	unknown := sooner
+	unknown.Accounts = []provider.AccountRow{
+		{Number: 1, Email: "a@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, "")},
+		{Number: 2, Email: "b@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, soonerReset)},
+	}
+	d, err = Decide(unknown)
+	mustNoAction(t, d, err, "reset-unknown")
 }
 
 // --- 선택 전략 결정성(동점 처리) ------------------------------------------
 
 func TestDecide_StrategyDeterminism(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0}
-	// Two candidates tied on headroom (both 40) -> "best" must deterministically
-	// pick the lower account Number every time (decide.go's sort tie-break).
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
 	tie := Input{
 		Accounts: []provider.AccountRow{
 			acct(1, "a@x", 95, ""),
@@ -279,27 +428,22 @@ func TestDecide_StrategyDeterminism(t *testing.T) {
 		mustSwitch(t, d, err, 2)
 	}
 
-	// next-available: rotation order (skip active, wrap), ignores headroom
-	// entirely except to skip proven-exhausted slots -> always account 2
-	// (the next slot after 1), even though 3 has identical headroom.
-	tie.Strategy = StrategyNextAvailable
+	// consume-first tie: two candidates with the identical weekly reset ->
+	// deterministic tie-break by account Number.
+	sameReset := t0.Add(50000 * time.Second).Format(time.RFC3339)
+	activeReset := t0.Add(100000 * time.Second).Format(time.RFC3339)
+	cfTie := Input{
+		Accounts: []provider.AccountRow{
+			{Number: 1, Email: "a@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, activeReset)},
+			{Number: 3, Email: "c@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, sameReset)},
+			{Number: 2, Email: "b@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, sameReset)},
+		},
+		ActiveNumber: 1, Strategy: StrategyConsumeFirst, Policy: pol, Now: t0,
+	}
 	for i := 0; i < 5; i++ {
-		d, err := Decide(tie)
+		d, err := Decide(cfTie)
 		mustSwitch(t, d, err, 2)
 	}
-
-	// next-available skips a proven-exhausted next slot and wraps to the
-	// next non-exhausted one.
-	exhaustedNext := Input{
-		Accounts: []provider.AccountRow{
-			acct(1, "a@x", 95, ""),
-			acct(2, "b@x", 100, ""), // headroom 0 -> skipped
-			acct(3, "c@x", 60, ""),
-		},
-		ActiveNumber: 1, Strategy: StrategyNextAvailable, Policy: pol, Now: t0,
-	}
-	d, err := Decide(exhaustedNext)
-	mustSwitch(t, d, err, 3)
 }
 
 // --- 결과 코드 매핑 4종 ---------------------------------------------------
@@ -337,7 +481,7 @@ func (*testError) Error() string { return "boom" }
 // clears the 10-point margin (14-5=9 < 10; 12-5=7 < 10) -> BLOCKED,
 // no-qualifying-candidate, active stays account 1.
 func TestDecide_GoldenHysteresisMarginBlocks(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300}
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300, UnhealthyTicks: 3}
 	in := Input{
 		Accounts: []provider.AccountRow{
 			acct(1, "a@x", 95, ""),
@@ -357,7 +501,7 @@ func TestDecide_GoldenHysteresisMarginBlocks(t *testing.T) {
 // passes per the hysteresis boundary rule); candidate 3 at five_hour 95%
 // (headroom 5, 5-1=4 < 10, rejected). Switches to account 2.
 func TestDecide_GoldenIssue115StrictlyBetterCandidateSwitches(t *testing.T) {
-	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300}
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 300, UnhealthyTicks: 3}
 	in := Input{
 		Accounts: []provider.AccountRow{
 			{Number: 1, Email: "a@x", UsageStatus: "ok", Usage: &provider.Usage{

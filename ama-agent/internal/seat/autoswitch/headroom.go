@@ -77,6 +77,25 @@ func bindingRecoveryTs(u *provider.Usage, now time.Time) float64 {
 	return float64(ts.Unix())
 }
 
+// sevenDayResetTs is the Go port of autoswitch.py:514-533
+// (_seven_day_reset_ts): the epoch seconds of an account's seven-day
+// (weekly) window reset, or nil when unknown or already past `now`. Used
+// only by StrategyConsumeFirst's ranking (review C3) — the weekly window is
+// the "perishable" quota consume-first plans around; the five-hour window
+// recycles too fast to be worth planning around (same rationale the
+// original states).
+func sevenDayResetTs(u *provider.Usage, now time.Time) *float64 {
+	if u == nil || u.SevenDay == nil || u.SevenDay.ResetsAt == "" {
+		return nil
+	}
+	ts, err := time.Parse(time.RFC3339, u.SevenDay.ResetsAt)
+	if err != nil || !ts.After(now) {
+		return nil
+	}
+	v := float64(ts.Unix())
+	return &v
+}
+
 // recoveryIsUseful is a direct, unmodified port of autoswitch.py:129-216
 // (_recovery_is_useful) — see that docstring for the full incident history
 // this closes (47 credential rewrites over 3.9h on frozen inputs, the #202

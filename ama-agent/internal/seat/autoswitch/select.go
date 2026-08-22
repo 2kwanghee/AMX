@@ -8,43 +8,45 @@ import (
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 )
 
-// qualified is one candidate that cleared the hysteresis/recovery gate in
-// selectBest, tagged with the axis it qualified on for the tiered sort
-// below.
-type qualified struct {
-	acct       provider.AccountRow
-	headroom   float64
-	byRecovery bool
-	recoveryTs float64
+// ranked is one candidate that survived filtering, carrying a (tier,
+// primary, secondary) sort key. Ascending sort on (tier, primary,
+// secondary, Number) reproduces tsamx's tuple-key `.sort()` exactly —
+// Python tuple comparison is lexicographic, which Go's multi-field
+// less-than replicates field by field.
+type ranked struct {
+	acct               provider.AccountRow
+	tier               int
+	primary, secondary float64
 }
 
-// selectBest ports the "best" ranking of autoswitch.py:1773-1928
-// (_rank_candidates, restricted to the "proactive"/"at-limit" triggers this
-// package implements — see package doc for what's excluded: consume-first,
-// the no-return bar, and the fallback re-admission list).
+// selectCandidate ports the ranking half of autoswitch.py's tick — the
+// filtering block at autoswitch.py:1773-1862 and the sort-key block at
+// autoswitch.py:1863-1898 (_rank_candidates) — restricted to the two
+// strategies and two gated triggers this package implements (see package
+// doc: no consume-first two-phase commit, no no-return bar, no API-key
+// fallback, no unhealthy-tick idle-hold nuance).
 //
-// Steps, matching the original 1:1:
-//  1. Any candidate with unreadable usage is excluded from ranking but does
-//     not by itself block the tick (autoswitch.py:1776-1780).
-//  2. If NO candidate is readable at all -> "no-comparison" (BLOCKED, not
-//     NoAction — autoswitch.py:1190-1200 already crossed the threshold gate
-//     by this point).
-//  3. _every_account_above_threshold (autoswitch.py:570-590): when active
-//     AND every readable candidate are at/over threshold, ranking switches
-//     to the recovery axis via recoveryIsUseful per candidate
-//     (autoswitch.py:1793-1845).
-//  4. Otherwise, plain headroom + HysteresisPct gate
-//     (autoswitch.py:1857-1862).
-//  5. Winner: recovery-axis qualifiers rank before headroom-axis ones
-//     (tiered, autoswitch.py:1863-1928); within a tier, soonest recovery or
-//     highest headroom wins; ties break on account Number ascending (this
-//     package has no separate sequence.json order to fall back to, unlike
-//     autoswitch.py:1877's "sequence order" — documented simplification).
-//  6. No qualifier: "all-exhausted" (every candidate readable and <=0
-//     headroom, autoswitch.py:1238-1240) vs "no-qualifying-candidate"
-//     (autoswitch.py:1241-1252) — both BLOCKED.
-func selectBest(active provider.AccountRow, activeHeadroom float64, candidates []provider.AccountRow, pol Policy, now time.Time) (*provider.AccountRow, string, string) {
+// trigger is "proactive" | "at-limit" | "consume-first" | "failover"
+// (decide.go). strategy is StrategyBest or StrategyConsumeFirst (Decide
+// rejects anything else before calling this). The two axes are
+// independent, matching the original's independent `if trigger in (...)`
+// (filtering) and `if all_above and trigger in (...) / elif consume_first`
+// (sort key) chains:
+//
+//   - "proactive"/"consume-first" triggers are GATED: a candidate must not
+//     itself land at/over threshold (landing check, skipped when
+//     all_above), and then either the all_above recovery escape, the
+//     consume-first reset-ordering, or the best hysteresis gate applies.
+//   - "at-limit"/"failover" triggers are an ESCAPE: any candidate with
+//     headroom>0 qualifies outright (autoswitch.py's comment at :1795-1797,
+//     "any account with real headroom beats a blocked or dead one") — but
+//     the SORT ORDER among qualifiers still honors StrategyConsumeFirst
+//     (autoswitch.py:1888's `elif consume_first` is NOT itself
+//     trigger-gated, so even an escape ranks by soonest weekly reset under
+//     that strategy).
+func selectCandidate(active provider.AccountRow, activeHeadroom float64, candidates []provider.AccountRow, pol Policy, now time.Time, trigger string, strategy Strategy) (*provider.AccountRow, string, string) {
 	nowTs := float64(now.Unix())
+	consumeFirst := strategy == StrategyConsumeFirst
 
 	type known struct {
 		acct     provider.AccountRow
@@ -64,57 +66,104 @@ func selectBest(active provider.AccountRow, activeHeadroom float64, candidates [
 		return nil, "no-comparison", "no candidate has readable usage"
 	}
 
-	// _every_account_above_threshold (autoswitch.py:570-590): active is
-	// already known >= threshold by construction (Decide's gate already
-	// checked utilization >= ThresholdPct before calling selectBest).
-	allAbove := len(all) > 0
-	for _, k := range all {
-		if (100.0 - k.headroom) < pol.ThresholdPct {
-			allAbove = false
-			break
+	gated := trigger == "proactive" || trigger == "consume-first"
+
+	var allAbove bool
+	var bestCandidateHeadroom, activeRecoveryTs float64
+	var activeResetTs *float64
+	if gated {
+		// _every_account_above_threshold (autoswitch.py:570-590). The active
+		// account is already known >= threshold whenever trigger=="proactive"
+		// (Decide's gate ensured it); for trigger=="consume-first" the active
+		// may be BELOW threshold, in which case allAbove is force-false below
+		// (matches the original: active_headroom's own utilization must be
+		// >= threshold for allAbove to ever be true).
+		allAbove = (100.0-activeHeadroom) >= pol.ThresholdPct && len(all) > 0
+		for _, k := range all {
+			if (100.0 - k.headroom) < pol.ThresholdPct {
+				allAbove = false
+			}
+			if k.headroom > bestCandidateHeadroom {
+				bestCandidateHeadroom = k.headroom
+			}
+		}
+		if allAbove {
+			activeRecoveryTs = bindingRecoveryTs(active.Usage, now)
+		}
+		if consumeFirst {
+			activeResetTs = sevenDayResetTs(active.Usage, now)
 		}
 	}
 
-	bestCandidateHeadroom := 0.0
-	for _, k := range all {
-		if k.headroom > bestCandidateHeadroom {
-			bestCandidateHeadroom = k.headroom
-		}
-	}
-
-	var activeRecoveryTs float64
-	if allAbove {
-		activeRecoveryTs = bindingRecoveryTs(active.Usage, now)
-	}
-
-	var qualifying []qualified
+	var qualifying []ranked
 	for _, k := range all {
 		if k.headroom <= 0 {
 			continue // itself at its limit — never a target (autoswitch.py:1781-1782)
 		}
-		if allAbove {
+
+		if !gated {
+			// Escape (at-limit/failover): unconditional qualification, sort
+			// order alone depends on strategy (autoswitch.py:1888,1893).
+			if consumeFirst {
+				rt := math.Inf(1)
+				if ts := sevenDayResetTs(k.acct.Usage, now); ts != nil {
+					rt = *ts
+				}
+				qualifying = append(qualifying, ranked{k.acct, 0, rt, -k.headroom})
+			} else {
+				qualifying = append(qualifying, ranked{k.acct, 0, -k.headroom, 0})
+			}
+			continue
+		}
+
+		// Gated (proactive/consume-first trigger): landing check first
+		// (autoswitch.py:1798), void whenever allAbove (comment at :1799-1804).
+		if (100.0-k.headroom) >= pol.ThresholdPct && !allAbove {
+			continue
+		}
+		switch {
+		case allAbove:
 			candRecoveryTs := bindingRecoveryTs(k.acct.Usage, now)
 			byRecovery := recoveryIsUseful(candRecoveryTs, activeRecoveryTs, activeHeadroom, bestCandidateHeadroom, nowTs)
 			if byRecovery {
 				if candRecoveryTs >= activeRecoveryTs-RecoveryHysteresisS {
 					continue
 				}
-				qualifying = append(qualifying, qualified{k.acct, k.headroom, true, candRecoveryTs})
+				qualifying = append(qualifying, ranked{k.acct, 0, candRecoveryTs, -k.headroom})
 			} else {
 				if k.headroom < activeHeadroom*HorizonHeadroomRatio {
 					continue
 				}
-				qualifying = append(qualifying, qualified{k.acct, k.headroom, false, candRecoveryTs})
+				qualifying = append(qualifying, ranked{k.acct, 1, -k.headroom, candRecoveryTs})
 			}
-			continue
+		case consumeFirst:
+			candResetTs := sevenDayResetTs(k.acct.Usage, now)
+			if candResetTs == nil || activeResetTs == nil || *candResetTs >= *activeResetTs {
+				continue
+			}
+			qualifying = append(qualifying, ranked{k.acct, 0, *candResetTs, -k.headroom})
+		default: // best, not all_above
+			if k.headroom-activeHeadroom < pol.HysteresisPct {
+				continue
+			}
+			qualifying = append(qualifying, ranked{k.acct, 0, -k.headroom, 0})
 		}
-		if k.headroom-activeHeadroom < pol.HysteresisPct {
-			continue
-		}
-		qualifying = append(qualifying, qualified{k.acct, k.headroom, false, 0})
 	}
 
 	if len(qualifying) == 0 {
+		// trigger=="consume-first" reasons are NoAction-shaped, distinct
+		// from the BLOCKED reasons below — this distinction is keyed on the
+		// TRIGGER STRING, not the strategy (autoswitch.py:1201-1230): a
+		// below-threshold consume-first nudge finding nothing is healthy
+		// (stay put), while an above-threshold "proactive" trigger under
+		// consume-first strategy finding nothing is the same real problem
+		// best-strategy has (BLOCKED).
+		if trigger == "consume-first" {
+			if activeResetTs == nil {
+				return nil, "reset-unknown", "active account's weekly reset time is unknown; consume-first is idle until it is reported"
+			}
+			return nil, "already-consuming-soonest", "no sooner-resetting account with room to spare"
+		}
 		truly := true
 		for _, c := range candidates {
 			h := accountHeadroom(c.Usage)
@@ -131,62 +180,21 @@ func selectBest(active provider.AccountRow, activeHeadroom float64, candidates [
 
 	sort.Slice(qualifying, func(i, j int) bool {
 		a, b := qualifying[i], qualifying[j]
-		if a.byRecovery != b.byRecovery {
-			return a.byRecovery
+		if a.tier != b.tier {
+			return a.tier < b.tier
 		}
-		if a.byRecovery {
-			if a.recoveryTs != b.recoveryTs {
-				return a.recoveryTs < b.recoveryTs
-			}
-		} else if a.headroom != b.headroom {
-			return a.headroom > b.headroom
+		if a.primary != b.primary {
+			return a.primary < b.primary
 		}
+		if a.secondary != b.secondary {
+			return a.secondary < b.secondary
+		}
+		// No separate sequence.json order in this package (see package
+		// doc) — account Number ascending is the deterministic tie-break.
 		return a.acct.Number < b.acct.Number
 	})
 	winner := qualifying[0].acct
 	return &winner, "", ""
-}
-
-// selectNextAvailable ports switcher.py's `switch --strategy next-available`
-// rotation (switcher.py:4617-4722): starting after the active account's
-// slot, wrap through candidates in ascending Number order, skip any account
-// whose headroom is KNOWN and <=0 (switcher.py:4663-4666 — an UNKNOWN
-// headroom is NOT skipped, unlike selectBest, matching the original's
-// asymmetry: next-available only proves exhaustion, it never requires
-// proof of health).
-func selectNextAvailable(activeNumber int, candidates []provider.AccountRow) (*provider.AccountRow, string) {
-	ordered := rotateFrom(candidates, activeNumber)
-	skippedExhausted := false
-	for _, c := range ordered {
-		h := accountHeadroom(c.Usage)
-		if h != nil && *h <= 0 {
-			skippedExhausted = true
-			continue
-		}
-		cc := c
-		return &cc, ""
-	}
-	if skippedExhausted {
-		return nil, "candidates-exhausted"
-	}
-	return nil, "no-valid-target"
-}
-
-// rotateFrom orders candidates (already ascending by Number) as "next after
-// activeNumber, wrapping around" — the same rotation switcher.py computes
-// via `(current_index+offset) % len(sequence)` (switcher.py:4643-4644),
-// expressed directly on candidate Numbers since this package receives a
-// snapshot rather than tsamx's persisted sequence.json slot order.
-func rotateFrom(candidates []provider.AccountRow, activeNumber int) []provider.AccountRow {
-	var after, before []provider.AccountRow
-	for _, c := range candidates {
-		if c.Number > activeNumber {
-			after = append(after, c)
-		} else {
-			before = append(before, c)
-		}
-	}
-	return append(after, before...)
 }
 
 // earliestRecoveryTs is a narrowed port of autoswitch.py:2173-2207

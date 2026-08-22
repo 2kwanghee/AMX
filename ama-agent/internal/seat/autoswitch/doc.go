@@ -22,24 +22,40 @@
 //
 // # What was ported vs. deliberately narrowed
 //
-// tsamx's real tick() (autoswitch.py:843-1266) also implements a
-// "consume-first" strategy, an unhealthy-ticks failover counter, live-session
-// skip, API-key candidate fallback, and a "no-return account" bar keyed on
-// cross-tick state (lastSwitchFrom/leftHeadroom/leftRecoveryAt). None of
-// those are in this package: the task instructing this port scoped it to
-// "판정 로직만", inputs "전부 인자로" (no persisted per-tick memory beyond
-// what the caller already tracks: lastSwitchAt and the quarantine set), and
-// two selection strategies literally named after contract C1's
-// `switch --strategy best|next-available` rather than tsamx's tick triggers.
-// Decide therefore reinterprets "best"/"next-available" as the STRATEGY the
-// threshold/hysteresis/cooldown-gated engine uses to pick a target once a
-// switch is warranted — best ports the proactive ranking in
-// autoswitch.py:1773-1928 (hysteresis + the all-above recovery escape);
-// next-available ports switcher.py's rotate-skip-exhausted CLI strategy
-// (switcher.py:4617-4722) as the alternative ranking, since tsamx's tick()
-// itself never offers a rotation-style auto-switch strategy. This is P5b's
-// own synthesis, not a line-for-line port — flagged here rather than left
-// implicit, per the project's code-truth-verification discipline.
+// # Corrected in review (round 2)
+//
+// The FIRST version of this package wrongly reused contract C1's manual
+// `switch --strategy best|next-available` literals as the tick-strategy
+// vocabulary, and had no unhealthy-ticks failover. Both were review
+// findings (C2 critical, C3 major) fixed in this revision:
+//
+//   - Strategy is now StrategyBest | StrategyConsumeFirst, matching tsamx's
+//     REAL tick-strategy field (AutoSwitchSettings.strategy, settings.py:
+//     47-50, `"best"` or `"consume-first"`). StrategyConsumeFirst ports
+//     autoswitch.py's soonest-weekly-reset ranking (autoswitch.py:1846-1856,
+//     1888-1891, 1201-1230's distinct NoAction-shaped "nothing to do"
+//     reasons). StrategyNextAvailable is still a named constant (contract
+//     C1's manual-switch literal) but Decide REJECTS it explicitly
+//     (ErrNextAvailableIsManualOnly) rather than reinterpreting it — see
+//     Strategy's and Decide's doc.
+//   - Policy.UnhealthyTicks + Input.ConsecutiveUnhealthyTicks/
+//     Decision.UnhealthyTicks port autoswitch.py:999-1011's failover
+//     counter: an active account whose usage stays unreadable for
+//     UnhealthyTicks consecutive calls now escapes to trigger "failover"
+//     instead of returning NoAction/exit-2 forever (the exact "pool freezes
+//     silently" failure mode 08-22's incident report describes for a
+//     different mechanism — see AMX project memory
+//     amx-pool-blind-swap-incident.md).
+//
+// tsamx's real tick() (autoswitch.py:843-1266) ALSO implements a
+// live-session skip, an API-key candidate fallback, and a "no-return
+// account" bar keyed on cross-tick state (lastSwitchFrom/leftHeadroom/
+// leftRecoveryAt) that this package still does not port — those remain out
+// of scope: the task instructing this port scoped it to "판정 로직만",
+// inputs "전부 인자로" (no persisted per-tick memory beyond what the caller
+// already tracks: lastSwitchAt, the quarantine set, and now the
+// unhealthy-ticks counter), and none of the three is load-bearing for the
+// anti-flap/quarantine/exit-code behavior the task asked to pin.
 //
 // # Quarantine
 //
@@ -57,4 +73,50 @@
 // WriteState/ReadState persist quarantine at a path this package owns
 // exclusively (StatePath) — never tsamx's autoswitch_state.json. See
 // StatePath's doc for why sharing that file would be unsafe.
+//
+// # 합류 설계 (review C4) — NOT implemented in this commit
+//
+// A second P5 track (branch feat/seat-engine-p5, internal/seat/usage/
+// store.go — not merged into this branch) already implements its own
+// account-health ledger: Store.Entry.TokenDead() (AuthDeadStrikes >=
+// AuthDeadStrikesThreshold, store.go:118-124,285-289) and
+// Store.ClearDeadToken (store.go:667-677). This package's QuarantineEntry
+// map is a SEPARATE ledger. Both exist today; they are not merged here
+// because P5-a is still under active development (its own store.go:670-676
+// comment already anticipates this: "not... the P5 AutoSwitch engine's
+// separate quarantine STATE FILE... that file does not exist yet").
+// Reconciling them is future work, not this commit's scope — recorded here
+// so whoever does it doesn't have to rediscover the shape:
+//
+//   - Key alignment (DONE this commit): QuarantineEntry/Input.Quarantine/
+//     Input.Fingerprints are now keyed by profile.AccountKey(email), the
+//     SAME root identifier internal/seat/usage.AccountRef.AccountKey uses
+//     (store.go:157-178's storeKey composes "<provider>:<accountKey>" —
+//     this package omits the provider prefix because, like
+//     internal/seat.Switcher, an instance of this engine is expected to
+//     operate within one provider's scope at a time; joining the two only
+//     needs the accountKey half compared, or a provider prefix added here
+//     if that assumption ever changes).
+//   - Single source of truth (NOT decided here): whoever wires the two
+//     tracks together must pick ONE ledger to be authoritative for "is this
+//     account's refresh-token lineage dead" — either usage.Store.TokenDead
+//     (fed by real refresh attempts, review-precise but requires the OAuth
+//     track) or this package's ShouldQuarantine (fed by the P4 status
+//     literal alone, available today but coarser). Running both
+//     independently, as an unwired first step would, risks the "이중
+//     원장" review flagged: two quarantine judgments that can disagree
+//     with no rule for which wins.
+//   - Release unification (NOT decided here): usage.Store.ClearDeadToken
+//     resets ITS OWN AuthDeadStrikes counter when a credential is
+//     refreshed/re-staged; this package's ShouldRelease independently
+//     judges the SAME real-world event (a replaced credential) off
+//     email/fingerprint. A future join should likely have ONE of the two
+//     call the other (e.g. Decide's release sweep calling
+//     usage.Store.ClearDeadToken when it releases a quarantine, or vice
+//     versa) rather than two call sites independently detecting the same
+//     credential replacement.
+//   - Execution identifiers (DONE this commit): Decision.From/To are now
+//     *Target{Number,Email,AccountKey}, so a caller can pass To.AccountKey
+//     directly as internal/seat.Switcher.Switch's targetKey without
+//     re-deriving anything.
 package autoswitch
