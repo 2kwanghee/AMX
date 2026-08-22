@@ -813,25 +813,57 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-srv-active { border-top: 1px solid var(--canvas-border); padding-top: 9px; min-height: 20px; }
 .topo-srv-idle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--canvas-muted); }
 
-/* 계정 풀 레인 — 계정 열 오른쪽 세로 박스 2개(충전중·배급처). 자유 배치 캔버스에
-   absolute 배치되며 좌표는 TopologyView가 인라인으로 준다. gap은 LANE_GAP과 일치. */
-.topo-pool-lanes { position: absolute; display: flex; gap: 48px; z-index: 1; }
+/* 계정 풀 레인 — 계정 열 오른쪽의 독립 박스 2개(충전중·배급처). 각 레인이 자기
+   좌표·크기(x·y·w·h)를 갖고 자유 배치 캔버스에 개별 absolute 배치된다(좌표는
+   TopologyView가 인라인으로 준다). 헤더가 드래그 핸들, 우하단 그립이 리사이즈
+   핸들. kind별 --lane-accent로 충전중=warn·배급처=ok 톤을 낸다. */
 .topo-pool-lane {
-  display: flex; flex-direction: column; gap: 9px;
-  padding: 10px 11px 12px; border-radius: 13px;
-  background: color-mix(in srgb, var(--canvas-bg-3) 82%, transparent);
-  border: 1px dashed color-mix(in srgb, var(--canvas-accent) 40%, var(--canvas-border));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--canvas-accent) 8%, transparent);
+  position: absolute; display: flex; flex-direction: column; gap: 9px;
+  padding: 10px 11px 12px; border-radius: 13px; z-index: 1; touch-action: none;
+  background: color-mix(in srgb, var(--lane-accent) 5%, var(--canvas-bg-2));
+  border: 1px solid var(--canvas-border);
+  border-top: 2px solid var(--lane-accent);
+  box-shadow: 0 6px 18px rgb(0 0 0 / .22);
+  transition: border-color .12s, box-shadow .12s;
+}
+.topo-pool-lane.cooling { --lane-accent: var(--canvas-warn); }
+.topo-pool-lane.ready { --lane-accent: var(--canvas-ok); }
+.topo-pool-lane.dragging, .topo-pool-lane.resizing {
+  z-index: 5; border-color: var(--lane-accent);
+  box-shadow: 0 10px 28px rgb(0 0 0 / .4), 0 0 0 2px color-mix(in srgb, var(--lane-accent) 30%, transparent);
 }
 .topo-pool-lane-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 2px;
+  display: flex; align-items: center; gap: 7px; padding-bottom: 2px;
+  cursor: grab;
 }
+.topo-pool-lane.dragging .topo-pool-lane-head { cursor: grabbing; }
+.topo-pool-lane-icon { display: inline-flex; flex: 0 0 auto; color: var(--lane-accent); }
 .topo-pool-lane-title {
   font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
-  color: var(--canvas-ink-strong); font-weight: 700;
+  color: var(--canvas-ink-strong); font-weight: 700; flex: 1 1 auto;
+}
+.topo-pool-lane-count {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 18px;
+  padding: 0 6px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  background: color-mix(in srgb, var(--lane-accent) 20%, var(--canvas-bg-3));
+  border: 1px solid color-mix(in srgb, var(--lane-accent) 45%, var(--canvas-border));
+  color: var(--canvas-ink-strong);
 }
 .topo-pool-cards { display: flex; flex-direction: column; gap: 8px; }
+/* 사용자가 리사이즈로 고정 높이를 지정했을 때만 세로 스크롤(overflow-y auto).
+   자동 높이(기본) 상태는 원래대로 내용에 따라 늘어나 호버 툴팁이 잘리지 않는다. */
+.topo-pool-lane.fixed-h .topo-pool-cards { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .topo-pool-empty { font-size: 11px; color: var(--canvas-muted); padding: 6px 2px; }
+/* 우하단 리사이즈 그립 — 대각 줄무늬. 호버 시 강조. */
+.topo-pool-lane-resize {
+  position: absolute; right: 2px; bottom: 2px; width: 14px; height: 14px;
+  cursor: nwse-resize; touch-action: none; border-radius: 2px; opacity: .55;
+  background: linear-gradient(135deg,
+    transparent 0 38%, var(--canvas-muted) 38% 46%,
+    transparent 46% 62%, var(--canvas-muted) 62% 70%,
+    transparent 70% 100%);
+}
+.topo-pool-lane-resize:hover { opacity: 1; }
 
 /* 계정 칩 — 로봇 아바타 + 이메일 / 서브텍스트. 충전중 칩은 하단 게이지·맥동 점·툴팁. */
 .topo-pool-chip {

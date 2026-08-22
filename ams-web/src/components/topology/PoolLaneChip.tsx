@@ -1,15 +1,22 @@
 'use client';
 
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PoolAccount } from '@/lib/api-client/types';
 import { coolingProgress, coolingRemainingMs, fmtRemainingPrecise, windowLabel } from '@/lib/pool';
-import { krLabel, RobotAvatar } from '../common';
+import { Icon, krLabel, RobotAvatar } from '../common';
+import type { IconName } from '../common';
 
 // 상황판 우측 계정 풀 레인. 충전중(cooling)·배급처(ready) 두 박스로 나눠 계정 칩을
 // 세로로 쌓는다. 충전중 칩은 충전 게이지·맥동 점·호버 툴팁을 달고, 배급처 칩은
 // 창별 사용률 툴팁만 단다. AccountNode를 재사용하지 않고 얇은 전용 칩으로 그린다.
+// 레인 상자 자체는 TopologyView가 소유한 좌표(x·y·w·h)로 개별 이동·리사이즈되며,
+// 헤더가 드래그 핸들, 우하단 그립이 리사이즈 핸들을 겸한다.
 
 type LaneKind = 'cooling' | 'ready';
+type LaneRect = { x: number; y: number; w: number; h?: number };
+const LANE_ICON: Record<LaneKind, IconName> = { cooling: 'zap', ready: 'user' };
+const LANE_TITLE: Record<LaneKind, string> = { cooling: '충전중', ready: '배급처' };
 
 // 탭이 숨겨지면 틱을 멈추는 1초 시계. 충전중 칩이 있을 때만 active로 켠다
 // (PoolPanel의 CoolingClock과 동일 패턴). now=0은 아직 마운트 전(SSR 정합).
@@ -64,15 +71,27 @@ function usePaneArrivals(items: Array<{ id: string; lane: LaneKind }>): [Set<str
   return [fresh, settle];
 }
 
-// 레인 영역 전체. 충전중 칩이 있을 때만 시계를 돌린다.
+// 레인 영역 전체. 충전중 칩이 있을 때만 시계를 돌린다. 각 레인은 rects로 받은
+// 독립 좌표·크기에 absolute 배치되고, 드래그·리사이즈 시작은 TopologyView가 준
+// 핸들러(onDragStart/onResizeStart)로 위임한다.
 export function PoolLanes({
   cooling,
   ready,
-  laneWidth,
+  rects,
+  dragging,
+  resizing,
+  onDragStart,
+  onResizeStart,
+  laneRef,
 }: {
   cooling: PoolAccount[];
   ready: PoolAccount[];
-  laneWidth: number;
+  rects: Record<LaneKind, LaneRect>;
+  dragging: string | null;
+  resizing: string | null;
+  onDragStart: (kind: LaneKind) => (e: ReactPointerEvent) => void;
+  onResizeStart: (kind: LaneKind) => (e: ReactPointerEvent) => void;
+  laneRef: (kind: LaneKind) => (el: HTMLElement | null) => void;
 }) {
   const now = useCoolingClock(cooling.length > 0);
   const [fresh, settle] = usePaneArrivals([
@@ -81,34 +100,71 @@ export function PoolLanes({
   ]);
   return (
     <>
-      <PoolLaneBox title="충전중" kind="cooling" accounts={cooling} now={now} width={laneWidth} fresh={fresh} settle={settle} />
-      <PoolLaneBox title="배급처" kind="ready" accounts={ready} now={0} width={laneWidth} fresh={fresh} settle={settle} />
+      <PoolLaneBox
+        kind="cooling"
+        accounts={cooling}
+        now={now}
+        rect={rects.cooling}
+        dragging={dragging === 'lane:cooling'}
+        resizing={resizing === 'lane:cooling'}
+        onDragStart={onDragStart('cooling')}
+        onResizeStart={onResizeStart('cooling')}
+        elRef={laneRef('cooling')}
+        fresh={fresh}
+        settle={settle}
+      />
+      <PoolLaneBox
+        kind="ready"
+        accounts={ready}
+        now={0}
+        rect={rects.ready}
+        dragging={dragging === 'lane:ready'}
+        resizing={resizing === 'lane:ready'}
+        onDragStart={onDragStart('ready')}
+        onResizeStart={onResizeStart('ready')}
+        elRef={laneRef('ready')}
+        fresh={fresh}
+        settle={settle}
+      />
     </>
   );
 }
 
 function PoolLaneBox({
-  title,
   kind,
   accounts,
   now,
-  width,
+  rect,
+  dragging,
+  resizing,
+  onDragStart,
+  onResizeStart,
+  elRef,
   fresh,
   settle,
 }: {
-  title: string;
   kind: LaneKind;
   accounts: PoolAccount[];
   now: number;
-  width: number;
+  rect: LaneRect;
+  dragging: boolean;
+  resizing: boolean;
+  onDragStart: (e: ReactPointerEvent) => void;
+  onResizeStart: (e: ReactPointerEvent) => void;
+  elRef: (el: HTMLElement | null) => void;
   fresh: Set<string>;
   settle: (id: string) => void;
 }) {
   return (
-    <div className="topo-pool-lane" style={{ width }}>
-      <div className="topo-pool-lane-head">
-        <span className="topo-pool-lane-title">{title}</span>
-        <span className="topo-col-count">{accounts.length}</span>
+    <div
+      ref={elRef}
+      className={`topo-pool-lane ${kind}${rect.h != null ? ' fixed-h' : ''}${dragging ? ' dragging' : ''}${resizing ? ' resizing' : ''}`}
+      style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+    >
+      <div className="topo-pool-lane-head" onPointerDown={onDragStart}>
+        <span className="topo-pool-lane-icon" aria-hidden="true"><Icon name={LANE_ICON[kind]} size={13} /></span>
+        <span className="topo-pool-lane-title">{LANE_TITLE[kind]}</span>
+        <span className="topo-pool-lane-count">{accounts.length}</span>
       </div>
       <div className="topo-pool-cards">
         {accounts.length === 0 && <div className="topo-pool-empty">비어 있음</div>}
@@ -125,6 +181,12 @@ function PoolLaneBox({
           />
         ))}
       </div>
+      <span
+        className="topo-pool-lane-resize"
+        aria-hidden="true"
+        title="크기 조절"
+        onPointerDown={onResizeStart}
+      />
     </div>
   );
 }
