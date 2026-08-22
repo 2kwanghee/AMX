@@ -12,21 +12,46 @@
 // Env, CredentialPath). Store only owns the directory layout, the per-profile
 // lock, and the active pointer.
 //
+// Every public entry point that takes a providerKey/accountKey validates both
+// against a strict whitelist before touching the filesystem (see
+// validateProviderKey/validateAccountKey) and rejects either the provider or
+// profile directory being a symlink (rejectSymlink). Neither check is
+// airtight against a TOCTOU race with something else modifying the state
+// tree between the check and the use — that would need OS-level
+// no-follow-symlink open primitives this package does not use — but it does
+// close the concrete path-escape and symlink-redirection bugs an adversarial
+// review found in an earlier revision (a "." or ".." accountKey deleting the
+// whole state dir; a pre-planted symlink redirecting a Stage write outside
+// the store root).
+//
 // P2 is deliberately inert: nothing in cmd/ama or the tsamx bridge constructs
-// a Store. Wiring belongs to P3.
+// a Store. Wiring belongs to P3, which must also still resolve (not this
+// package's job, and deliberately not attempted here):
+//   - an email -> accountKey reverse index: AccountKey is one-way, so
+//     resolving an AMS-reported email back to "which profile is that"
+//     without re-deriving the same key requires a caller-side index this
+//     package does not keep.
+//   - unifying this package's per-profile lock with the deliver lock
+//     (`<configDir>/.amx-deliver.lock`); today the two are independent files
+//     guarding independent critical sections.
+//   - orphaned active-pointer cleanup: this package reports ErrActiveMissing
+//     but never repoints or clears the pointer itself.
+//   - PolicyGuard / owner-scope rotation policy (design note §1, §2).
 package profile
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/fslock"
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
@@ -44,13 +69,11 @@ const profilesSubdir = "profiles"
 // removing a profile can never delete the pointer that might still name it.
 const activeFileName = "active"
 
-// lockFileName is the per-profile advisory lock, deliberately distinct from
-// the deliver lock (`<configDir>/.amx-deliver.lock`, agent<->runner-wrapper
-// contract — internal/fslock doc, tsamx-rewrite-feasibility.md contract
-// table). Both files can coexist in the same config-home directory; they
-// guard different critical sections (this package's Stage/Remove vs. the
-// runner-launch/deliver race) and neither package reads the other's lock.
-const lockFileName = ".amx-profile.lock"
+// stagedMarkerName is written into a profile directory ONLY after
+// drv.StageCredential has returned successfully (see Stage/Complete). Its
+// presence is the sole signal that a profile's credential write finished
+// rather than died partway through.
+const stagedMarkerName = ".amx-profile-staged"
 
 // lockRetryBound/lockRetryInterval bound how long Stage/Remove wait on a
 // contended profile lock before giving up. Contention here means another
@@ -62,6 +85,17 @@ const lockFileName = ".amx-profile.lock"
 const (
 	lockRetryBound    = 1 * time.Second
 	lockRetryInterval = 20 * time.Millisecond
+)
+
+// providerKeyPattern whitelists the provider path component: lowercase
+// letters/digits/dot/underscore/dash, no separators of any kind. accountKeyPattern
+// matches exactly the shape AccountKey produces (64 lowercase hex chars); any
+// value that isn't shaped like a real AccountKey output is rejected rather
+// than trusted, which is what makes a hand-crafted accountKey like "." or
+// "../.." impossible to reach the filesystem layer at all.
+var (
+	providerKeyPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
+	accountKeyPattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Errors returned by GetActive. They are deliberately distinct: ErrNoActive
@@ -90,7 +124,10 @@ type Template struct {
 	// re-Create on an already-provisioned profile never clobbers a file the
 	// account may have modified since) or the source is absent in Dir (a
 	// caller may list files optimistically; a missing one is skipped, not an
-	// error — design note "템플릿이 없으면 조용히 건너뛴다").
+	// error — design note "템플릿이 없으면 조용히 건너뛴다"). A path that is
+	// absolute, escapes the profile directory via "..", or names the
+	// reserved staged-marker file is rejected as an error, not skipped —
+	// unlike a merely-absent source file, that shape is always a caller bug.
 	Files []string
 }
 
@@ -132,24 +169,159 @@ func Open(stateDir string) (*Store, error) {
 //     ASCII hex characters — no '@', no path separators, no Unicode
 //     normalization pitfalls, no OS path-length concern regardless of how
 //     long the source email is.
+//
+// KNOWN UNRESOLVED MISMATCH (P3 must resolve, not fixed here):
+// internal/store.Store.FindByProviderEmail (manifest.go) matches an account's
+// email by case-sensitive exact equality, while this function lowercases
+// before hashing. Two manifest records that differ only by email case are
+// distinct accounts to the manifest but collapse onto the SAME profile here.
+// This package deliberately does not change manifest matching (out of
+// scope, and it isn't this package's file to own); whoever wires this store
+// to real account flows must decide how the two normalization rules
+// reconcile before an email-case mismatch can silently cross-wire two
+// accounts' credentials into one profile.
 func AccountKey(email string) string {
 	norm := strings.ToLower(strings.TrimSpace(email))
 	sum := sha256.Sum256([]byte(norm))
 	return hex.EncodeToString(sum[:])
 }
 
-// providerDir is <root>/<provider>, normalizing an empty provider key to
-// provider.DefaultProvider the same way store.Store and reporter do.
-func (s *Store) providerDir(providerKey string) string {
-	return filepath.Join(s.root, provider.Normalize(providerKey))
+// validateProviderKey normalizes an empty providerKey to provider.DefaultProvider
+// (matching store.Store/reporter convention) and rejects anything that is not
+// a bare, separator-free path component — in particular the literal "." and
+// ".." are rejected even though they would otherwise match the charset.
+func validateProviderKey(raw string) (string, error) {
+	key := provider.Normalize(raw)
+	if key == "." || key == ".." || !providerKeyPattern.MatchString(key) {
+		return "", fmt.Errorf("profile: invalid provider key %q", raw)
+	}
+	return key, nil
 }
 
-// ProfileDir is <root>/<provider>/<accountKey> — the config-home directory a
-// provider.Driver's CredentialPath/StageCredential/Env are called against.
-// Exposed so a caller (P3's Switcher, tests) can resolve the path of a
-// profile it has not necessarily created yet.
-func (s *Store) ProfileDir(providerKey, accountKey string) string {
-	return filepath.Join(s.providerDir(providerKey), accountKey)
+// validateAccountKey rejects any accountKey that is not exactly the shape
+// AccountKey produces. This is the single check that makes path-escape
+// accountKeys like "..", "../..", or an absolute path impossible to reach
+// filepath.Join at all: none of them can ever match 64 lowercase hex chars.
+func validateAccountKey(key string) error {
+	if !accountKeyPattern.MatchString(key) {
+		return fmt.Errorf("profile: invalid account key %q", key)
+	}
+	return nil
+}
+
+// rejectSymlink lstat's path and errors if it exists and is a symlink rather
+// than a real entry. A symlinked provider or profile directory would make
+// every subsequent read/write land wherever the link points, not under
+// s.root, silently defeating the path whitelist above. A path that does not
+// exist yet is not rejected — Create/Stage's MkdirAll is what will bring it
+// into existence as a real directory.
+func rejectSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("profile: %s is a symlink, refusing to use it", path)
+	}
+	return nil
+}
+
+// ensureDirPerm re-lstat's an EXISTING directory and tightens its mode to
+// 0700 if a caller (or an old profile from before this check existed) left it
+// wider. Chosen over rejecting outright: this Store is the exclusive owner of
+// every path under its root, so correcting the mode is safe, and rejecting
+// would turn a stray pre-existing 0777 directory (a slow deploy script, a
+// leftover from before this fix shipped) into a permanent failure instead of
+// a one-time self-heal. It re-checks for a symlink too, since a symlink could
+// have been swapped in between an earlier rejectSymlink check and this call.
+func ensureDirPerm(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("profile: %s is a symlink, refusing to use it", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("profile: %s exists and is not a directory", dir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveProviderDir validates providerKey and returns <root>/<provider>,
+// having rejected it being a symlink.
+func (s *Store) resolveProviderDir(providerKey string) (string, error) {
+	key, err := validateProviderKey(providerKey)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(s.root, key)
+	if err := rejectSymlink(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// resolveProfile validates both providerKey and accountKey and returns
+// (profileDir, providerDir), having rejected either level being a symlink.
+// Every Create/Stage/Remove/Fingerprint/Env/ProfileDir/Complete call funnels
+// through this before touching the filesystem.
+func (s *Store) resolveProfile(providerKey, accountKey string) (profileDir, providerDir string, err error) {
+	providerDir, err = s.resolveProviderDir(providerKey)
+	if err != nil {
+		return "", "", err
+	}
+	if err := validateAccountKey(accountKey); err != nil {
+		return "", "", err
+	}
+	profileDir = filepath.Join(providerDir, accountKey)
+	if err := rejectSymlink(profileDir); err != nil {
+		return "", "", err
+	}
+	return profileDir, providerDir, nil
+}
+
+// confirmWithinRoot is a second, independent check immediately before the
+// one destructive operation this package has (Remove's os.RemoveAll): it
+// re-derives dir's absolute path and refuses to proceed unless it falls
+// strictly under s.root's absolute path. It is redundant with
+// validateProviderKey/validateAccountKey given how resolveProfile builds
+// dir — neither check alone is the only thing standing between a bad input
+// and an rm -rf, which is the point: Remove is the one call whose failure
+// mode is unrecoverable, so it gets a second opinion instead of relying on
+// validation that happened one call away.
+func (s *Store) confirmWithinRoot(dir string) error {
+	absRoot, err := filepath.Abs(s.root)
+	if err != nil {
+		return err
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(absDir, absRoot+string(filepath.Separator)) {
+		return fmt.Errorf("profile: refusing to remove path outside store root: %s", absDir)
+	}
+	return nil
+}
+
+// ProfileDir returns the config-home path for (providerKey, accountKey)
+// after validating both and rejecting a symlinked provider or profile
+// directory. It does not require the profile to already exist.
+func (s *Store) ProfileDir(providerKey, accountKey string) (string, error) {
+	dir, _, err := s.resolveProfile(providerKey, accountKey)
+	return dir, err
 }
 
 // Create provisions the profile directory (0700) for (providerKey,
@@ -157,17 +329,28 @@ func (s *Store) ProfileDir(providerKey, accountKey string) string {
 // do not already exist there. Idempotent: calling it again on an
 // already-provisioned profile only fills in template files still missing: it
 // never truncates or overwrites what is already on disk (a live credential,
-// an account-modified settings.json). Returns the profile's config-home path.
+// an account-modified settings.json), and it tightens the provider/profile
+// directory mode back to 0700 if either was left wider. Returns the
+// profile's config-home path.
 func (s *Store) Create(providerKey, accountKey string, tmpl Template) (string, error) {
-	if accountKey == "" {
-		return "", errors.New("profile: empty accountKey")
+	dir, providerDir, err := s.resolveProfile(providerKey, accountKey)
+	if err != nil {
+		return "", err
 	}
-	dir := s.ProfileDir(providerKey, accountKey)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := ensureDirPerm(providerDir); err != nil {
+		return "", err
+	}
+	if err := ensureDirPerm(dir); err != nil {
 		return "", err
 	}
 	if tmpl.Dir != "" {
 		for _, rel := range tmpl.Files {
+			if err := validateTemplateRel(rel); err != nil {
+				return "", fmt.Errorf("profile: template file %q: %w", rel, err)
+			}
 			if err := copyTemplateFile(tmpl.Dir, dir, rel); err != nil {
 				return "", fmt.Errorf("profile: template file %q: %w", rel, err)
 			}
@@ -178,28 +361,60 @@ func (s *Store) Create(providerKey, accountKey string, tmpl Template) (string, e
 
 // Stage writes credentialJSON (and any identity fields in meta) into the
 // profile for (drv.Name(), accountKey), delegating the vendor-specific file
-// layout to drv.StageCredential. It provisions the profile directory first
-// (MkdirAll is idempotent; drv.StageCredential also MkdirAlls its configDir,
-// so this is belt-and-suspenders, not the only guarantee) so the profile lock
-// below always has a directory to live in, then holds the per-profile lock
+// layout to drv.StageCredential, then writes the staged marker (see
+// Complete) — ONLY after StageCredential returns without error, so
+// Complete()==true is a guarantee the write finished, not that it merely
+// started. It provisions and permission-tightens the profile directory
+// first (see Create) so the profile lock below always has a real,
+// exclusively-owned directory to live in, then holds the per-profile lock
 // for the duration of the write so a concurrent Remove of the same profile
 // cannot race it. credentialJSON is plaintext and MUST NEVER be logged by
 // this package or its caller (§7 elsewhere in this repo's security notes).
 func (s *Store) Stage(drv provider.Driver, accountKey string, credentialJSON []byte, meta provider.AddMeta) error {
-	if accountKey == "" {
-		return errors.New("profile: empty accountKey")
+	dir, providerDir, err := s.resolveProfile(drv.Name(), accountKey)
+	if err != nil {
+		return err
 	}
-	providerKey := drv.Name()
-	dir := s.ProfileDir(providerKey, accountKey)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	lock, err := s.lock(providerKey, accountKey)
+	if err := ensureDirPerm(providerDir); err != nil {
+		return err
+	}
+	if err := ensureDirPerm(dir); err != nil {
+		return err
+	}
+	lock, err := s.lock(providerDir, accountKey)
 	if err != nil {
 		return err
 	}
 	defer lock.Unlock()
-	return drv.StageCredential(dir, credentialJSON, meta)
+	if err := drv.StageCredential(dir, credentialJSON, meta); err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(dir, stagedMarkerName), []byte{}, 0o600)
+}
+
+// Complete reports whether the profile for (providerKey, accountKey) has a
+// credential that finished staging (the marker Stage writes only after
+// drv.StageCredential returns without error). A profile that exists but is
+// not Complete is either freshly Create()d with no credential yet, or a
+// Stage that died mid-write (process kill, disk full) — in either case the
+// runner would hit a login screen despite AMS believing the account is
+// delivered, so P3 must treat "exists but !Complete" as not-ready rather
+// than assuming existence implies usability.
+func (s *Store) Complete(providerKey, accountKey string) (bool, error) {
+	dir, _, err := s.resolveProfile(providerKey, accountKey)
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(filepath.Join(dir, stagedMarkerName)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Remove deletes the profile for (providerKey, accountKey). Idempotent: a
@@ -209,18 +424,32 @@ func (s *Store) Stage(drv provider.Driver, accountKey string, credentialJSON []b
 // GetActive will report as ErrActiveMissing, which is the explicit signal P3
 // needs to notice and re-point rather than this package silently guessing a
 // replacement.
+//
+// It deliberately does NOT delete the per-profile lock file afterward (see
+// lockPath): the lock lives one level up as <providerDir>/<accountKey>.lock,
+// outside the tree os.RemoveAll below deletes, so a successful Remove leaves
+// one empty lock file behind per removed profile. Deleting it here would
+// require unlinking it only after Unlock() (a lock still held cannot be
+// unlinked safely on Windows), which reopens exactly the unlink-then-recreate
+// race this file's lock placement exists to close — a caller racing to
+// re-Stage the same accountKey could TryLock the same path in the gap between
+// this Remove's Unlock and its own cleanup unlink. A handful of empty stray
+// files is a cheap, static trade against reintroducing that race.
 func (s *Store) Remove(providerKey, accountKey string) error {
-	if accountKey == "" {
-		return errors.New("profile: empty accountKey")
+	dir, providerDir, err := s.resolveProfile(providerKey, accountKey)
+	if err != nil {
+		return err
 	}
-	dir := s.ProfileDir(providerKey, accountKey)
 	if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil // idempotent: absent is success
 		}
 		return err
 	}
-	lock, err := s.lock(providerKey, accountKey)
+	if err := s.confirmWithinRoot(dir); err != nil {
+		return err
+	}
+	lock, err := s.lock(providerDir, accountKey)
 	if err != nil {
 		return err
 	}
@@ -230,9 +459,18 @@ func (s *Store) Remove(providerKey, accountKey string) error {
 
 // List enumerates the accountKeys of profiles that currently exist for
 // providerKey, sorted. A provider with no profiles yet (directory absent)
-// returns an empty, non-nil slice rather than an error.
+// returns an empty, non-nil slice rather than an error. It lists both
+// Complete and not-yet-Complete profiles — a caller that only wants
+// ready-to-use accounts must check Complete itself; the existing behaviour
+// (List returns every provisioned directory) predates and is unrelated to
+// the staged-marker addition, and changing it would make a Create()-only
+// profile invisible to List, which nothing in this package's contract
+// promises.
 func (s *Store) List(providerKey string) ([]string, error) {
-	dir := s.providerDir(providerKey)
+	dir, err := s.resolveProviderDir(providerKey)
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -242,10 +480,10 @@ func (s *Store) List(providerKey string) ([]string, error) {
 	}
 	keys := make([]string, 0, len(entries))
 	for _, e := range entries {
-		// Only account directories are profiles; activeFileName and the lock
-		// files (which live one level down, inside each profile dir, never
-		// here) are the only non-directory entries this level can hold.
-		if e.IsDir() {
+		// Only account directories shaped like a real AccountKey output are
+		// profiles; activeFileName and the *.lock files (siblings at this
+		// same level, never directories) are excluded by both conditions.
+		if e.IsDir() && accountKeyPattern.MatchString(e.Name()) {
 			keys = append(keys, e.Name())
 		}
 	}
@@ -257,10 +495,20 @@ func (s *Store) List(providerKey string) ([]string, error) {
 // via drv.CredentialPath and returns drv.Fingerprint of its bytes — the same
 // identity hash rule the manifest store and O9 re-sync use, delegated rather
 // than reimplemented (design note P2: "지문 규칙을 재구현하지 말고 드라이버에
-// 위임"). The plaintext credential bytes are wiped before returning; the
-// fingerprint itself is a one-way hash, safe to return and log.
+// 위임"). The credential bytes this function itself read are zeroed before
+// returning (wipe), but that is a best-effort courtesy on this ONE []byte
+// allocation, not a guarantee that no copy of the credential survives
+// anywhere in memory: drv.Fingerprint (like drv.StageCredential) typically
+// json.Unmarshals the bytes into a Go string field to reach the token, and a
+// Go string is immutable and cannot be wiped by this or any other caller —
+// that copy lives until the garbage collector reclaims it. The fingerprint
+// this function returns is itself a one-way hash, so returning and logging
+// IT is safe regardless.
 func (s *Store) Fingerprint(drv provider.Driver, accountKey string) (string, error) {
-	dir := s.ProfileDir(drv.Name(), accountKey)
+	dir, _, err := s.resolveProfile(drv.Name(), accountKey)
+	if err != nil {
+		return "", err
+	}
 	b, err := os.ReadFile(drv.CredentialPath(dir))
 	if err != nil {
 		return "", err
@@ -271,19 +519,27 @@ func (s *Store) Fingerprint(drv provider.Driver, accountKey string) (string, err
 
 // Env returns the process environment entries (drv.Env) that point the
 // vendor's pool binary at this profile's config home.
-func (s *Store) Env(drv provider.Driver, accountKey string) []string {
-	return drv.Env(s.ProfileDir(drv.Name(), accountKey))
+func (s *Store) Env(drv provider.Driver, accountKey string) ([]string, error) {
+	dir, _, err := s.resolveProfile(drv.Name(), accountKey)
+	if err != nil {
+		return nil, err
+	}
+	return drv.Env(dir), nil
 }
 
 // SetActive atomically records accountKey as the active profile for
-// providerKey. It does not verify the profile exists — P3's Switcher is
-// expected to Create/Stage before pointing at it — so GetActive is where
-// "points at nothing" is caught and reported as ErrActiveMissing.
+// providerKey. It validates both like every other entry point but does NOT
+// verify the profile exists — P3's Switcher is expected to Create/Stage
+// before pointing at it — so GetActive is where "points at nothing" is
+// caught and reported as ErrActiveMissing.
 func (s *Store) SetActive(providerKey, accountKey string) error {
-	if accountKey == "" {
-		return errors.New("profile: empty accountKey")
+	if err := validateAccountKey(accountKey); err != nil {
+		return err
 	}
-	dir := s.providerDir(providerKey)
+	dir, err := s.resolveProviderDir(providerKey)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -292,12 +548,18 @@ func (s *Store) SetActive(providerKey, accountKey string) error {
 
 // GetActive reads the active pointer for providerKey. It returns
 // (accountKey, configDir, nil) when the pointer names a profile that exists;
-// ("", "", ErrNoActive) when no pointer has been written; and (accountKey,
-// "", ErrActiveMissing) when a pointer exists but the profile it names does
-// not — accountKey is still returned in that case so a caller can log which
-// key went missing.
+// ("", "", ErrNoActive) when no pointer has been written; (accountKey, "",
+// ErrActiveMissing) when a pointer exists but the profile it names does not
+// (accountKey is still returned so a caller can log which key went missing);
+// and (key, "", err) when the pointer's raw content is not shaped like a
+// real AccountKey output at all — a distinct failure from ErrActiveMissing,
+// since that content could not have come from a legitimate SetActive call
+// and is never used to build a path.
 func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err error) {
-	dir := s.providerDir(providerKey)
+	dir, err := s.resolveProviderDir(providerKey)
+	if err != nil {
+		return "", "", err
+	}
 	raw, rerr := os.ReadFile(filepath.Join(dir, activeFileName))
 	if rerr != nil {
 		if errors.Is(rerr, fs.ErrNotExist) {
@@ -309,7 +571,13 @@ func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err
 	if key == "" {
 		return "", "", ErrNoActive
 	}
+	if !accountKeyPattern.MatchString(key) {
+		return key, "", fmt.Errorf("profile: active pointer for %q holds an invalid account key %q", providerKey, key)
+	}
 	profDir := filepath.Join(dir, key)
+	if err := rejectSymlink(profDir); err != nil {
+		return key, "", err
+	}
 	if _, serr := os.Stat(profDir); serr != nil {
 		if errors.Is(serr, fs.ErrNotExist) {
 			return key, "", ErrActiveMissing
@@ -319,12 +587,43 @@ func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err
 	return key, profDir, nil
 }
 
-// lock acquires the per-profile advisory lock for (providerKey, accountKey),
-// retrying on contention up to lockRetryBound. The profile directory MUST
+// lockPath is the per-profile advisory lock file, DELIBERATELY a sibling of
+// the profile directory (<providerDir>/<accountKey>.lock) rather than a file
+// inside it. Two platform-specific failure modes required this move (found
+// by adversarial review against the previous <profileDir>/.amx-profile.lock
+// placement):
+//
+//   - Windows: internal/fslock's TryLock takes a MANDATORY LockFileEx lock on
+//     the open handle (fslock.go doc: "a MANDATORY byte-range lock"). If the
+//     lock file lived inside the profile directory, Remove's os.RemoveAll
+//     would try to delete that very open, locked file as part of removing
+//     the tree and fail with a sharing violation — Remove could never
+//     succeed while correctly holding its own lock.
+//   - Unix: flock() locks an open file descriptor (effectively the inode),
+//     not a path (fslock.go doc: unix flock is advisory per-fd). If the lock
+//     file lived inside the profile directory, os.RemoveAll would unlink it
+//     out from under the still-held lock; a second TryLock on the SAME PATH
+//     would then os.OpenFile(O_CREATE) a brand-new file with a fresh inode
+//     and lock THAT successfully — even though the first lock's fd is still
+//     open on the old, now-unlinked inode. The two locks would stop
+//     protecting the same resource, so a Stage racing a Remove could
+//     recreate the profile directory while Remove was still deleting it.
+//
+// A lock file that Remove never deletes (see Remove's doc) keeps its path,
+// and therefore its inode, stable for the whole critical section on both
+// platforms, which is what makes a second TryLock on the same path correctly
+// contend instead of silently locking something else.
+func (s *Store) lockPath(providerDir, accountKey string) string {
+	return filepath.Join(providerDir, accountKey+".lock")
+}
+
+// lock acquires the per-profile advisory lock for accountKey under
+// providerDir, retrying on contention up to lockRetryBound. providerDir MUST
 // already exist (fslock.TryLock cannot create a lock file under a missing
-// parent); every caller in this file creates it first.
-func (s *Store) lock(providerKey, accountKey string) (*fslock.Lock, error) {
-	path := filepath.Join(s.ProfileDir(providerKey, accountKey), lockFileName)
+// parent); every caller in this file creates it (via the profile dir's
+// MkdirAll, which creates providerDir as an ancestor) before calling lock.
+func (s *Store) lock(providerDir, accountKey string) (*fslock.Lock, error) {
+	path := s.lockPath(providerDir, accountKey)
 	deadline := time.Now().Add(lockRetryBound)
 	for {
 		l, err := fslock.TryLock(path)
@@ -332,16 +631,46 @@ func (s *Store) lock(providerKey, accountKey string) (*fslock.Lock, error) {
 			return l, nil
 		}
 		if !errors.Is(err, fslock.ErrWouldBlock) || time.Now().After(deadline) {
-			return nil, fmt.Errorf("profile: lock %s/%s held: %w", providerKey, accountKey, err)
+			return nil, fmt.Errorf("profile: lock %s held: %w", path, err)
 		}
 		time.Sleep(lockRetryInterval)
 	}
+}
+
+// validateTemplateRel rejects a Template.Files entry that is empty, absolute,
+// contains a ".." component after filepath.Clean (which would let it escape
+// the profile directory it is about to be copied into), or names the
+// reserved staged-marker file. Unlike a merely-absent source file (silently
+// skipped by copyTemplateFile), any of these shapes is always a caller bug,
+// so it is an error, not a skip.
+func validateTemplateRel(rel string) error {
+	if rel == "" {
+		return errors.New("empty path")
+	}
+	if filepath.IsAbs(rel) {
+		return errors.New("absolute path not allowed")
+	}
+	cleaned := filepath.Clean(rel)
+	if cleaned == ".." {
+		return errors.New("path escapes the profile directory")
+	}
+	for _, part := range strings.Split(cleaned, string(filepath.Separator)) {
+		if part == ".." {
+			return errors.New("path escapes the profile directory")
+		}
+	}
+	if filepath.Base(cleaned) == stagedMarkerName {
+		return errors.New("reserved file name")
+	}
+	return nil
 }
 
 // copyTemplateFile copies <srcDir>/<rel> to <dstDir>/<rel> unless the source
 // is absent (silently skipped — a template need not carry every file a
 // caller optimistically lists) or the destination already exists (never
 // clobber a file the profile may already have, staged or account-modified).
+// The caller (Create) validates rel via validateTemplateRel before this is
+// reached, so path-escape is not this function's concern.
 func copyTemplateFile(srcDir, dstDir, rel string) error {
 	src := filepath.Join(srcDir, rel)
 	info, err := os.Stat(src)
@@ -370,9 +699,13 @@ func copyTemplateFile(srcDir, dstDir, rel string) error {
 	return atomicWrite(dst, data, 0o600)
 }
 
-// wipe zeroes b in place. Used after a credential's plaintext bytes have
-// served their purpose (Fingerprint), mirroring internal/store's convention
-// for anything that briefly holds secret material.
+// wipe zeroes b in place, best-effort. It is a courtesy on this ONE []byte
+// allocation, not a guarantee that every copy of what it held is gone: any
+// code that already parsed b into a Go string (json.Unmarshal into a struct
+// field, for instance) holds a separate, immutable allocation this cannot
+// reach, because Go strings cannot be wiped once created. Mirrors
+// internal/store's wipe() convention (same caveat there, not a stronger
+// promise introduced by this package).
 func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0

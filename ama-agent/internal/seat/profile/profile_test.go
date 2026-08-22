@@ -22,6 +22,15 @@ func openStore(t *testing.T) *Store {
 	return s
 }
 
+func mustProfileDir(t *testing.T, s *Store, providerKey, accountKey string) string {
+	t.Helper()
+	dir, err := s.ProfileDir(providerKey, accountKey)
+	if err != nil {
+		t.Fatalf("ProfileDir(%q, %q): %v", providerKey, accountKey, err)
+	}
+	return dir
+}
+
 // --- AccountKey -------------------------------------------------------
 
 func TestAccountKeyDeterministic(t *testing.T) {
@@ -40,40 +49,35 @@ func TestAccountKeyCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestAccountKeyNoCollisionAcrossVariants derives keys for a set of inputs
+// where every entry EXCEPT "a@b.com " is a genuinely distinct account, and
+// fails if any two distinct normalized emails ever land on the same key. A
+// prior version of this test compared each key only against itself and could
+// never fail regardless of what AccountKey did; this version actually
+// exercises the no-collision claim.
 func TestAccountKeyNoCollisionAcrossVariants(t *testing.T) {
-	emails := []string{
+	inputs := []string{
 		"a@b.com",
-		"A@B.COM",              // case variant of the above -> same key, checked separately
-		"a+tag@b.com",          // plus-addressing, different local part
-		"a@b.com ",             // trailing space, TrimSpace should equalize this with a@b.com
-		"weird!#$%^&*()@b.com", // special characters
-		strings.Repeat("x", 300) + "@example.com", // very long email
+		"a@b.com ", // trailing space: same normalized email as above, on purpose
+		"a+tag@b.com",
+		"weird!#$%^&*()@b.com",
+		strings.Repeat("x", 300) + "@example.com",
 		"unicode-이메일@example.com",
 	}
-	keys := make(map[string]string)
-	for _, e := range emails {
+	seenBy := make(map[string]string) // key -> normalized email that first produced it
+	for _, e := range inputs {
 		k := AccountKey(e)
-		// Every key must be a filesystem-safe, fixed-length hex string.
-		if len(k) != 64 {
-			t.Fatalf("AccountKey(%q) length = %d, want 64", e, len(k))
+		if !accountKeyPattern.MatchString(k) {
+			t.Fatalf("AccountKey(%q) = %q is not a valid 64-hex key", e, k)
 		}
-		for _, r := range k {
-			if !strings.ContainsRune("0123456789abcdef", r) {
-				t.Fatalf("AccountKey(%q) = %q contains non-hex rune %q", e, k, r)
+		norm := strings.ToLower(strings.TrimSpace(e))
+		if prevNorm, ok := seenBy[k]; ok {
+			if prevNorm != norm {
+				t.Fatalf("collision: %q and %q both derive key %q", prevNorm, norm, k)
 			}
+			continue // expected: same normalized email as a prior entry
 		}
-		if prev, ok := keys[k]; ok && prev != strings.ToLower(strings.TrimSpace(e)) {
-			// Two distinct normalized emails must not collide.
-			if strings.ToLower(strings.TrimSpace(e)) != prev {
-				t.Fatalf("collision: %q and stored %q both derive key %q", e, prev, k)
-			}
-		}
-		keys[k] = strings.ToLower(strings.TrimSpace(e))
-	}
-	// "a@b.com " (trimmed) must equal "a@b.com"'s key, and both must differ
-	// from "a+tag@b.com"'s.
-	if AccountKey("a@b.com") != AccountKey("a@b.com ") {
-		t.Fatalf("AccountKey should trim whitespace before hashing")
+		seenBy[k] = norm
 	}
 	if AccountKey("a@b.com") == AccountKey("a+tag@b.com") {
 		t.Fatalf("distinct local parts must not collide")
@@ -84,14 +88,15 @@ func TestAccountKeyNoCollisionAcrossVariants(t *testing.T) {
 
 func TestCreateIdempotent(t *testing.T) {
 	s := openStore(t)
-	dir1, err := s.Create("claude", "acct1", Template{})
+	key := AccountKey("acct1@example.com")
+	dir1, err := s.Create("claude", key, Template{})
 	if err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir1, "marker.txt"), []byte("keep"), 0o600); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}
-	dir2, err := s.Create("claude", "acct1", Template{})
+	dir2, err := s.Create("claude", key, Template{})
 	if err != nil {
 		t.Fatalf("second Create: %v", err)
 	}
@@ -117,7 +122,8 @@ func TestCreateTemplateCopiesExistingSkipsMissing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmplDir, "settings.json"), []byte(`{"common":true}`), 0o644); err != nil {
 		t.Fatalf("seed template file: %v", err)
 	}
-	dir, err := s.Create("claude", "acct1", Template{
+	key := AccountKey("acct1@example.com")
+	dir, err := s.Create("claude", key, Template{
 		Dir:   tmplDir,
 		Files: []string{"settings.json", "does-not-exist.json"},
 	})
@@ -149,15 +155,15 @@ func TestCreateTemplateDoesNotClobberExisting(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmplDir, "settings.json"), []byte(`{"common":true}`), 0o644); err != nil {
 		t.Fatalf("seed template file: %v", err)
 	}
-	dir, err := s.Create("claude", "acct1", Template{Dir: tmplDir, Files: []string{"settings.json"}})
+	key := AccountKey("acct1@example.com")
+	dir, err := s.Create("claude", key, Template{Dir: tmplDir, Files: []string{"settings.json"}})
 	if err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
-	// Simulate the account modifying its own settings after provisioning.
 	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"modified":true}`), 0o600); err != nil {
 		t.Fatalf("modify settings: %v", err)
 	}
-	if _, err := s.Create("claude", "acct1", Template{Dir: tmplDir, Files: []string{"settings.json"}}); err != nil {
+	if _, err := s.Create("claude", key, Template{Dir: tmplDir, Files: []string{"settings.json"}}); err != nil {
 		t.Fatalf("second Create: %v", err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
@@ -166,10 +172,245 @@ func TestCreateTemplateDoesNotClobberExisting(t *testing.T) {
 	}
 }
 
-func TestCreateEmptyAccountKeyRejected(t *testing.T) {
+func TestCreateTemplateRelEscapeRejected(t *testing.T) {
 	s := openStore(t)
-	if _, err := s.Create("claude", "", Template{}); err == nil {
-		t.Fatal("Create with empty accountKey should error")
+	tmplDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmplDir, "payload.json"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed payload: %v", err)
+	}
+	key := AccountKey("escape@example.com")
+	_, err := s.Create("claude", key, Template{Dir: tmplDir, Files: []string{"../payload.json"}})
+	if err == nil {
+		t.Fatal("Create should reject a Template.Files entry that escapes the profile directory")
+	}
+	// Must not have landed anywhere outside the profile, in particular not
+	// as a sibling of the store root.
+	if _, statErr := os.Stat(filepath.Join(filepath.Dir(s.root), "payload.json")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("escaped template file was written outside the store: %v", statErr)
+	}
+}
+
+// --- Path validation (adversarial) --------------------------------------
+
+func TestProviderKeyPathEscapeRejected(t *testing.T) {
+	s := openStore(t)
+	for _, bad := range []string{".", "..", "../..", "a/b", "/etc", "Claude", ""} {
+		if bad == "" {
+			continue // empty providerKey normalizes to "claude" and is valid
+		}
+		if _, err := s.Create(bad, AccountKey("x@example.com"), Template{}); err == nil {
+			t.Fatalf("Create with providerKey %q should be rejected", bad)
+		}
+	}
+}
+
+func TestAccountKeyPathEscapeRejected(t *testing.T) {
+	s := openStore(t)
+	for _, bad := range []string{".", "..", "../..", "../../etc/passwd", "not-hex", strings.Repeat("a", 63), strings.Repeat("a", 65)} {
+		if err := s.Remove("claude", bad); err == nil {
+			t.Fatalf("Remove with accountKey %q should be rejected, not silently accepted", bad)
+		}
+		if _, err := s.Create("claude", bad, Template{}); err == nil {
+			t.Fatalf("Create with accountKey %q should be rejected", bad)
+		}
+	}
+}
+
+// TestRemoveRejectsTraversalInsteadOfWipingRoot is the adversarial review's
+// exact reproduction: Remove("claude", ".") / ("..") / ("../..") must error
+// out, not delete the profiles root, the provider directory, or anything
+// alongside stateDir (manifest.enc's directory).
+func TestRemoveRejectsTraversalInsteadOfWipingRoot(t *testing.T) {
+	stateDir := t.TempDir()
+	s, err := Open(stateDir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	key := AccountKey("survivor@example.com")
+	if _, err := s.Create("claude", key, Template{}); err != nil {
+		t.Fatalf("Create survivor profile: %v", err)
+	}
+	sentinel := filepath.Join(stateDir, "manifest.enc")
+	if err := os.WriteFile(sentinel, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
+	}
+
+	for _, bad := range []string{".", "..", "../.."} {
+		if err := s.Remove("claude", bad); err == nil {
+			t.Fatalf("Remove(\"claude\", %q) should error, not delete anything", bad)
+		}
+	}
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("sentinel outside the profile store was affected: %v", err)
+	}
+	dir := mustProfileDir(t, s, "claude", key)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("unrelated survivor profile was affected: %v", err)
+	}
+}
+
+func TestSetActivePathEscapeRejected(t *testing.T) {
+	s := openStore(t)
+	if err := s.SetActive("../../..", "hijack"); err == nil {
+		t.Fatal("SetActive with a path-escaping providerKey/accountKey should be rejected")
+	}
+	if err := s.SetActive("claude", "hijack"); err == nil {
+		t.Fatal("SetActive with a non-hex accountKey should be rejected")
+	}
+}
+
+// TestGetActiveRejectsTamperedPointerContent writes an out-of-shape value
+// directly into the active pointer file (bypassing SetActive, as a corrupted
+// or hand-edited file would) and checks GetActive refuses to turn it into a
+// path instead of silently joining it.
+func TestGetActiveRejectsTamperedPointerContent(t *testing.T) {
+	s := openStore(t)
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	if err := os.MkdirAll(providerDir, 0o700); err != nil {
+		t.Fatalf("mkdir provider dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte("../../../etc"), 0o600); err != nil {
+		t.Fatalf("write tampered pointer: %v", err)
+	}
+	key, dir, err := s.GetActive("claude")
+	if err == nil {
+		t.Fatalf("GetActive should reject a non-hex pointer content, got dir=%q", dir)
+	}
+	if errors.Is(err, ErrActiveMissing) || errors.Is(err, ErrNoActive) {
+		t.Fatalf("tampered pointer content should be its own error kind, got %v", err)
+	}
+	if dir != "" {
+		t.Fatalf("GetActive must not return a path for invalid pointer content, got %q", dir)
+	}
+	_ = key
+}
+
+// --- Pre-existing permissive directory / symlink -------------------------
+
+func TestCreateTightensPreExistingWideDirectory(t *testing.T) {
+	s := openStore(t)
+	key := AccountKey("wide@example.com")
+	dir, err := s.ProfileDir("claude", key)
+	if err != nil {
+		t.Fatalf("ProfileDir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatalf("pre-create wide dir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod wide: %v", err)
+	}
+	providerDir := filepath.Dir(dir)
+	if err := os.Chmod(providerDir, 0o777); err != nil {
+		t.Fatalf("chmod provider wide: %v", err)
+	}
+
+	if _, err := s.Create("claude", key, Template{}); err != nil {
+		t.Fatalf("Create over a pre-existing wide directory: %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat profile dir: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("profile dir perm after Create = %o, want tightened to 0700", perm)
+	}
+	pinfo, err := os.Stat(providerDir)
+	if err != nil {
+		t.Fatalf("stat provider dir: %v", err)
+	}
+	if perm := pinfo.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("provider dir perm after Create = %o, want tightened to 0700", perm)
+	}
+}
+
+func TestStageTightensPreExistingWideDirectory(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("wide-stage@example.com")
+	dir, err := s.ProfileDir(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("ProfileDir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatalf("pre-create wide dir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod wide: %v", err)
+	}
+
+	if err := s.Stage(drv, key, sampleCredential("rt-wide"), provider.AddMeta{Email: "wide-stage@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat profile dir: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("profile dir perm after Stage = %o, want tightened to 0700", perm)
+	}
+}
+
+func TestCreateRejectsSymlinkedProfileDir(t *testing.T) {
+	if runtimeIsWindows() {
+		t.Skip("symlink creation semantics differ on windows; covered by unix CI")
+	}
+	s := openStore(t)
+	key := AccountKey("linked@example.com")
+	dir, err := s.ProfileDir("claude", key)
+	if err != nil {
+		t.Fatalf("ProfileDir: %v", err)
+	}
+	providerDir := filepath.Dir(dir)
+	if err := os.MkdirAll(providerDir, 0o700); err != nil {
+		t.Fatalf("mkdir provider dir: %v", err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	if err := os.Symlink(elsewhere, dir); err != nil {
+		t.Fatalf("symlink profile dir: %v", err)
+	}
+
+	if _, err := s.Create("claude", key, Template{}); err == nil {
+		t.Fatal("Create over a symlinked profile directory should be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(elsewhere, "marker-should-not-exist")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected write through the symlink: %v", err)
+	}
+}
+
+func TestStageRejectsSymlinkedProviderDir(t *testing.T) {
+	if runtimeIsWindows() {
+		t.Skip("symlink creation semantics differ on windows; covered by unix CI")
+	}
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("linked-provider@example.com")
+	providerDir, err := s.resolveProviderDir(drv.Name())
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	if err := os.Symlink(elsewhere, providerDir); err != nil {
+		t.Fatalf("symlink provider dir: %v", err)
+	}
+
+	err = s.Stage(drv, key, sampleCredential("rt"), provider.AddMeta{Email: "linked-provider@example.com"})
+	if err == nil {
+		t.Fatal("Stage through a symlinked provider directory should be rejected")
+	}
+	if _, statErr := os.Stat(filepath.Join(elsewhere, key)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unexpected write through the symlinked provider dir: %v", statErr)
 	}
 }
 
@@ -177,16 +418,17 @@ func TestCreateEmptyAccountKeyRejected(t *testing.T) {
 
 func TestRemoveIdempotent(t *testing.T) {
 	s := openStore(t)
-	if _, err := s.Create("claude", "acct1", Template{}); err != nil {
+	key := AccountKey("acct1@example.com")
+	if _, err := s.Create("claude", key, Template{}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := s.Remove("claude", "acct1"); err != nil {
+	if err := s.Remove("claude", key); err != nil {
 		t.Fatalf("first Remove: %v", err)
 	}
-	if err := s.Remove("claude", "acct1"); err != nil {
+	if err := s.Remove("claude", key); err != nil {
 		t.Fatalf("second Remove (absent) should be idempotent, got %v", err)
 	}
-	if err := s.Remove("claude", "never-existed"); err != nil {
+	if err := s.Remove("claude", AccountKey("never-existed@example.com")); err != nil {
 		t.Fatalf("Remove of a never-created profile should be idempotent, got %v", err)
 	}
 }
@@ -195,11 +437,13 @@ func TestRemoveIdempotent(t *testing.T) {
 
 func TestIsolationBetweenAccounts(t *testing.T) {
 	s := openStore(t)
-	dir1, err := s.Create("claude", "acct1", Template{})
+	key1 := AccountKey("acct1@example.com")
+	key2 := AccountKey("acct2@example.com")
+	dir1, err := s.Create("claude", key1, Template{})
 	if err != nil {
 		t.Fatalf("Create acct1: %v", err)
 	}
-	dir2, err := s.Create("claude", "acct2", Template{})
+	dir2, err := s.Create("claude", key2, Template{})
 	if err != nil {
 		t.Fatalf("Create acct2: %v", err)
 	}
@@ -209,7 +453,7 @@ func TestIsolationBetweenAccounts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir1, "only-in-acct1.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write into acct1: %v", err)
 	}
-	if err := s.Remove("claude", "acct1"); err != nil {
+	if err := s.Remove("claude", key1); err != nil {
 		t.Fatalf("Remove acct1: %v", err)
 	}
 	if _, err := os.Stat(dir2); err != nil {
@@ -236,7 +480,7 @@ func TestIsolationAcrossProviders(t *testing.T) {
 	}
 }
 
-// --- Stage / Fingerprint --------------------------------------------------
+// --- Stage / Fingerprint / Complete ---------------------------------------
 
 func sampleCredential(refreshToken string) []byte {
 	b, _ := json.Marshal(map[string]any{
@@ -259,7 +503,8 @@ func TestStageWritesCredentialWithPermissions(t *testing.T) {
 		t.Fatalf("Stage: %v", err)
 	}
 
-	credPath := drv.CredentialPath(s.ProfileDir(drv.Name(), key))
+	dir := mustProfileDir(t, s, drv.Name(), key)
+	credPath := drv.CredentialPath(dir)
 	info, err := os.Stat(credPath)
 	if err != nil {
 		t.Fatalf("credential file not created: %v", err)
@@ -267,7 +512,7 @@ func TestStageWritesCredentialWithPermissions(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("credential file perm = %o, want 0600", perm)
 	}
-	dirInfo, err := os.Stat(s.ProfileDir(drv.Name(), key))
+	dirInfo, err := os.Stat(dir)
 	if err != nil {
 		t.Fatalf("stat profile dir: %v", err)
 	}
@@ -299,12 +544,58 @@ func TestFingerprintMatchesDriverRule(t *testing.T) {
 	}
 }
 
-func TestStageEmptyAccountKeyRejected(t *testing.T) {
+func TestCompleteReflectsStagedMarker(t *testing.T) {
 	s := openStore(t)
 	drv := claude.New()
-	err := s.Stage(drv, "", sampleCredential("rt"), provider.AddMeta{})
-	if err == nil {
-		t.Fatal("Stage with empty accountKey should error")
+	key := AccountKey("complete@example.com")
+
+	if _, err := s.Create(drv.Name(), key, Template{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	done, err := s.Complete(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("Complete after Create only: %v", err)
+	}
+	if done {
+		t.Fatal("Complete should be false before Stage ever ran")
+	}
+
+	if err := s.Stage(drv, key, sampleCredential("rt-complete"), provider.AddMeta{Email: "complete@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	done, err = s.Complete(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("Complete after Stage: %v", err)
+	}
+	if !done {
+		t.Fatal("Complete should be true after a successful Stage")
+	}
+}
+
+func TestCompleteFalseWhenMarkerMissingDespiteCredentialFile(t *testing.T) {
+	// Simulates a Stage that died after StageCredential wrote the credential
+	// file but before the marker write (process kill, disk full): the
+	// profile "exists" and even has a usable-looking credential file, but
+	// Complete must still say false.
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("partial@example.com")
+	dir, err := s.Create(drv.Name(), key, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := drv.StageCredential(dir, sampleCredential("rt-partial"), provider.AddMeta{Email: "partial@example.com"}); err != nil {
+		t.Fatalf("direct StageCredential (simulating partial Stage): %v", err)
+	}
+	if _, err := os.Stat(drv.CredentialPath(dir)); err != nil {
+		t.Fatalf("credential file should exist for this scenario: %v", err)
+	}
+	done, err := s.Complete(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if done {
+		t.Fatal("Complete must be false when the marker was never written, even if the credential file exists")
 	}
 }
 
@@ -320,44 +611,48 @@ func TestGetActiveNoneSet(t *testing.T) {
 
 func TestSetActiveThenGetActive(t *testing.T) {
 	s := openStore(t)
-	dir, err := s.Create("claude", "acct1", Template{})
+	key := AccountKey("acct1@example.com")
+	dir, err := s.Create("claude", key, Template{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := s.SetActive("claude", "acct1"); err != nil {
+	if err := s.SetActive("claude", key); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
-	key, got, err := s.GetActive("claude")
+	got, gotDir, err := s.GetActive("claude")
 	if err != nil {
 		t.Fatalf("GetActive: %v", err)
 	}
-	if key != "acct1" || got != dir {
-		t.Fatalf("GetActive = (%q, %q), want (%q, %q)", key, got, "acct1", dir)
+	if got != key || gotDir != dir {
+		t.Fatalf("GetActive = (%q, %q), want (%q, %q)", got, gotDir, key, dir)
 	}
 }
 
 func TestSetActiveIsAtomic(t *testing.T) {
 	s := openStore(t)
-	if _, err := s.Create("claude", "acct1", Template{}); err != nil {
+	key1 := AccountKey("acct1@example.com")
+	key2 := AccountKey("acct2@example.com")
+	if _, err := s.Create("claude", key1, Template{}); err != nil {
 		t.Fatalf("Create acct1: %v", err)
 	}
-	if _, err := s.Create("claude", "acct2", Template{}); err != nil {
+	if _, err := s.Create("claude", key2, Template{}); err != nil {
 		t.Fatalf("Create acct2: %v", err)
 	}
-	if err := s.SetActive("claude", "acct1"); err != nil {
+	if err := s.SetActive("claude", key1); err != nil {
 		t.Fatalf("SetActive acct1: %v", err)
 	}
-	pointerPath := filepath.Join(s.providerDir("claude"), activeFileName)
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	pointerPath := filepath.Join(providerDir, activeFileName)
 	before, err := os.Stat(pointerPath)
 	if err != nil {
 		t.Fatalf("stat pointer: %v", err)
 	}
-	if err := s.SetActive("claude", "acct2"); err != nil {
+	if err := s.SetActive("claude", key2); err != nil {
 		t.Fatalf("SetActive acct2: %v", err)
 	}
-	// The pointer file identity (inode) changes on every write because
-	// SetActive writes via temp+rename, never truncates-in-place; that is the
-	// atomicity guarantee this test protects.
 	after, err := os.Stat(pointerPath)
 	if err != nil {
 		t.Fatalf("stat pointer after: %v", err)
@@ -365,29 +660,30 @@ func TestSetActiveIsAtomic(t *testing.T) {
 	if os.SameFile(before, after) {
 		t.Fatalf("pointer file was modified in place, not replaced atomically via rename")
 	}
-	key, _, err := s.GetActive("claude")
-	if err != nil || key != "acct2" {
-		t.Fatalf("GetActive after second SetActive = (%q, %v), want acct2", key, err)
+	got, _, err := s.GetActive("claude")
+	if err != nil || got != key2 {
+		t.Fatalf("GetActive after second SetActive = (%q, %v), want %q", got, err, key2)
 	}
 }
 
 func TestGetActivePointsToMissingProfile(t *testing.T) {
 	s := openStore(t)
-	if _, err := s.Create("claude", "acct1", Template{}); err != nil {
+	key := AccountKey("acct1@example.com")
+	if _, err := s.Create("claude", key, Template{}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := s.SetActive("claude", "acct1"); err != nil {
+	if err := s.SetActive("claude", key); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
-	if err := s.Remove("claude", "acct1"); err != nil {
+	if err := s.Remove("claude", key); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	key, dir, err := s.GetActive("claude")
+	got, dir, err := s.GetActive("claude")
 	if !errors.Is(err, ErrActiveMissing) {
 		t.Fatalf("GetActive after removing the active profile: err = %v, want ErrActiveMissing", err)
 	}
-	if key != "acct1" {
-		t.Fatalf("GetActive should still report the missing key, got %q", key)
+	if got != key {
+		t.Fatalf("GetActive should still report the missing key, got %q want %q", got, key)
 	}
 	if dir != "" {
 		t.Fatalf("GetActive should return an empty dir on ErrActiveMissing, got %q", dir)
@@ -409,26 +705,33 @@ func TestListEmptyProviderNoError(t *testing.T) {
 
 func TestListSortedAndExcludesPointer(t *testing.T) {
 	s := openStore(t)
-	for _, k := range []string{"b-acct", "a-acct"} {
+	keyA := AccountKey("a-acct@example.com")
+	keyB := AccountKey("b-acct@example.com")
+	for _, k := range []string{keyB, keyA} {
 		if _, err := s.Create("claude", k, Template{}); err != nil {
 			t.Fatalf("Create %s: %v", k, err)
 		}
 	}
-	if err := s.SetActive("claude", "a-acct"); err != nil {
+	if err := s.SetActive("claude", keyA); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 	keys, err := s.List("claude")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(keys) != 2 || keys[0] != "a-acct" || keys[1] != "b-acct" {
-		t.Fatalf("List = %v, want sorted [a-acct b-acct] (activeFileName excluded)", keys)
+	want := []string{keyA, keyB}
+	sortedWant := append([]string{}, want...)
+	if keyA > keyB {
+		sortedWant = []string{keyB, keyA}
+	}
+	if len(keys) != 2 || keys[0] != sortedWant[0] || keys[1] != sortedWant[1] {
+		t.Fatalf("List = %v, want sorted %v (activeFileName excluded)", keys, sortedWant)
 	}
 }
 
-// --- Lock --------------------------------------------------------------
+// --- Lock: contention must actually prevent the write/delete --------------
 
-func TestStageBlockedByHeldLockReturnsError(t *testing.T) {
+func TestStageBlockedByHeldLockDoesNotWriteCredential(t *testing.T) {
 	s := openStore(t)
 	drv := claude.New()
 	key := AccountKey("locked@example.com")
@@ -436,7 +739,8 @@ func TestStageBlockedByHeldLockReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	held, err := fslock.TryLock(filepath.Join(dir, lockFileName))
+	providerDir := filepath.Dir(dir)
+	held, err := fslock.TryLock(s.lockPath(providerDir, key))
 	if err != nil {
 		t.Fatalf("TryLock: %v", err)
 	}
@@ -446,22 +750,33 @@ func TestStageBlockedByHeldLockReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Stage should fail while the profile lock is held elsewhere")
 	}
+	if _, statErr := os.Stat(drv.CredentialPath(dir)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Stage wrote the credential file despite the lock being held: statErr=%v", statErr)
+	}
 }
 
-func TestRemoveBlockedByHeldLockReturnsError(t *testing.T) {
+func TestRemoveBlockedByHeldLockLeavesProfileIntact(t *testing.T) {
 	s := openStore(t)
-	dir, err := s.Create("claude", "acct1", Template{})
+	key := AccountKey("locked-remove@example.com")
+	dir, err := s.Create("claude", key, Template{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	held, err := fslock.TryLock(filepath.Join(dir, lockFileName))
+	if err := os.WriteFile(filepath.Join(dir, "still-here.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	providerDir := filepath.Dir(dir)
+	held, err := fslock.TryLock(s.lockPath(providerDir, key))
 	if err != nil {
 		t.Fatalf("TryLock: %v", err)
 	}
 	defer held.Unlock()
 
-	if err := s.Remove("claude", "acct1"); err == nil {
+	if err := s.Remove("claude", key); err == nil {
 		t.Fatal("Remove should fail while the profile lock is held elsewhere")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "still-here.txt")); statErr != nil {
+		t.Fatalf("Remove deleted the profile despite the lock being held: %v", statErr)
 	}
 }
 
@@ -470,14 +785,34 @@ func TestRemoveBlockedByHeldLockReturnsError(t *testing.T) {
 func TestEnvDelegatesToDriver(t *testing.T) {
 	s := openStore(t)
 	drv := claude.New()
-	key := "acct1"
+	key := AccountKey("env@example.com")
 	dir, err := s.Create(drv.Name(), key, Template{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	env := s.Env(drv, key)
-	want := drv.Env(dir)
-	if len(env) != len(want) || (len(env) > 0 && env[0] != want[0]) {
-		t.Fatalf("Env = %v, want %v", env, want)
+	env, err := s.Env(drv, key)
+	if err != nil {
+		t.Fatalf("Env: %v", err)
 	}
+	// Assert the actual, concrete value the claude driver is documented to
+	// produce (CLAUDE_CONFIG_DIR=<configDir>) rather than re-deriving it via
+	// drv.Env and comparing two calls to the same function against each
+	// other, which would pass regardless of what Store.Env's own path
+	// resolution did.
+	want := "CLAUDE_CONFIG_DIR=" + dir
+	if len(env) != 1 || env[0] != want {
+		t.Fatalf("Env = %v, want [%q]", env, want)
+	}
+}
+
+func TestEnvRejectsInvalidAccountKey(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	if _, err := s.Env(drv, "not-a-valid-key"); err == nil {
+		t.Fatal("Env with an invalid accountKey should be rejected")
+	}
+}
+
+func runtimeIsWindows() bool {
+	return os.PathSeparator == '\\'
 }
