@@ -21,10 +21,12 @@ type ranked struct {
 
 // selectCandidate ports the ranking half of autoswitch.py's tick — the
 // filtering block at autoswitch.py:1773-1862 and the sort-key block at
-// autoswitch.py:1863-1898 (_rank_candidates) — restricted to the two
-// strategies and two gated triggers this package implements (see package
-// doc: no consume-first two-phase commit, no no-return bar, no API-key
-// fallback, no unhealthy-tick idle-hold nuance).
+// autoswitch.py:1863-1898 (_rank_candidates), INCLUDING the headroom-axis
+// fallback re-admission list (autoswitch.py:1838-1845,1896 — review N3) —
+// restricted to the two strategies and two gated triggers this package
+// implements (see package doc for what remains out of scope: the
+// consume-first two-phase commit, the "no-return account" bar, and API-key
+// candidates).
 //
 // trigger is "proactive" | "at-limit" | "consume-first" | "failover"
 // (decide.go). strategy is StrategyBest or StrategyConsumeFirst (Decide
@@ -95,7 +97,11 @@ func selectCandidate(active provider.AccountRow, activeHeadroom float64, candida
 		}
 	}
 
-	var qualifying []ranked
+	// fallback (review N3, autoswitch.py:1838-1845): candidates that failed
+	// the headroom-ratio gate below but still meet a narrower re-admission
+	// test. Only consulted if `qualifying` ends up completely empty
+	// (autoswitch.py:1896 `qualifying = qualifying or fallback`).
+	var qualifying, fallback []ranked
 	for _, k := range all {
 		if k.headroom <= 0 {
 			continue // itself at its limit — never a target (autoswitch.py:1781-1782)
@@ -132,22 +138,55 @@ func selectCandidate(active provider.AccountRow, activeHeadroom float64, candida
 				qualifying = append(qualifying, ranked{k.acct, 0, candRecoveryTs, -k.headroom})
 			} else {
 				if k.headroom < activeHeadroom*HorizonHeadroomRatio {
+					// Rejected by the headroom-ratio gate, but review N3's
+					// fallback re-admission (autoswitch.py:1838-1845) still
+					// applies: active is SPENT (<=SpentHeadroomPct), this
+					// candidate is at least as good headroom-wise, and it
+					// recovers meaningfully sooner than the active account
+					// (the same RecoveryHysteresisS margin the recovery axis
+					// itself uses). Appended, not qualified — only used if
+					// `qualifying` ends up empty (see below the loop).
+					if activeHeadroom <= SpentHeadroomPct &&
+						k.headroom >= activeHeadroom &&
+						candRecoveryTs < activeRecoveryTs-RecoveryHysteresisS {
+						fallback = append(fallback, ranked{k.acct, 0, candRecoveryTs, -k.headroom})
+					}
 					continue
 				}
 				qualifying = append(qualifying, ranked{k.acct, 1, -k.headroom, candRecoveryTs})
 			}
 		case consumeFirst:
+			// Review N1: the reset filter itself is gated on the TRIGGER
+			// STRING being literally "consume-first" (autoswitch.py:1843
+			// `if trigger == "consume-first" and (...)`), NOT on the
+			// strategy alone. When trigger=="proactive" (active crossed
+			// threshold) under StrategyConsumeFirst, this filter is
+			// skipped entirely — the landing check above is the only gate,
+			// and the candidate qualifies unconditionally, ranked by reset
+			// order (unknown resets sort last via +Inf, autoswitch.py:1891
+			// `reset_ts if reset_ts is not None else float("inf")`).
 			candResetTs := sevenDayResetTs(k.acct.Usage, now)
-			if candResetTs == nil || activeResetTs == nil || *candResetTs >= *activeResetTs {
-				continue
+			if trigger == "consume-first" {
+				if candResetTs == nil || activeResetTs == nil || *candResetTs >= *activeResetTs {
+					continue
+				}
 			}
-			qualifying = append(qualifying, ranked{k.acct, 0, *candResetTs, -k.headroom})
+			rt := math.Inf(1)
+			if candResetTs != nil {
+				rt = *candResetTs
+			}
+			qualifying = append(qualifying, ranked{k.acct, 0, rt, -k.headroom})
 		default: // best, not all_above
 			if k.headroom-activeHeadroom < pol.HysteresisPct {
 				continue
 			}
 			qualifying = append(qualifying, ranked{k.acct, 0, -k.headroom, 0})
 		}
+	}
+
+	if len(qualifying) == 0 && len(fallback) > 0 {
+		// autoswitch.py:1896 `qualifying = qualifying or fallback`.
+		qualifying = fallback
 	}
 
 	if len(qualifying) == 0 {

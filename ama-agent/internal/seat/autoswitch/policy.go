@@ -94,4 +94,13 @@ const (
 	// the active account and the best candidate are this low, rank by
 	// soonest reset instead of headroom (autoswitch.py:121-126).
 	SpentHeadroomPct = 3.0
+
+	// IdleHoldMaxS mirrors autoswitch.py:80 (`IDLE_HOLD_MAX_S = 30 * 60.0`)
+	// exactly — same name shape, same value, 1800 seconds. See decide.go's
+	// idle-hold handling (review N2) for how it's used: while the active
+	// account's token is expired AND Claude Code is presumably just idle
+	// (not actively erroring), the engine holds — does NOT count toward
+	// UnhealthyTicks — for up to this long before falling back to normal
+	// failover counting.
+	IdleHoldMaxS = 30 * 60.0
 )

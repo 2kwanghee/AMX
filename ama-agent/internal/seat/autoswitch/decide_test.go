@@ -346,23 +346,188 @@ func TestDecide_UnhealthyTicksFailover(t *testing.T) {
 	}
 }
 
-// --- C3 회귀: next-available은 tick 전략이 아니라 명시적으로 거부 --------
+// --- C3/N4: next-available은 tick 전략이 아니다 --------------------------
 
-func TestDecide_NextAvailableRejected(t *testing.T) {
+// TestValidateStrategy_RejectsNextAvailableAtTheBoundary locks the "reject
+// once, at receipt" half of review N4's fix: a caller validating a Strategy
+// value BEFORE it ever reaches Decide gets a real, loud error.
+func TestValidateStrategy_RejectsNextAvailableAtTheBoundary(t *testing.T) {
+	if err := ValidateStrategy(StrategyBest); err != nil {
+		t.Fatalf("ValidateStrategy(best) = %v, want nil", err)
+	}
+	if err := ValidateStrategy(StrategyConsumeFirst); err != nil {
+		t.Fatalf("ValidateStrategy(consume-first) = %v, want nil", err)
+	}
+	if err := ValidateStrategy(StrategyNextAvailable); !errors.Is(err, ErrNextAvailableIsManualOnly) {
+		t.Fatalf("ValidateStrategy(next-available) = %v, want ErrNextAvailableIsManualOnly", err)
+	}
+	if err := ValidateStrategy(Strategy("bogus")); err == nil {
+		t.Fatalf("ValidateStrategy(bogus) = nil, want an error")
+	}
+}
+
+// TestDecide_InvalidStrategyDegradesToBest locks review N4's other half: a
+// per-tick Decide call NEVER goes silent over a bad Strategy value (the
+// first version's behavior — returning ErrNextAvailableIsManualOnly with a
+// zero Decision — reached a scheduler that only logs locally, so the whole
+// engine would appear to just stop with no server-visible signal). Decide
+// now degrades to StrategyBest for the tick and reports the coercion.
+func TestDecide_InvalidStrategyDegradesToBest(t *testing.T) {
 	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
 	in := Input{
-		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), acct(2, "b@x", 50, "")},
+		Accounts:     []provider.AccountRow{acct(1, "a@x", 95, ""), acct(2, "b@x", 50, "")}, // headroom 45, clears hysteresis
 		ActiveNumber: 1, Strategy: StrategyNextAvailable, Policy: pol, Now: t0,
 	}
 	d, err := Decide(in)
-	if !errors.Is(err, ErrNextAvailableIsManualOnly) {
-		t.Fatalf("err = %v, want ErrNextAvailableIsManualOnly", err)
+	// Decide itself never errors on a bad Strategy anymore.
+	mustSwitch(t, d, err, 2)
+	if !d.StrategyCoerced || d.StrategyRejected != StrategyNextAvailable {
+		t.Fatalf("StrategyCoerced/StrategyRejected = %v/%q, want true/%q", d.StrategyCoerced, d.StrategyRejected, StrategyNextAvailable)
 	}
-	if d.Outcome != OutcomeNoAction || d.To != nil || d.From != nil || len(d.Events) != 0 {
-		t.Fatalf("d = %+v, want zero Decision on rejection", d)
+
+	// A valid strategy never sets the coercion flags.
+	in.Strategy = StrategyBest
+	d, err = Decide(in)
+	mustSwitch(t, d, err, 2)
+	if d.StrategyCoerced {
+		t.Fatalf("StrategyCoerced = true for a valid strategy, want false")
 	}
-	if d.ResultCode(err) != CodeError {
-		t.Fatalf("ResultCode = %d, want CodeError", d.ResultCode(err))
+}
+
+// --- N1 회귀: consume-first 리셋 필터는 trigger=="consume-first"일 때만 --
+
+// TestDecide_ConsumeFirst_ProactiveTriggerSkipsResetFilter locks review
+// N1: autoswitch.py:1843 gates the reset-comparison continue on
+// `trigger == "consume-first"` literally — NOT on the consume_first
+// strategy boolean alone:
+//
+//	elif consume_first:
+//	    if trigger == "consume-first" and (
+//	        reset_ts is None or active_reset_ts is None or reset_ts >= active_reset_ts
+//	    ):
+//	        continue
+//
+// When the ACTIVE account has already crossed the threshold (trigger ==
+// "proactive"), this whole `if` is false regardless of the resets, so the
+// candidate is never rejected on reset grounds — it still must clear the
+// landing check, but nothing else. The first revision's fix applied the
+// trigger split only to the SORT key, not to this filter, so a
+// consume-first pool with an active account genuinely over threshold and a
+// candidate whose weekly reset is unknown/later would wrongly BLOCK
+// (exit 3, a false KIND_ALL_EXHAUSTED) instead of switching.
+func TestDecide_ConsumeFirst_ProactiveTriggerSkipsResetFilter(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+	in := Input{
+		Accounts: []provider.AccountRow{
+			// active: headroom 5, utilization 95 >= 90 -> trigger "proactive"
+			// (NOT "consume-first" — the active already crossed the gate).
+			{Number: 1, Email: "a@x", UsageStatus: "ok", Usage: usageWeekly(95, 10, t0.Add(5*time.Hour).Format(time.RFC3339))},
+			// candidate: healthy (headroom 50, well below threshold so the
+			// landing check passes), weekly reset UNKNOWN — would fail the
+			// reset filter if it applied regardless of trigger, must still
+			// qualify since trigger != "consume-first" here.
+			{Number: 2, Email: "b@x", UsageStatus: "ok", Usage: usageWeekly(50, 10, "")},
+		},
+		ActiveNumber: 1, Strategy: StrategyConsumeFirst, Policy: pol, Now: t0,
+	}
+	d, err := Decide(in)
+	mustSwitch(t, d, err, 2)
+	if d.Trigger != "proactive" {
+		t.Fatalf("trigger = %q, want proactive", d.Trigger)
+	}
+}
+
+// --- N2 회귀: idle-hold는 카운트를 늦추는 게 아니라 아예 멈춘다 ----------
+
+// TestDecide_IdleHoldSuspendsFailover locks review N2: autoswitch.py:
+// 966-983 resets _unhealthy_ticks to 0 EVERY tick the active token is
+// USAGE_TOKEN_EXPIRED and the hold window hasn't elapsed —
+//
+//	if now - self._idle_hold_since <= IDLE_HOLD_MAX_S:
+//	    self._unhealthy_ticks = 0
+//	    ... return TickOutcome.NO_ACTION  # "active-idle"
+//
+// — i.e. NO progress toward failover happens while held, not merely SLOWER
+// progress. Only once IDLE_HOLD_MAX_S (autoswitch.py:80, 1800s) has
+// elapsed does it fall through to normal counting.
+func TestDecide_IdleHoldSuspendsFailover(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 1}
+	idleActive := provider.AccountRow{Number: 1, Email: "a@x", UsageStatus: "token_expired", Usage: nil}
+	healthy := acct(2, "b@x", 50, "")
+	accounts := []provider.AccountRow{idleActive, healthy}
+
+	// tick 1: hold starts now.
+	d, err := Decide(Input{Accounts: accounts, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0})
+	mustNoAction(t, d, err, "active-idle")
+	if d.UnhealthyTicks != 0 {
+		t.Fatalf("tick1 UnhealthyTicks = %d, want 0 (idle-hold suspends counting entirely)", d.UnhealthyTicks)
+	}
+	if d.IdleHoldSince == nil || !d.IdleHoldSince.Equal(t0) {
+		t.Fatalf("tick1 IdleHoldSince = %v, want %v", d.IdleHoldSince, t0)
+	}
+
+	// tick 2: 1000s later, well within IdleHoldMaxS (1800s) — STILL held,
+	// STILL zero, even though this is the engine's Nth consecutive tick
+	// seeing an unreadable active account. This is exactly the case the
+	// first revision got backwards: it would have incremented here.
+	later := t0.Add(1000 * time.Second)
+	d, err = Decide(Input{Accounts: accounts, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: later, IdleHoldSince: d.IdleHoldSince})
+	mustNoAction(t, d, err, "active-idle")
+	if d.UnhealthyTicks != 0 {
+		t.Fatalf("tick2 UnhealthyTicks = %d, want 0", d.UnhealthyTicks)
+	}
+	if d.IdleHoldSince == nil || !d.IdleHoldSince.Equal(t0) {
+		t.Fatalf("tick2 IdleHoldSince = %v, want unchanged %v", d.IdleHoldSince, t0)
+	}
+
+	// tick 3: past IdleHoldMaxS -> falls through to normal counting; with
+	// UnhealthyTicks policy of 1, this single fallen-through tick already
+	// fails over.
+	past := t0.Add(time.Duration(IdleHoldMaxS)*time.Second + time.Second)
+	d, err = Decide(Input{Accounts: accounts, ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: past, IdleHoldSince: d.IdleHoldSince})
+	mustSwitch(t, d, err, 2)
+	if d.Trigger != "failover" {
+		t.Fatalf("trigger = %q, want failover", d.Trigger)
+	}
+	if d.UnhealthyTicks != 1 {
+		t.Fatalf("tick3 UnhealthyTicks = %d, want 1", d.UnhealthyTicks)
+	}
+}
+
+// --- N3 회귀: all_above 헤드룸 축 fallback 재편입 -------------------------
+
+// TestDecide_AllAboveHeadroomFallbackReadmission locks review N3:
+// autoswitch.py:1838-1845 re-admits a headroom-axis reject when
+//
+//	(active_headroom or 0.0) <= SPENT_HEADROOM_PCT
+//	and h >= (active_headroom or 0.0)
+//	and recovery_ts < active_recovery_ts - RECOVERY_HYSTERESIS_S
+//
+// via `fallback.append(...)`, and autoswitch.py:1896
+// `qualifying = qualifying or fallback` re-admits the WHOLE fallback list
+// only when the primary qualifying list ended up empty. Without this, an
+// all-above-threshold pool where every candidate misses the headroom-ratio
+// bar (HorizonHeadroomRatio) but the active account is SPENT (<=3 points)
+// wrongly BLOCKs (exit 3) instead of moving to the soonest-recovering
+// still-viable candidate.
+func TestDecide_AllAboveHeadroomFallbackReadmission(t *testing.T) {
+	pol := Policy{ThresholdPct: 90, HysteresisPct: 10, CooldownSeconds: 0, UnhealthyTicks: 3}
+	activeReset := t0.Add(10 * time.Hour).Format(time.RFC3339) // 36000s out — beyond RecoveryHorizonS(4h)
+	highReset := t0.Add(11 * time.Hour).Format(time.RFC3339)   // later still — not "meaningfully sooner"
+	bReset := t0.Add(9 * time.Hour).Format(time.RFC3339)       // 32400s out — beyond horizon too, but 3600s < active's, clears RecoveryHysteresisS(300s)
+
+	in := Input{
+		Accounts: []provider.AccountRow{
+			acct(1, "a@x", 97, activeReset),  // headroom 3 (== SpentHeadroomPct, boundary passes on <=)
+			acct(2, "high@x", 95, highReset), // headroom 5: inflates bestCandidateHeadroom past 3 (defeats the spent-branch of recoveryIsUseful) but itself never qualifies or falls back (its reset is later, not sooner)
+			acct(3, "b@x", 96.5, bReset),     // headroom 3.5: fails the ratio gate (3.5 < 3*2=6) but clears the fallback test
+		},
+		ActiveNumber: 1, Strategy: StrategyBest, Policy: pol, Now: t0,
+	}
+	d, err := Decide(in)
+	mustSwitch(t, d, err, 3)
+	if d.Trigger != "proactive" {
+		t.Fatalf("trigger = %q, want proactive", d.Trigger)
 	}
 }
 

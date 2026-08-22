@@ -9,7 +9,13 @@ import (
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
 	"github.com/2kwanghee/AMX/ama-agent/internal/seat/profile"
+	seatusage "github.com/2kwanghee/AMX/ama-agent/internal/seat/usage"
 )
+
+// idleHoldMaxDuration is IdleHoldMaxS (policy.go, ported from
+// autoswitch.py:80) as a time.Duration, for direct use against time.Time
+// subtraction in the idle-hold check below.
+var idleHoldMaxDuration = time.Duration(IdleHoldMaxS * float64(time.Second))
 
 // Outcome is the decision's coarse verdict; ResultCode maps it (plus a
 // caller-supplied error) onto the four `auto --once` exit codes (contract
@@ -22,18 +28,35 @@ const (
 	OutcomeBlocked
 )
 
-// ErrNextAvailableIsManualOnly is returned by Decide when Input.Strategy is
-// StrategyNextAvailable. Review C3: tsamx's tick strategy field is only ever
-// "best" or "consume-first" (tsamx/src/tsamx/settings.py:47-50);
-// next-available is exclusively the MANUAL `switch --strategy`/SwitchNow
-// literal (internal/command/handlers.go:524-527,635-641). Decide fails
-// loudly instead of silently downgrading to "best" — a caller that manages
-// to feed this engine a manual-switch literal (e.g. a
-// default_strategy meant for switch_now leaking into an auto-tick policy)
-// has a real wiring bug, and best-effort coercion would hide it as a
-// quiet behavior change (blind rotation instead of headroom ranking)
-// exactly where the review flagged the risk.
+// ErrNextAvailableIsManualOnly is returned by ValidateStrategy (NOT by
+// Decide itself as of review N4 — see ValidateStrategy's and Decide's doc)
+// when a Strategy value is StrategyNextAvailable. tsamx's tick strategy
+// field is only ever "best" or "consume-first" (tsamx/src/tsamx/settings.py:
+// 47-50); next-available is exclusively the MANUAL `switch --strategy`/
+// SwitchNow literal (internal/command/handlers.go:524-527,635-641).
 var ErrNextAvailableIsManualOnly = errors.New("autoswitch: next-available is a manual switch-strategy literal, not a valid tick Strategy")
+
+// ValidateStrategy reports whether s is a valid TICK strategy
+// (StrategyBest or StrategyConsumeFirst). Review N4: this is the "reject
+// once, at the boundary" half of the fix — a caller that RECEIVES a
+// Strategy value from outside (e.g. a server SetPolicy command persisting
+// tenant/server policy, or a config file) should call this at that receipt
+// point, before the value ever reaches a per-tick Decide call, so an
+// invalid value (typically StrategyNextAvailable, contract C1's
+// manual-only literal) is refused loudly and ONCE, with a real error the
+// caller can surface as a rejected command/config change — rather than
+// silently degrading every subsequent tick (see Decide's doc for why
+// Decide itself no longer errors on this).
+func ValidateStrategy(s Strategy) error {
+	switch s {
+	case StrategyBest, StrategyConsumeFirst:
+		return nil
+	case StrategyNextAvailable:
+		return ErrNextAvailableIsManualOnly
+	default:
+		return fmt.Errorf("autoswitch: unknown strategy %q", s)
+	}
+}
 
 // Input is everything Decide needs, entirely caller-supplied — no file
 // reads, no clock reads, no network calls (package doc, "판정 로직만
@@ -93,6 +116,15 @@ type Input struct {
 	// activation. Once a caller is wired to a real server assignment, it
 	// should always populate this field.
 	AssignedAccountKeys []string
+	// IdleHoldSince is the caller-persisted start of the current
+	// idle-hold window (review N2) — nil when no hold is in progress.
+	// Mirrors tsamx's self._idle_hold_since, which survives across ticks
+	// the same way self._unhealthy_ticks does (autoswitch.py:657-658).
+	// Decide returns the updated value via Decision.IdleHoldSince for
+	// the caller to persist for the next call — see that field's doc
+	// and the unhealthy-ticks gate in Decide for the exact state
+	// machine this drives.
+	IdleHoldSince *time.Time
 }
 
 // Target identifies a switch endpoint with everything a caller needs to
@@ -135,7 +167,23 @@ type Decision struct {
 	// caller persists this and passes it back as
 	// Input.ConsecutiveUnhealthyTicks on the next call.
 	UnhealthyTicks int
-	Events         []Event
+	// IdleHoldSince is the updated idle-hold window start (review N2) — nil
+	// when no hold is (or remains) in progress this tick. The caller
+	// persists this and passes it back as Input.IdleHoldSince on the next
+	// call, mirroring Input.ConsecutiveUnhealthyTicks/UnhealthyTicks.
+	IdleHoldSince *time.Time
+	// StrategyCoerced is true when Input.Strategy was not a valid tick
+	// strategy (StrategyNextAvailable, or any other unrecognized value) and
+	// Decide fell back to StrategyBest for THIS tick rather than refusing to
+	// decide at all (review N4 — see ValidateStrategy's doc for why: a
+	// per-tick error here reached the scheduler as a silent log line with
+	// no server-visible event, autoswitch stopping with no signal). When
+	// true, StrategyRejected carries the invalid value that was received,
+	// so a caller can report/alert on it (as often or as rarely as it
+	// wants — this package has no cross-call memory to deduplicate with).
+	StrategyCoerced  bool
+	StrategyRejected Strategy
+	Events           []Event
 }
 
 // QuarantineEntryDelta names one slot Decide wants added to or removed from
@@ -151,11 +199,12 @@ type QuarantineEntryDelta struct {
 // (contract C5; internal/tsamx/contract_test.go's TestContractAutoOnceExit
 // Codes pins the same four values 0/1/2/3 for ExecBridge — this mapping must
 // never diverge, so a native engine wired to the same call sites is a
-// drop-in). Decide itself never fails "with an error" for a normal verdict —
-// pass a caller-side error (e.g. the quarantine state file could not be
-// read BEFORE Decide ran, or Decide itself returned a validation error such
-// as ErrNextAvailableIsManualOnly) to get CodeError; a nil error with a
-// NoAction/Switched/Blocked Outcome maps to 2/0/3 respectively.
+// drop-in). Decide itself never fails a normal tick with an error (review
+// N4 — see ValidateStrategy's doc for why an invalid Input.Strategy is no
+// longer one of the ways Decide can error): pass a caller-side error (e.g.
+// the quarantine state file could not be read BEFORE Decide ran) to get
+// CodeError; a nil error with a NoAction/Switched/Blocked Outcome maps to
+// 2/0/3 respectively.
 type ResultCode int
 
 const (
@@ -184,18 +233,35 @@ func ref(a provider.AccountRow) *AccountRef {
 }
 
 // Decide evaluates one tick: quarantine sweep, threshold/unhealthy-ticks
-// gate, cooldown, PolicyGuard filtering, candidate selection under
-// Input.Strategy. Pure — same input always yields the same output
+// gate, cooldown, PolicyGuard filtering, candidate selection under a valid
+// tick strategy. Pure — same input always yields the same output
 // (decide_test.go pins representative cases by hand).
+//
+// Review N4: Decide no longer REFUSES a tick over an invalid
+// Input.Strategy (StrategyNextAvailable or any other unrecognized value).
+// The first version did (returning ErrNextAvailableIsManualOnly), which
+// silently halted this engine's auto-switch entirely for as long as the
+// bad value stood: a caller wiring Decide into a tick loop the way
+// internal/scheduler/scheduler.go's AutoOnce loop is wired only logs a
+// per-tick error locally (scheduler.go:178-180) and enqueues no server
+// event — an operator watching the server would see nothing (no
+// KIND_ALL_EXHAUSTED, no switch, no alert) while the pool silently stopped
+// rotating. See ValidateStrategy for the "reject once, at the boundary"
+// half of the fix this pairs with: a caller SHOULD call ValidateStrategy
+// when a Strategy value is first received (e.g. a server SetPolicy
+// command) so a bad value never reaches Decide in production. Decide
+// itself now degrades gracefully instead — treats an invalid value as
+// StrategyBest for this tick and reports it via Decision.StrategyCoerced/
+// StrategyRejected so the caller can alert on it (once, or every
+// occurrence — its choice) without the engine ever going fully silent.
 func Decide(in Input) (Decision, error) {
-	if in.Strategy == StrategyNextAvailable {
-		return Decision{}, ErrNextAvailableIsManualOnly
-	}
-	if in.Strategy != StrategyBest && in.Strategy != StrategyConsumeFirst {
-		return Decision{}, fmt.Errorf("autoswitch: unknown strategy %q", in.Strategy)
-	}
-
 	d := Decision{}
+	strategy := in.Strategy
+	if strategy != StrategyBest && strategy != StrategyConsumeFirst {
+		d.StrategyCoerced = true
+		d.StrategyRejected = in.Strategy
+		strategy = StrategyBest
+	}
 
 	activeIdx := -1
 	for i, a := range in.Accounts {
@@ -289,11 +355,13 @@ func Decide(in Input) (Decision, error) {
 	var trigger string
 	if activeHeadroom != nil {
 		// Active usage IS readable this tick: reset the failover counter
-		// (autoswitch.py:941 `self._unhealthy_ticks = 0`).
+		// and the idle-hold clock (autoswitch.py:941-942
+		// `self._unhealthy_ticks = 0; self._idle_hold_since = None`).
 		d.UnhealthyTicks = 0
+		d.IdleHoldSince = nil
 		utilization := 100.0 - *activeHeadroom
 		if utilization < in.Policy.ThresholdPct {
-			if in.Strategy != StrategyConsumeFirst {
+			if strategy != StrategyConsumeFirst {
 				d.Outcome = OutcomeNoAction
 				d.Reason = "below-threshold"
 				d.Detail = fmt.Sprintf("%s%% < %s%%", pctLabel(utilization), pctLabel(in.Policy.ThresholdPct))
@@ -313,15 +381,53 @@ func Decide(in Input) (Decision, error) {
 	} else {
 		// Active usage is UNREADABLE this tick (review C2 — the first
 		// version treated this as a permanent NoAction dead end).
+		//
+		// Review N2 correction: the idle-hold below is NOT a "narrows to a
+		// simpler cadence" omission — leaving it out was WRONG-DIRECTION,
+		// not merely coarser. autoswitch.py:966-983 does not slow the
+		// failover countdown for an idle expired token, it SUSPENDS it
+		// entirely (unhealthy_ticks reset to 0 every idle-hold tick,
+		// autoswitch.py:977) for up to IdleHoldMaxS. Without this, a
+		// healthy account that is simply idle overnight (its access token
+		// expired the way every idle token eventually does, refresh token
+		// still fine) gets failed over and switched away from after
+		// UnhealthyTicks polls — a switch the original NEVER performs for
+		// this state. That is a false KIND_SWITCH, not a merely-slower one.
+		if active.UsageStatus == seatusage.StatusTokenExpired {
+			holdSince := in.IdleHoldSince
+			if holdSince == nil {
+				t := in.Now
+				holdSince = &t
+			}
+			if in.Now.Sub(*holdSince) <= idleHoldMaxDuration {
+				// Held: mirrors autoswitch.py:977-978
+				// (`self._unhealthy_ticks = 0`, then NoAction "active-idle").
+				d.UnhealthyTicks = 0
+				d.IdleHoldSince = holdSince
+				d.Outcome = OutcomeNoAction
+				d.Reason = "active-idle"
+				d.Detail = "token expired while Claude Code is idle; resumes on next use"
+				d.Events = append(d.Events, NoSwitchEvent{Ts: in.Now, Reason: d.Reason, Detail: d.Detail})
+				return d, nil
+			}
+			// Held longer than any idle nap should need (autoswitch.py:
+			// 989-996) — fall through to normal counting below.
+			// holdSince is intentionally left AS-IS (not refreshed to
+			// in.Now): the original never resets _idle_hold_since once it
+			// starts aging past IDLE_HOLD_MAX_S, only when active_headroom
+			// becomes known again (autoswitch.py:942) or usage stops being
+			// USAGE_TOKEN_EXPIRED for a tick (autoswitch.py:996-998, the
+			// `else: self._idle_hold_since = None` this package's `else`
+			// branch below mirrors).
+			d.IdleHoldSince = holdSince
+		} else {
+			// Not an idle-expired token: no hold in progress (mirrors
+			// autoswitch.py:996-998's `else: self._idle_hold_since = None`).
+			d.IdleHoldSince = nil
+		}
 		// Ports autoswitch.py:999-1011's unhealthy-ticks counter: only after
-		// UnhealthyTicks consecutive unreadable ticks does the engine fail
-		// over to any healthy candidate. The idle-hold nuance
-		// (autoswitch.py:966-996, USAGE_TOKEN_EXPIRED gets its own elapsed-
-		// time-bounded hold before counting) is NOT ported — see package
-		// doc; omitting it only makes failover trigger SOONER in the
-		// idle-but-healthy case, never later, so it cannot reproduce the
-		// "frozen forever" defect C2 flagged, only trade a slower cadence
-		// for a simpler one.
+		// UnhealthyTicks consecutive unreadable (and non-held) ticks does
+		// the engine fail over to any healthy candidate.
 		ticks := in.ConsecutiveUnhealthyTicks + 1
 		d.UnhealthyTicks = ticks
 		if ticks < in.Policy.UnhealthyTicks {
@@ -388,7 +494,7 @@ func Decide(in Input) (Decision, error) {
 	if activeHeadroom != nil {
 		activeHeadroomArg = *activeHeadroom
 	}
-	target, reason, detail := selectCandidate(active, activeHeadroomArg, candidates, in.Policy, in.Now, trigger, in.Strategy)
+	target, reason, detail := selectCandidate(active, activeHeadroomArg, candidates, in.Policy, in.Now, trigger, strategy)
 	d.Reason, d.Detail = reason, detail
 
 	if target == nil {

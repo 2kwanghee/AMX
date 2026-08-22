@@ -15,10 +15,11 @@
 // NOT own a usage store. Every input Decide needs — account usage snapshots,
 // policy values, the current time, the last switch time, and the current
 // quarantine set — is passed in by the caller. That caller-owned half (OAuth
-// refresh, the usage state store/lease) is a separate P5 track
-// (branch feat/seat-engine-p5); the two are meant to converge later, per the
-// design note's P5 bullets on "OAuth 토큰 갱신 이식(선결)" and "사용량 상태
-// 저장소(선결)".
+// refresh, the usage state store/lease — internal/seat/usage/refresh.go and
+// store.go) was a separate P5 track (branch feat/seat-engine-p5) at the time
+// this package started; it has since merged into main (PR #159), so it is
+// live code today, not a future dependency — see the "합류 설계" section
+// below for the join this package still owes it (NOT done in this commit).
 //
 // # What was ported vs. deliberately narrowed
 //
@@ -74,19 +75,35 @@
 // exclusively (StatePath) — never tsamx's autoswitch_state.json. See
 // StatePath's doc for why sharing that file would be unsafe.
 //
-// # 합류 설계 (review C4) — NOT implemented in this commit
+// # 합류 설계 (review C4, corrected review N5) — NOT implemented in this commit
 //
-// A second P5 track (branch feat/seat-engine-p5, internal/seat/usage/
-// store.go — not merged into this branch) already implements its own
-// account-health ledger: Store.Entry.TokenDead() (AuthDeadStrikes >=
+// STATUS CORRECTION (review N5): an earlier revision of this comment said
+// branch feat/seat-engine-p5 (internal/seat/usage/store.go, refresh.go) was
+// "not merged into this branch" — true only in the narrow sense that THIS
+// package's branch (feat/seat-engine-p5b) forked from main before that
+// merge landed, so store.go/refresh.go are not present in this branch's own
+// tree. It is stale as a statement about the PROJECT: feat/seat-engine-p5
+// merged into main via PR #159 (commit 38e5d0e) before this revision was
+// written. The account-health ledger described below is real, live code on
+// main today, not a future/hypothetical track.
+//
+// internal/seat/usage/store.go already implements its own account-health
+// ledger: Store.Entry.TokenDead() (AuthDeadStrikes >=
 // AuthDeadStrikesThreshold, store.go:118-124,285-289) and
 // Store.ClearDeadToken (store.go:667-677). This package's QuarantineEntry
-// map is a SEPARATE ledger. Both exist today; they are not merged here
-// because P5-a is still under active development (its own store.go:670-676
-// comment already anticipates this: "not... the P5 AutoSwitch engine's
-// separate quarantine STATE FILE... that file does not exist yet").
-// Reconciling them is future work, not this commit's scope — recorded here
-// so whoever does it doesn't have to rediscover the shape:
+// map is a SEPARATE ledger, still unreconciled with it — that reconciliation
+// is NOT done in this commit (scope discipline: this round's task was N1-N5
+// only), but it is a REAL PREREQUISITE, not a someday-nicety:
+//
+// **MUST be resolved before P6 (섀도 운전) starts.** P6 runs this engine's
+// decisions against live pools; two quarantine judgments that can disagree
+// with no rule for which wins is exactly the kind of divergence P6's shadow
+// comparison exists to catch, and shipping P6 without resolving it first
+// guarantees noisy, uninterpretable shadow diffs from day one — the
+// discrepancy would be structural, not a bug in either side.
+//
+// Recorded here so whoever picks this up doesn't have to rediscover the
+// shape:
 //
 //   - Key alignment (DONE this commit): QuarantineEntry/Input.Quarantine/
 //     Input.Fingerprints are now keyed by profile.AccountKey(email), the
@@ -97,15 +114,28 @@
 //     operate within one provider's scope at a time; joining the two only
 //     needs the accountKey half compared, or a provider prefix added here
 //     if that assumption ever changes).
-//   - Single source of truth (NOT decided here): whoever wires the two
-//     tracks together must pick ONE ledger to be authoritative for "is this
-//     account's refresh-token lineage dead" — either usage.Store.TokenDead
-//     (fed by real refresh attempts, review-precise but requires the OAuth
-//     track) or this package's ShouldQuarantine (fed by the P4 status
-//     literal alone, available today but coarser). Running both
-//     independently, as an unwired first step would, risks the "이중
-//     원장" review flagged: two quarantine judgments that can disagree
-//     with no rule for which wins.
+//   - Single source of truth — candidates and the judgment call, NOT
+//     decided here:
+//     (a) usage.Store.TokenDead as authoritative: fed by REAL refresh
+//     attempts (AuthDeadStrikes increments only on an actual invalid_grant/
+//     no_refresh_token answer, store.go:118-124), so it is precise but
+//     requires the OAuth-refresh track to actually run against a candidate
+//     before it can know anything — an account this engine has never tried
+//     to freshen reads as healthy by omission, not "unknown".
+//     (b) this package's ShouldQuarantine as authoritative: fed by the P4
+//     status literal alone (StatusReloginRequired), available immediately
+//     without any refresh attempt, but coarser — it trusts whatever
+//     upstream usage collection already classified, rather than proving
+//     the lineage dead itself.
+//     Decision criterion: if by the time this is picked up the OAuth-
+//     refresh track (refresh.go) is routinely invoked against every
+//     candidate every cycle (not just the active account), prefer (a) —
+//     precision then costs nothing extra. If refresh is still
+//     active-account-only, (b) stays load-bearing for candidates refresh
+//     never touches, and the join should be "this package quarantines off
+//     (b) UNLESS usage.Store.TokenDead answers first, in which case its
+//     verdict wins" — i.e. (a) as an override, not a replacement, until
+//     refresh coverage is universal.
 //   - Release unification (NOT decided here): usage.Store.ClearDeadToken
 //     resets ITS OWN AuthDeadStrikes counter when a credential is
 //     refreshed/re-staged; this package's ShouldRelease independently
