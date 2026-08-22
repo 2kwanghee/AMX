@@ -94,9 +94,22 @@ func TestQueryEngineVersionSuccess(t *testing.T) {
 // the first call's cached answer, because the query only ever runs once per
 // process via sync.Once.
 func TestEngineVersionCachesAcrossCalls(t *testing.T) {
-	first := EngineVersion(context.Background(), "amx-seat-engine-p0-nonexistent-binary")
-	second := EngineVersion(context.Background(), "some-other-binary-entirely")
-	if first != second {
-		t.Errorf("EngineVersion is not memoized: first=%q second=%q", first, second)
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fixture is unix-only")
+	}
+	// The first call must resolve to a value the second call could not produce on
+	// its own — otherwise both calls returning "tsamx/absent" would pass whether
+	// or not the memoization exists.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-tsamx")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'tsamx 7.7.7'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if first := EngineVersion(context.Background(), script); first != "tsamx/7.7.7" {
+		t.Fatalf("EngineVersion(fake tsamx) = %q, want tsamx/7.7.7", first)
+	}
+	second := EngineVersion(context.Background(), "amx-seat-engine-p0-nonexistent-binary")
+	if second != "tsamx/7.7.7" {
+		t.Errorf("EngineVersion is not memoized: second call = %q, want tsamx/7.7.7", second)
 	}
 }
