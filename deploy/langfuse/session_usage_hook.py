@@ -487,6 +487,20 @@ def active_account_email() -> str | None:
     return None
 
 
+def _is_home_dir(cwd: str) -> bool:
+    """이 cwd 가 실행 사용자의 홈 디렉터리 자체인지 판정한다.
+
+    서버는 cwd 의 마지막 조각을 프로젝트 이름으로 저장한다. 홈에서 띄운 세션은
+    그 조각이 곧 로컬 계정명이라 콘솔 통계에 사람 이름이 그대로 노출된다.
+    홈이면 아예 보내지 않아 서버가 프로젝트를 비워 두게 한다.
+    """
+    try:
+        home = os.path.realpath(os.path.expanduser("~"))
+        return bool(home) and os.path.realpath(cwd) == home
+    except Exception:  # noqa: BLE001 - 경로 판정 실패는 "홈 아님"으로 취급한다.
+        return False
+
+
 def _notify(url: str, token: str, payload: dict) -> None:
     """통보 POST를 **하드 2초 데드라인**으로 경계한다(danger_hook과 같은 방식).
 
@@ -656,7 +670,7 @@ def main() -> int:
             "models": models,
         }
         cwd = payload.get("cwd")
-        if isinstance(cwd, str) and cwd:
+        if isinstance(cwd, str) and cwd and not _is_home_dir(cwd):
             out["cwd"] = cwd[:1024]
         email = active_account_email()
         if email:
