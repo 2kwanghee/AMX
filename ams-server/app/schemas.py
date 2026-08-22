@@ -126,6 +126,34 @@ class AccountUpdate(Wire):
     assignment_excluded: bool | None = None
 
 
+class AccountUsageWindowSummary(Wire):
+    """계약 밖 추가분. 창 하나(5시간/7일)의 마지막 관측값 — account_usage_windows
+    한 행을 그대로 옮긴다. stale 여부는 부모 ``AccountUsageSummary.stale``에서
+    합쳐 판단하므로, 여기서는 신선도로 값을 걸러내지 않는다(마지막 관측값을
+    그대로 보여준다는 원칙, 기획서 §2단계)."""
+
+    pct: float | None = None
+    resets_at: datetime | None = None
+
+
+class AccountUsageSummary(Wire):
+    """계약 밖 추가분. 계정 목록·단건 조회에 얹는 사용량 요약(design-notes
+    account-remaining-usage-plan.md 1단계). window_minutes 300 → five_hour,
+    10080 → seven_day 로만 매칭하고 그 외 창은 무시한다.
+
+    stale 판정 규칙의 SSOT는 app/services/pool.py:412-426 (``_fresh_pct``) —
+    ``pool_window_stale_minutes`` 이내에 reported_at 이 있는 창이 하나라도
+    있으면 신선하다. 순환 임포트 없이도 pool 서비스를 그대로 불러 쓸 수 있지만,
+    풀 자동화 모듈 전체를 계정 조회 경로에 끌어들이지 않도록 같은 상수를 참조하는
+    동일 규칙을 이 파일이 쓰이는 곳(app/api/v1/accounts.py)에 국소로 둔다.
+    """
+
+    five_hour: AccountUsageWindowSummary | None = None
+    seven_day: AccountUsageWindowSummary | None = None
+    fetched_at: datetime | None = None
+    stale: bool = True
+
+
 class Account(Wire):
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -154,6 +182,9 @@ class Account(Wire):
     pool_state_changed_at: datetime | None = None
     last_lease_ended_at: datetime | None = None
     created_at: datetime
+    # 계약 밖 추가분. list_accounts/get_account 가 채운다(app/api/v1/accounts.py)
+    # — ORM Account 에는 없는 값이라 model_validate 직후 API 레이어에서 덧붙인다.
+    usage: AccountUsageSummary | None = None
 
 
 class AccountPage(Wire):
