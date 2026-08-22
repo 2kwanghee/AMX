@@ -257,43 +257,10 @@ code {
 .sidebar-foot button:hover:not(:disabled) { background: #1E2C46; color: var(--side-ink-strong); }
 .main { flex: 1; min-width: 0; padding: 26px 30px; }
 
-.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
-.kpi {
-  position: relative; overflow: hidden;
-  text-align: left; display: flex; align-items: center; gap: 14px; width: 100%; cursor: pointer;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-  padding: 16px 18px; box-shadow: var(--shadow);
-  transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
-  --kpi-color: var(--accent); --kpi-soft: var(--accent-soft);
-}
-.kpi::before {
-  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--kpi-color);
-}
-.kpi:hover { border-color: var(--kpi-color); transform: translateY(-2px); box-shadow: 0 6px 16px rgb(26 35 50 / 0.08); }
 /* 오프라인 서버가 있으면 "온라인 서버" 카드 테두리를 warn 톤으로 */
-.kpi.warn-edge { border-color: var(--warn); }
-.kpi.warn-edge::before { background: var(--warn); }
-.kpi.kpi-teal { --kpi-color: var(--kpi-teal); --kpi-soft: var(--kpi-teal-soft); }
-.kpi.kpi-indigo { --kpi-color: var(--kpi-indigo); --kpi-soft: var(--kpi-indigo-soft); }
-.kpi.kpi-amber { --kpi-color: var(--kpi-amber); --kpi-soft: var(--kpi-amber-soft); }
-.kpi.kpi-rose { --kpi-color: var(--kpi-rose); --kpi-soft: var(--kpi-rose-soft); }
-.kpi .kpi-chip {
-  flex: 0 0 auto; width: 40px; height: 40px; border-radius: 999px;
-  display: inline-flex; align-items: center; justify-content: center;
-  background: var(--kpi-soft); color: var(--kpi-color);
-}
-.kpi .kpi-body { min-width: 0; flex: 1; }
-.kpi .kpi-label { color: var(--muted); font-size: 13px; }
-.kpi .kpi-value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 4px; line-height: 1.1; }
-.kpi .kpi-value small { font-size: 15px; color: var(--muted); font-weight: 600; }
-/* KPI 스파크라인 — 카드 고유색을 currentColor로 상속(텍스트엔 미사용) */
-.kpi .kpi-spark { color: var(--kpi-color); margin-top: 6px; height: 30px; }
 .spark { display: block; width: 100%; height: 100%; overflow: visible; }
 .spark-line { fill: none; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .spark-area { fill: currentColor; opacity: 0.08; stroke: none; }
-@media (prefers-reduced-motion: reduce) {
-  .kpi:hover { transform: none; }
-}
 
 .pipeline { display: inline-flex; align-items: center; gap: 10px; }
 .pipeline .arrow { color: var(--muted); }
@@ -436,9 +403,6 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
   .nav-item { white-space: nowrap; }
   .sidebar-foot { margin-top: 0; flex-direction: row; align-items: center; }
   .main { padding: 20px 16px; }
-}
-@media (max-width: 720px) {
-  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* -- 관제망 메시 배경 (MeshBackdrop) ------------------------------------- */

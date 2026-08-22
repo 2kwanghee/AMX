@@ -830,3 +830,39 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_home_cwd_is_not_reported(hook, monkeypatch, transcript_file, tmp_path):
+    """홈에서 띄운 세션은 cwd 를 빼고 보낸다(프로젝트 이름이 곧 계정명이 된다)."""
+    home = tmp_path / "someuser"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    out = _run(
+        hook,
+        monkeypatch,
+        {
+            "session_id": "sess-home",
+            "transcript_path": str(transcript_file),
+            "cwd": str(home),
+        },
+    )
+    assert out is not None
+    assert "cwd" not in out["payload"]
+
+
+def test_subdirectory_of_home_is_reported(hook, monkeypatch, transcript_file, tmp_path):
+    home = tmp_path / "someuser"
+    project = home / "work" / "AMX"
+    project.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    out = _run(
+        hook,
+        monkeypatch,
+        {
+            "session_id": "sess-proj",
+            "transcript_path": str(transcript_file),
+            "cwd": str(project),
+        },
+    )
+    assert out is not None
+    assert out["payload"]["cwd"] == str(project)

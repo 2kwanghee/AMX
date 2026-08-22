@@ -13,6 +13,7 @@ import {
   sankeyLayout,
   stackSeries,
   areaPath,
+  topLinePath,
 } from '@/components/charts/math';
 
 describe('easeOutCubic / countUpValue / countUpFrames', () => {
@@ -163,6 +164,33 @@ describe('areaPath', () => {
 
   it('maxY<=0이면 예외 없이 바닥선으로 눌러 그린다', () => {
     expect(() => areaPath([[0, 5], [0, 8]], 100, 50, 0)).not.toThrow();
+  });
+});
+
+describe('topLinePath', () => {
+  it('빈 배열이면 빈 문자열', () => {
+    expect(topLinePath([], 100, 50, 10)).toBe('');
+  });
+
+  it('점이 하나면 M 하나짜리 경로', () => {
+    const d = topLinePath([[0, 5]], 100, 50, 10);
+    expect(d.startsWith('M')).toBe(true);
+    expect(d).not.toContain('L');
+  });
+
+  it('점 개수만큼 꼭짓점을 만들고 윗변(y1)을 따라간다', () => {
+    const w = 100;
+    const h = 50;
+    const d = topLinePath([[0, 0], [0, 5], [0, 10]], w, h, 10);
+    // M + L 두 개 = 꼭짓점 3개.
+    expect((d.match(/[ML]/g) ?? []).length).toBe(3);
+    // 첫 점은 x=0/바닥(y=h), 마지막 점은 x=w/천장(y=0).
+    expect(d.startsWith('M0,50')).toBe(true);
+    expect(d.endsWith('100,0')).toBe(true);
+  });
+
+  it('maxY<=0이어도 예외 없이 바닥선으로 눌러 그린다', () => {
+    expect(() => topLinePath([[0, 5], [0, 8]], 100, 50, 0)).not.toThrow();
   });
 });
 
