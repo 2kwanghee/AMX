@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,37 @@ const (
 	authV1Acc2 = `{"auth_mode":"chatgpt","tokens":{"id_token":"i9","access_token":"a9","refresh_token":"r1","account_id":"acc1"}}` // access/id rotated, refresh same
 	authV2     = `{"auth_mode":"chatgpt","tokens":{"id_token":"i2","access_token":"a2","refresh_token":"r2","account_id":"acc1"}}`
 )
+
+// --- Identity ---------------------------------------------------------
+
+func TestIdentityReadsBackBridgeMetaSidecar(t *testing.T) {
+	dir := t.TempDir()
+	// Driver.StageCredential never writes metaFile (see codex.go doc: identity
+	// lives only in the bridge's sidecar), so this test writes it the way
+	// Bridge.Add does rather than going through StageCredential.
+	blob, err := json.Marshal(codexMeta{Email: "Codex.User@Example.com", AccountUUID: "acc-1", OrganizationName: "Acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, metaFile), blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := New()
+	got, err := d.Identity(dir)
+	if err != nil {
+		t.Fatalf("Identity: %v", err)
+	}
+	if got != "Codex.User@Example.com" {
+		t.Fatalf("Identity = %q, want the raw sidecar email unchanged", got)
+	}
+}
+
+func TestIdentityErrorsWhenNoSidecar(t *testing.T) {
+	d := New()
+	if _, err := d.Identity(t.TempDir()); err == nil {
+		t.Fatal("Identity with no meta sidecar should error, not return an empty email silently")
+	}
+}
 
 // TestFingerprint pins the scheme: refresh-token hash when present (surviving
 // access/id-token rotation), content hash otherwise, empty only for empty input.

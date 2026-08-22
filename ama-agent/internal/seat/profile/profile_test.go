@@ -804,6 +804,186 @@ func TestReStageDyingMidwayLeavesCompleteFalse(t *testing.T) {
 	}
 }
 
+// --- State / Reconcile ------------------------------------------------
+
+func TestStateAbsentBeforeAnyStage(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("never-staged@example.com")
+	if _, err := s.Create(drv.Name(), key, Template{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateAbsent {
+		t.Fatalf("State = %v, want StateAbsent for a Create()-only profile", st)
+	}
+}
+
+func TestStateStagedAfterStage(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("staged@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-staged"), provider.AddMeta{Email: "staged@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateStaged {
+		t.Fatalf("State = %v, want StateStaged right after a successful Stage", st)
+	}
+}
+
+// TestStateRotatedIsNotIncompleteOrAbsent is the P2-review-①-mandated case:
+// a credential the vendor's own runner rotated in place (fingerprint moved,
+// but still carries real material) must classify as StateRotated, NOT
+// StateAbsent/StateIncomplete — those would make a healthy, freshly-rotated
+// account look broken (see Complete's CAUTION doc).
+func TestStateRotatedIsNotIncompleteOrAbsent(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("rotated@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-old"), provider.AddMeta{Email: "rotated@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	dir, _, err := s.resolveProfile(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("resolveProfile: %v", err)
+	}
+	// Simulate the vendor's runner rotating the refresh token in place —
+	// exactly what Complete's !Complete-after-rotation case models.
+	if err := drv.StageCredential(dir, sampleCredential("rt-new"), provider.AddMeta{Email: "rotated@example.com"}); err != nil {
+		t.Fatalf("simulate in-place rotation: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateRotated {
+		t.Fatalf("State = %v, want StateRotated for a healthy in-place rotation", st)
+	}
+	// Sanity: this is exactly the scenario where naive !Complete would read
+	// "not ready" — assert that trap is real so this test would fail if
+	// someone reintroduced it as the readiness signal.
+	if done, err := s.Complete(drv, key); err != nil || done {
+		t.Fatalf("Complete after rotation = (%v, %v), want (false, nil) — confirms State, not Complete, is the readiness signal to use", done, err)
+	}
+}
+
+func TestStateIncompleteForBlankCredential(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("blank@example.com")
+	dir, err := s.Create(drv.Name(), key, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// A logged-out shell: the token keys exist but are blank.
+	blank := []byte(`{"claudeAiOauth":{"accessToken":"","refreshToken":""}}`)
+	if err := os.WriteFile(drv.CredentialPath(dir), blank, 0o600); err != nil {
+		t.Fatalf("write blank credential: %v", err)
+	}
+	st, err := s.State(drv, key)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st != StateIncomplete {
+		t.Fatalf("State = %v, want StateIncomplete for a logged-out (blank) credential", st)
+	}
+}
+
+func TestReconcileRestampsMarkerOnRotationAndBecomesStaged(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("reconcile@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-before"), provider.AddMeta{Email: "reconcile@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	dir, _, err := s.resolveProfile(drv.Name(), key)
+	if err != nil {
+		t.Fatalf("resolveProfile: %v", err)
+	}
+	if err := drv.StageCredential(dir, sampleCredential("rt-after"), provider.AddMeta{Email: "reconcile@example.com"}); err != nil {
+		t.Fatalf("simulate in-place rotation: %v", err)
+	}
+	if st, err := s.State(drv, key); err != nil || st != StateRotated {
+		t.Fatalf("precondition: State = (%v, %v), want (StateRotated, nil)", st, err)
+	}
+
+	st, err := s.Reconcile(drv, key)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if st != StateStaged {
+		t.Fatalf("Reconcile returned %v, want StateStaged", st)
+	}
+
+	// The marker must now match the NEW (post-rotation) fingerprint, so a
+	// plain re-read of State/Complete agrees without Reconcile running again.
+	if st, err := s.State(drv, key); err != nil || st != StateStaged {
+		t.Fatalf("State after Reconcile = (%v, %v), want (StateStaged, nil)", st, err)
+	}
+	if done, err := s.Complete(drv, key); err != nil || !done {
+		t.Fatalf("Complete after Reconcile = (%v, %v), want (true, nil)", done, err)
+	}
+	markerFP, err := os.ReadFile(filepath.Join(dir, stagedMarkerName))
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(markerFP) != drv.Fingerprint(sampleCredential("rt-after")) {
+		t.Fatalf("marker = %q, want the fingerprint of the rotated (post-rotation) credential", markerFP)
+	}
+}
+
+func TestReconcileIsNoOpOnAbsentAndIncomplete(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+
+	absentKey := AccountKey("reconcile-absent@example.com")
+	if _, err := s.Create(drv.Name(), absentKey, Template{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if st, err := s.Reconcile(drv, absentKey); err != nil || st != StateAbsent {
+		t.Fatalf("Reconcile(absent) = (%v, %v), want (StateAbsent, nil)", st, err)
+	}
+
+	incompleteKey := AccountKey("reconcile-incomplete@example.com")
+	dir, err := s.Create(drv.Name(), incompleteKey, Template{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blank := []byte(`{"claudeAiOauth":{"accessToken":"","refreshToken":""}}`)
+	if err := os.WriteFile(drv.CredentialPath(dir), blank, 0o600); err != nil {
+		t.Fatalf("write blank credential: %v", err)
+	}
+	if st, err := s.Reconcile(drv, incompleteKey); err != nil || st != StateIncomplete {
+		t.Fatalf("Reconcile(incomplete) = (%v, %v), want (StateIncomplete, nil)", st, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stagedMarkerName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Reconcile must not write a marker for an incomplete credential: stat err = %v", err)
+	}
+}
+
+func TestReconcileAlreadyStagedIsIdempotent(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("already-staged@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-idem"), provider.AddMeta{Email: "already-staged@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	st, err := s.Reconcile(drv, key)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if st != StateStaged {
+		t.Fatalf("Reconcile on an already-staged profile = %v, want StateStaged", st)
+	}
+}
+
 // --- Active pointer --------------------------------------------------------
 
 func TestGetActiveNoneSet(t *testing.T) {

@@ -257,6 +257,42 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 // TestFingerprintMirrorsTsamx pins the fingerprint scheme against tsamx
 // oauth.credential_fingerprint: refresh-token hash when present, content hash
 // otherwise, and empty only for empty input.
+// --- Identity -------------------------------------------------------------
+
+func TestIdentityReadsBackStagedEmail(t *testing.T) {
+	dir := t.TempDir()
+	d := New()
+	meta := provider.AddMeta{Email: "Reader@Example.com", AccountUUID: "acc-1", OrganizationName: "Acme"}
+	if err := d.StageCredential(dir, []byte(credV1), meta); err != nil {
+		t.Fatalf("StageCredential: %v", err)
+	}
+	got, err := d.Identity(dir)
+	if err != nil {
+		t.Fatalf("Identity: %v", err)
+	}
+	if got != meta.Email {
+		t.Fatalf("Identity = %q, want the RAW staged email %q unchanged (no lowercasing)", got, meta.Email)
+	}
+}
+
+func TestIdentityErrorsWhenNeverStaged(t *testing.T) {
+	d := New()
+	if _, err := d.Identity(t.TempDir()); err == nil {
+		t.Fatal("Identity on a dir with no .claude.json should error, not return an empty email silently")
+	}
+}
+
+func TestIdentityErrorsOnEmptyOAuthAccount(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"theme":"dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := New()
+	if _, err := d.Identity(dir); err == nil {
+		t.Fatal("Identity on a .claude.json with no oauthAccount email should error")
+	}
+}
+
 func TestFingerprintMirrorsTsamx(t *testing.T) {
 	d := New()
 	if d.Fingerprint(nil) != "" {

@@ -50,4 +50,17 @@ type Driver interface {
 	Env(configDir string) []string
 	// BinaryName is the pool CLI executable for this vendor.
 	BinaryName() string
+	// Identity reads back the account identity (currently just the email) that
+	// StageCredential recorded into configDir, without re-deriving it from an
+	// AccountKey (that hash is one-way — see profile.AccountKey). It exists so a
+	// caller holding only a configDir (e.g. profile.Store.GetActive's result)
+	// can answer "whose profile is this" — closing the P2 "email -> accountKey
+	// reverse index" gap (design note P3) — and so the reverse mapping uses the
+	// SAME, un-normalized email string the manifest store keys on
+	// (store.Store.FindByProviderEmail is case-sensitive exact match; AccountKey
+	// lowercases before hashing), rather than a second, independently-derived
+	// value that could drift from it. Returns ("", err) when configDir holds no
+	// recorded identity yet (e.g. Create()d but never Stage()d). MUST NOT log
+	// credential material (it never needs to touch any).
+	Identity(configDir string) (email string, err error)
 }

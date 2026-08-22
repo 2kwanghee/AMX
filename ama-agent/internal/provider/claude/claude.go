@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"unicode"
@@ -124,6 +125,30 @@ func (*Driver) StageCredential(configDir string, credentialJSON []byte, meta pro
 		return err
 	}
 	return writeFileAtomic(configPath, blob, 0o600)
+}
+
+// Identity reads back the account email StageCredential wrote into
+// configDir's `.claude.json` (`oauthAccount.emailAddress`). It never touches
+// `.credentials.json` — the email lives only in the identity file, never in
+// the credential itself — so this reads no token material at all. Returns an
+// error when the file is absent/unreadable/unparseable, or when the email
+// field is empty (a `.claude.json` with no oauthAccount at all, or one an
+// account was Create()d for but never Stage()d, carries no identity to
+// report); either way the caller (profile.Store.GetActive et al.) sees a
+// non-nil error and must not assume a live email.
+func (*Driver) Identity(configDir string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
+	if err != nil {
+		return "", err
+	}
+	var identity claudeIdentity
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return "", err
+	}
+	if identity.OAuthAccount.EmailAddress == "" {
+		return "", fmt.Errorf("claude: %s has no recorded oauthAccount email", configDir)
+	}
+	return identity.OAuthAccount.EmailAddress, nil
 }
 
 // Fingerprint is the stable identity hash of a credential-set JSON, mirroring

@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"unicode"
@@ -87,6 +88,27 @@ func (*Driver) StageCredential(configDir string, credentialJSON []byte, _ provid
 	// auth.json concurrently, so a non-atomic os.WriteFile could be observed
 	// half-written. os.Rename is atomic on the same filesystem.
 	return writeFileAtomic(filepath.Join(configDir, credentialFile), credentialJSON, 0o600)
+}
+
+// Identity reads back the account email from the bridge's identity sidecar
+// (metaFile, written by Bridge.Add — see bridge.go) inside configDir.
+// auth.json itself carries no email (see bridge.go's metaFile doc), so this
+// never touches the credential file. Returns an error when the sidecar is
+// absent/unreadable/unparseable, or when it carries no email (e.g. Create()d
+// but never Add()ed through the bridge).
+func (*Driver) Identity(configDir string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(configDir, metaFile))
+	if err != nil {
+		return "", err
+	}
+	var meta codexMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return "", err
+	}
+	if meta.Email == "" {
+		return "", fmt.Errorf("codex: %s has no recorded identity email", configDir)
+	}
+	return meta.Email, nil
 }
 
 // Fingerprint is the stable identity hash of an auth.json body:
