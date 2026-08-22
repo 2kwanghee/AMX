@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "activeAccountNumber": 1,
+  "futureTopLevelField": {"nested": true},
+  "accounts": [
+    {
+      "number": 1,
+      "email": "z@x.io",
+      "active": true,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {"pct": 5, "resetsAt": "2026-08-23T10:00:00Z"},
+        "pace": {"expectedPct": 8},
+        "countdown": "2h"
+      },
+      "futureAccountField": "whatever",
+      "alias": "z"
+    }
+  ]
+}
