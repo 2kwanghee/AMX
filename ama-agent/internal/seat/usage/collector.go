@@ -81,9 +81,14 @@ type Collector struct {
 // timeout. Building a bespoke Transport was deliberately avoided: the design
 // note asks for "기본 트랜스포트를 쓰되 타임아웃을 명시" (use the default
 // transport, but state a timeout explicitly).
+//
+// CheckRedirect is noFollowRedirects (refresh.go) — see that function's doc
+// (adversarial review A1) for why this collector never follows a redirect
+// either, even though its access token travels only in the Authorization
+// header (never the URL or a POST body).
 func NewCollector() *Collector {
 	return &Collector{
-		client:  &http.Client{Timeout: defaultTimeout, Transport: http.DefaultTransport},
+		client:  &http.Client{Timeout: defaultTimeout, Transport: http.DefaultTransport, CheckRedirect: noFollowRedirects},
 		baseURL: usageEndpoint,
 	}
 }
@@ -91,10 +96,13 @@ func NewCollector() *Collector {
 // newCollectorForTest is used only by collector_test.go to point Fetch at an
 // httptest.Server instead of the real endpoint. Not exported: production
 // callers must never be able to redirect this collector away from Anthropic.
+// CheckRedirect is forced to noFollowRedirects UNCONDITIONALLY, even when a
+// test supplies its own client — see newRefresherForTest's identical note.
 func newCollectorForTest(baseURL string, client *http.Client) *Collector {
 	if client == nil {
 		client = &http.Client{Timeout: defaultTimeout}
 	}
+	client.CheckRedirect = noFollowRedirects
 	return &Collector{client: client, baseURL: baseURL}
 }
 
