@@ -230,6 +230,8 @@ const KR_API_ERROR: Record<string, string> = {
   // 같은 어휘를 쓴다.
   'assignment.not_deliverable':
     '전달은 대기 상태의 할당에만 가능합니다. 이미 전달된 할당이면 회수한 뒤 다시 시도하세요.',
+  'assignment.server_never_connected':
+    '이 서버의 에이전트가 아직 한 번도 접속하지 않았습니다. 에이전트를 설치·기동해 접속을 확인한 뒤 다시 전달하세요.',
   'assignment.not_recallable':
     '회수는 자격증명이 설치된 할당에만 가능합니다. 대기나 해제됨 상태에는 회수할 것이 없습니다.',
   'assignment.not_activatable':
@@ -346,6 +348,22 @@ export function krApiError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+// -- 배정 lastError 한글화 -----------------------------------------------------
+// assignment.lastError 는 서버가 남긴 실패 사유 상수(commands.py의 detail/
+// last_error 값)를 원문 그대로 담는다. 매핑에 없는 값은 원문을 그대로 보여준다
+// — 새 실패 사유가 추가돼도 정보가 사라지지는 않게 하기 위해서다.
+const KR_LAST_ERROR: Record<string, string> = {
+  queued_timeout:
+    '전달 대기 초과 — 서버에 에이전트가 설치되어 접속 중인지 확인하세요.',
+  sent_ack_timeout:
+    '전송 후 응답 없음 — 서버 접속 상태를 확인하세요.',
+};
+
+export function krLastError(code: string | null | undefined): string {
+  if (!code) return '';
+  return KR_LAST_ERROR[code] ?? code;
+}
+
 export type AssignmentActionVerb =
   | 'deliver'
   | 'recall'
@@ -371,6 +389,10 @@ export function allowedAssignmentActions(state: AssignmentState): AssignmentActi
     case 'quarantined':
       return ['recover', 'recall'];
     case 'delivering':
+      // 서버 request_recall은 delivering 배정의 회수를 이미 받아준다
+      // (commands.py request_recall). 에이전트가 없거나 구버전이라 전달이
+      // 영영 안 끝나는 경우 사용자가 직접 회수할 수 있어야 한다.
+      return ['recall'];
     case 'recalling':
     case 'detached':
     default:

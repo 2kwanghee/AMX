@@ -70,6 +70,11 @@ def _server(tenant_id, name, policy=None, status="online") -> uuid.UUID:
             db, tenant_id, name=name, hostname=None, switch_mode="auto"
         )
         server.status = status
+        # D3 (feat/sync-queued-timeout): request_deliver now 409s a server whose
+        # agent has never connected (last_seen_at NULL). This helper already
+        # simulates an online/offline server via `status`; last_seen_at must
+        # agree or the pool chain's deliver step 409s on the first tick.
+        server.last_seen_at = _now()
         if policy is not None:
             server.pool_policy = policy
         db.commit()

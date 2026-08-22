@@ -14,7 +14,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core import crypto
@@ -36,6 +36,25 @@ MAX_SEND_ATTEMPTS = int(os.environ.get("AMX_MAX_SEND_ATTEMPTS", "5"))
 # caps the manual re-arms so a permanently-failing recall cannot be re-issued
 # forever; past the cap the action 409s and only opens a ``recall_failed`` alert.
 MAX_RECALL_RETRIES = int(os.environ.get("AMX_MAX_RECALL_RETRIES", "3"))
+
+# D3 queued-never-sent recovery. ``deliver`` has no server-online gate, so a
+# command aimed at a server whose agent is missing or too old to open a session
+# is never polled: it stays ``queued`` forever, ``pending_command_id`` never
+# clears, and the console shows "동기화중" indefinitely. This sweep ages out a
+# ``queued`` row past the timeout the same way the sent-ack sweeper ages out a
+# stuck ``sent`` row. Two-tier: a server whose agent has never once connected
+# (``last_seen_at`` NULL) is swept on the short ``QUEUED_TIMEOUT_SECONDS`` — no
+# session has ever formed, so there is nothing "in progress" to wait out. A
+# server that has connected before but is between sessions (restart,
+# maintenance) gets the much longer ``QUEUED_STALE_SECONDS`` so an ordinary
+# reconnect still delivers the queued command instead of losing the race to
+# the sweep. ``QUEUED_STALE_SECONDS`` must stay above the pool chain's own
+# step timeout (``pool_chain_step_timeout_minutes``, default 600s) — otherwise
+# this sweep would fail a command the pool chain's own expiry check
+# (``pool.py`` ``_expired``) hasn't given up on yet, and the chain would just
+# re-issue a fresh deliver into the same stall.
+QUEUED_TIMEOUT_SECONDS = float(os.environ.get("AMX_QUEUED_TIMEOUT", "180"))
+QUEUED_STALE_SECONDS = float(os.environ.get("AMX_QUEUED_STALE_TIMEOUT", "1800"))
 
 # Command types that never set assignment.pending_command_id (§6.3: non-state
 # commands). For these a None/mismatched marker is not a settle/supersede signal —
@@ -111,6 +130,26 @@ def request_deliver(
         raise conflict(
             "assignment.not_deliverable",
             f"deliver requires state 'pending'; assignment is '{assignment.state}'.",
+        )
+    # D3 queued-never-sent recovery: a server whose agent has never once
+    # connected (``last_seen_at`` NULL) will never poll for this command, so
+    # reject up front instead of letting it sit ``queued``. This does NOT cover
+    # a too-old agent: ``_authenticate``/``_touch_server`` (grpc/server.py)
+    # stamps ``last_seen_at`` on a successful enroll/credential auth *before*
+    # the version/KEK check that can still abort the session with
+    # FAILED_PRECONDITION, so an incompatible agent that got that far already
+    # has a non-NULL ``last_seen_at`` and passes this check — only the queued
+    # sweep (:func:`sweep_queued_timeouts`) catches that case, via the longer
+    # ``QUEUED_STALE_SECONDS`` tier. ``status == "offline"`` alone is NOT
+    # rejected here either — that also covers an agent that connected before
+    # and is merely between sessions, which recovers on its own and should not
+    # block deliver.
+    server = inventory.get_server(db, tenant_id, assignment.server_id)
+    if server.last_seen_at is None:
+        raise conflict(
+            "assignment.server_never_connected",
+            f"deliver requires a server the agent has connected to at least "
+            f"once; server '{server.id}' has never connected.",
         )
     # `pinned` is AMS-internal and is translated into desired_status here rather
     # than shipped on the wire (proto DeliverAccount §5.2): a pinned assignment
@@ -479,6 +518,8 @@ def sweep_sent_timeouts(
     *,
     timeout_seconds: float = SENT_ACK_TIMEOUT_SECONDS,
     max_attempts: int = MAX_SEND_ATTEMPTS,
+    queued_timeout_seconds: float = QUEUED_TIMEOUT_SECONDS,
+    queued_stale_seconds: float = QUEUED_STALE_SECONDS,
 ) -> tuple[list[str], list[str]]:
     """Re-queue or fail commands stuck in ``sent`` past the ack timeout.
 
@@ -499,8 +540,17 @@ def sweep_sent_timeouts(
     No contention with reconcile-on-report: reconcile acts only on resting-state
     assignments (active/inactive/quarantined/detached) while every command swept
     here belongs to an in-flight assignment (delivering/recalling) or is
-    server-scoped, so the two never move the same row. The caller need not commit —
-    this commits its own transaction. Returns ``(requeued_ids, failed_ids)``.
+    server-scoped, so the two never move the same row.
+
+    Also fails ``queued`` rows past their D3 timeout (:func:`_fail_queued_rows`)
+    in the *same* transaction, folding those failures into ``failed_ids`` — this
+    is the only sweep the gRPC process's periodic sweeper loop registers, and
+    the transaction-scoped advisory lock guarding both sweeps (grpc/server.py)
+    releases the instant this function's single ``db.commit()`` below runs, so
+    the queued sweep has to run before that commit, not in one of its own.
+
+    The caller need not commit — this commits its own transaction. Returns
+    ``(requeued_ids, failed_ids)``.
     """
     cutoff = _now() - timedelta(seconds=timeout_seconds)
     stuck = db.scalars(
@@ -526,8 +576,89 @@ def sweep_sent_timeouts(
             assignment = _revert_assignment_on_send_failure(db, command)
             _open_send_failure_alert(db, command, assignment)
             failed.append(command.command_id)
+    failed.extend(
+        _fail_queued_rows(
+            db,
+            never_connected_seconds=queued_timeout_seconds,
+            stale_seconds=queued_stale_seconds,
+        )
+    )
     db.commit()
     return requeued, failed
+
+
+# -- D3 queued-never-sent recovery ---------------------------------------------
+def _fail_queued_rows(
+    db: Session, *, never_connected_seconds: float, stale_seconds: float
+) -> list[str]:
+    """Fail aged ``queued`` rows and revert their assignment — no commit.
+
+    Two-tier cutoff, joined against the owning server's ``last_seen_at``:
+
+    * ``last_seen_at`` NULL (agent never once connected) -> aged out past
+      ``never_connected_seconds`` (short: nothing has ever been "in progress").
+    * ``last_seen_at`` set (agent has connected before, may just be between
+      sessions — restart, maintenance) -> aged out past ``stale_seconds``
+      (long: an ordinary reconnect must win the race and deliver it first).
+
+    A ``queued`` row this old was never claimed by any poll loop (a claimed row
+    is ``sent``), so there is no re-queue step here unlike
+    :func:`sweep_sent_timeouts` — the condition that stranded it (no agent
+    polling this server) would just strand a re-queued row the same way. Fails
+    straight to ``failed`` and reverts the assignment exactly like a send-retry
+    exhaustion (:func:`_revert_assignment_on_send_failure`), so
+    ``pending_command_id`` clears and the console stops showing "동기화중"
+    forever. Returns the list of failed command ids; the caller commits.
+    """
+    never_connected_cutoff = _now() - timedelta(seconds=never_connected_seconds)
+    stale_cutoff = _now() - timedelta(seconds=stale_seconds)
+    stuck = db.scalars(
+        select(AgentCommand)
+        .join(Server, Server.id == AgentCommand.server_id)
+        .where(
+            AgentCommand.status == "queued",
+            or_(
+                and_(
+                    Server.last_seen_at.is_(None),
+                    AgentCommand.created_at < never_connected_cutoff,
+                ),
+                and_(
+                    Server.last_seen_at.is_not(None),
+                    AgentCommand.created_at < stale_cutoff,
+                ),
+            ),
+        )
+    ).all()
+    failed: list[str] = []
+    for command in stuck:
+        command.status = "failed"
+        command.detail = "queued_timeout"
+        command.updated_at = _now()
+        assignment = _revert_assignment_on_send_failure(
+            db, command, reason="queued_timeout"
+        )
+        _open_send_failure_alert(db, command, assignment)
+        failed.append(command.command_id)
+    return failed
+
+
+def sweep_queued_timeouts(
+    db: Session,
+    *,
+    timeout_seconds: float = QUEUED_TIMEOUT_SECONDS,
+    stale_seconds: float = QUEUED_STALE_SECONDS,
+) -> list[str]:
+    """Standalone entry point for :func:`_fail_queued_rows` — commits itself.
+
+    Not called by the gRPC sweeper loop (which only registers
+    :func:`sweep_sent_timeouts`, folding this logic in directly under the same
+    transaction/advisory-lock); kept for direct/test use.
+    """
+    failed = _fail_queued_rows(
+        db, never_connected_seconds=timeout_seconds, stale_seconds=stale_seconds
+    )
+    db.commit()
+    return failed
 
 
 def _open_send_failure_alert(
@@ -579,9 +710,14 @@ def _open_send_failure_alert(
 
 
 def _revert_assignment_on_send_failure(
-    db: Session, command: AgentCommand
+    db: Session, command: AgentCommand, *, reason: str = "sent_ack_timeout"
 ) -> Assignment | None:
-    """Revert the assignment of a permanently-failed ``sent`` command.
+    """Revert the assignment of a permanently-failed ``sent`` or ``queued`` command.
+
+    ``reason`` becomes ``assignment.last_error`` — the sent-ack sweeper passes
+    the default; the queued-timeout sweeper (:func:`sweep_queued_timeouts`)
+    passes ``"queued_timeout"`` so the operator-visible error names the actual
+    failure instead of a misleading "sent" label.
 
     Mirrors the DIVERGED/REJECTED ack handling in ``reconcile.apply_ack``: only
     the assignment still pointing at this command (``pending_command_id`` match) is
@@ -621,7 +757,7 @@ def _revert_assignment_on_send_failure(
         # and do not alert (return None so the caller opens none). A marker-less
         # type (switch_now) skips this and still alerts on final failure.
         return None
-    assignment.last_error = "sent_ack_timeout"
+    assignment.last_error = reason
     assignment.pending_command_id = None
     if command.command_type == "deliver":
         assignment.state = "pending"

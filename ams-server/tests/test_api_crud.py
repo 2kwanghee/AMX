@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
+from app.models import Server
 from tests.conftest import TEST_ADMIN_TOKEN
 
 CREDENTIAL_SET = (
@@ -591,13 +593,20 @@ def test_unknown_tenant_is_404_everywhere(client):
 
 
 # -- P2 transition wiring -----------------------------------------------------
-def test_transition_endpoints_enqueue_commands_and_advance_state(client):
+def test_transition_endpoints_enqueue_commands_and_advance_state(client, db):
     # deliver/recall/activate/deactivate now land (P2 track C): they enqueue a
     # signed command on the outbox and move the assignment. The gRPC session
     # process delivers it; the REST layer only records the intent + transition.
     tenant_id = make_tenant(client)
     account = make_account(client, tenant_id)
     server = make_server(client, tenant_id)
+    # D3 (feat/sync-queued-timeout): request_deliver now 409s a server whose
+    # agent has never connected (last_seen_at NULL) — no gRPC session runs in
+    # this REST-only test, so stamp it directly to model an onboarded server.
+    db.query(Server).filter(Server.id == uuid.UUID(server["id"])).update(
+        {"last_seen_at": datetime.now(UTC)}
+    )
+    db.commit()
     assignment = client.post(
         f"/api/v1/tenants/{tenant_id}/assignments",
         json={"accountId": account["id"], "serverId": server["id"]},
