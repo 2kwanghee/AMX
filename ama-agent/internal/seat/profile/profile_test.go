@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -359,54 +360,86 @@ func TestGetActiveRejectsLeadingWhitespace(t *testing.T) {
 	}
 }
 
-// TestGetActiveAcceptsExactlyOneTrailingNewline confirms the ONE allowed
-// deviation from a bare 64-hex-char pointer: precisely one trailing "\n".
-func TestGetActiveAcceptsExactlyOneTrailingNewline(t *testing.T) {
-	s := openStore(t)
-	drv := claude.New()
-	key := AccountKey("trailing-newline@example.com")
-	if err := s.Stage(drv, key, sampleCredential("rt-tn"), provider.AddMeta{Email: "trailing-newline@example.com"}); err != nil {
-		t.Fatalf("Stage: %v", err)
-	}
-	providerDir, err := s.resolveProviderDir("claude")
-	if err != nil {
-		t.Fatalf("resolveProviderDir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(key+"\n"), 0o600); err != nil {
-		t.Fatalf("write pointer with one trailing newline: %v", err)
-	}
-	got, dir, err := s.GetActive("claude")
-	if err != nil {
-		t.Fatalf("GetActive with one trailing newline: %v", err)
-	}
-	if got != key || dir == "" {
-		t.Fatalf("GetActive = (%q, %q), want (%q, non-empty)", got, dir, key)
+// TestGetActiveAcceptsAnyNumberOfTrailingNewlines confirms the N3-tightened
+// rule: GetActive strips ALL trailing "\n" bytes (strings.TrimRight), not
+// just one — matching deploy/amx-claude's `$(cat ...)` command substitution,
+// which POSIX shell semantics make strip every trailing newline regardless of
+// count. Before N3 this package used strings.TrimSuffix (at most one), so a
+// pointer file containing "KEY\n\n" was accepted by the shell reader and
+// rejected here — the exact two-readers-disagree shape adversarial review F2
+// exists to prevent, reintroduced by an earlier fix for F2 itself.
+func TestGetActiveAcceptsAnyNumberOfTrailingNewlines(t *testing.T) {
+	for _, n := range []int{0, 1, 2, 5} {
+		n := n
+		t.Run(fmt.Sprintf("trailing_newlines=%d", n), func(t *testing.T) {
+			s := openStore(t)
+			drv := claude.New()
+			email := fmt.Sprintf("trailing-newline-%d@example.com", n)
+			key := AccountKey(email)
+			if err := s.Stage(drv, key, sampleCredential("rt-tn"), provider.AddMeta{Email: email}); err != nil {
+				t.Fatalf("Stage: %v", err)
+			}
+			providerDir, err := s.resolveProviderDir("claude")
+			if err != nil {
+				t.Fatalf("resolveProviderDir: %v", err)
+			}
+			content := key + strings.Repeat("\n", n)
+			if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(content), 0o600); err != nil {
+				t.Fatalf("write pointer with %d trailing newlines: %v", n, err)
+			}
+			got, dir, err := s.GetActive("claude")
+			if err != nil {
+				t.Fatalf("GetActive with %d trailing newlines: %v", n, err)
+			}
+			if got != key || dir == "" {
+				t.Fatalf("GetActive = (%q, %q), want (%q, non-empty)", got, dir, key)
+			}
+		})
 	}
 }
 
-// TestGetActiveRejectsTwoTrailingNewlines: TrimSuffix removes at most ONE
-// trailing "\n" by design — a second one left behind must fail the exact
-// 64-hex-char match, not be silently swallowed the way TrimSpace would.
-func TestGetActiveRejectsTwoTrailingNewlines(t *testing.T) {
+// TestGetActiveRejectsNonTrailingWhitespace confirms the OTHER half of the F2
+// rule is untouched by N3's trailing-newline loosening: leading whitespace, a
+// trailing "\r", and internal whitespace must still be rejected outright, not
+// silently trimmed.
+func TestGetActiveRejectsNonTrailingWhitespace(t *testing.T) {
+	names := []string{"leading_space", "leading_tab", "trailing_cr", "internal_newline"}
 	s := openStore(t)
 	drv := claude.New()
-	key := AccountKey("double-newline@example.com")
-	if err := s.Stage(drv, key, sampleCredential("rt-dn"), provider.AddMeta{Email: "double-newline@example.com"}); err != nil {
-		t.Fatalf("Stage: %v", err)
-	}
 	providerDir, err := s.resolveProviderDir("claude")
 	if err != nil {
 		t.Fatalf("resolveProviderDir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(key+"\n\n"), 0o600); err != nil {
-		t.Fatalf("write pointer with two trailing newlines: %v", err)
-	}
-	_, _, err = s.GetActive("claude")
-	if err == nil {
-		t.Fatal("GetActive must reject a pointer with two trailing newlines")
-	}
-	if errors.Is(err, ErrActiveMissing) || errors.Is(err, ErrNoActive) {
-		t.Fatalf("a double-trailing-newline pointer must be its own error kind, got %v", err)
+	for _, name := range names {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			email := name + "@example.com"
+			key := AccountKey(email)
+			if err := s.Stage(drv, key, sampleCredential("rt-"+name), provider.AddMeta{Email: email}); err != nil {
+				t.Fatalf("Stage: %v", err)
+			}
+			var content string
+			switch name {
+			case "leading_space":
+				content = " " + key
+			case "leading_tab":
+				content = "\t" + key
+			case "trailing_cr":
+				content = key + "\r"
+			case "internal_newline":
+				content = key[:32] + "\n" + key[32:]
+			}
+			if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(content), 0o600); err != nil {
+				t.Fatalf("write pointer: %v", err)
+			}
+			_, _, err := s.GetActive("claude")
+			if err == nil {
+				t.Fatalf("GetActive must reject pointer content %q", content)
+			}
+			if errors.Is(err, ErrActiveMissing) || errors.Is(err, ErrNoActive) {
+				t.Fatalf("must be its own error kind, got %v", err)
+			}
+		})
 	}
 }
 

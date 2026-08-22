@@ -806,23 +806,36 @@ func (s *Store) SetActive(providerKey, accountKey string) error {
 // since that content could not have come from a legitimate SetActive call
 // and is never used to build a path.
 //
-// POINTER FORMAT — canonical rule (adversarial review F2; this is the ONE
-// place this rule is defined, and it MUST match the independent
-// reimplementation in deploy/amx-claude's active-pointer case pattern
-// byte-for-byte, or the two readers disagree about which profile is active —
-// which is exactly the "runner bills one account, [a reader elsewhere]
-// attributes the cost to another" bug F2 reproduced): the file's content must
-// be EITHER exactly `^[0-9a-f]{64}$` with nothing else, OR that same
-// 64-hex-char string followed by exactly one trailing "\n" and nothing after
-// it. Anything else — leading whitespace, internal whitespace, a trailing
-// "\r", two or more trailing newlines, any other stray byte — is rejected as
-// an invalid pointer, NOT silently trimmed. atomicWrite (see SetActive) never
-// appends a trailing newline on this package's own write path, so the
-// "\n"-tolerant branch exists only for a pointer file some other tool wrote
-// by hand. strings.TrimSuffix removes AT MOST one trailing "\n" (never more),
-// which is what makes this the correct primitive here — strings.TrimSpace
-// would strip leading whitespace and multiple trailing newlines too, silently
-// ACCEPTING malformed pointers the other reader rejects (the exact F2 bug).
+// POINTER FORMAT — canonical rule (adversarial review F2, tightened by N3;
+// this is the ONE place this rule is defined, and it MUST match the
+// independent reimplementation in deploy/amx-claude's active-pointer case
+// pattern byte-for-byte, or the two readers disagree about which profile is
+// active — which is exactly the "runner bills one account, [a reader
+// elsewhere] attributes the cost to another" bug F2 reproduced): the file's
+// content must be, after stripping ANY NUMBER of trailing "\n" bytes (zero or
+// more — see N3 below), exactly `^[0-9a-f]{64}$` and nothing else. Anything
+// remaining after that stripping — leading whitespace, internal whitespace, a
+// trailing "\r", any other stray byte — is rejected as an invalid pointer,
+// NOT silently trimmed.
+//
+// N3 (adversarial review): an earlier revision used strings.TrimSuffix, which
+// removes AT MOST ONE trailing "\n", while deploy/amx-claude's `$(cat ...)`
+// command substitution removes ALL trailing newlines per POSIX shell
+// semantics — so a pointer file containing "KEY\n\n" (two trailing newlines)
+// was accepted by the shell reader and rejected by this one, the exact
+// two-readers-disagree bug F2 exists to prevent. strings.TrimRight strips
+// every trailing "\n", matching `$(cat ...)`'s behavior exactly; this is the
+// deliberate choice over teaching the shell side to reject 2+ trailing
+// newlines, since the shell has no cheap way to see how many newlines a file
+// ORIGINALLY had once `$(...)` has already collapsed them all away — matching
+// its existing behavior is strictly simpler than reproducing byte-exact
+// newline counting in POSIX sh.
+//
+// atomicWrite (see SetActive) never appends a trailing newline on this
+// package's own write path, so the "\n"-tolerant behavior exists only for a
+// pointer file some other tool wrote by hand. strings.TrimSpace would ALSO
+// strip leading whitespace, which must stay rejected (that half of the F2 bug
+// is unrelated to trailing-newline counting and is not being loosened here).
 //
 // deploy/langfuse/session_usage_hook.py used to be a third independent
 // reimplementation of this same parsing, but adversarial review F3 removed
@@ -842,7 +855,7 @@ func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err
 		}
 		return "", "", rerr
 	}
-	key := strings.TrimSuffix(string(raw), "\n")
+	key := strings.TrimRight(string(raw), "\n")
 	if key == "" {
 		return "", "", ErrNoActive
 	}

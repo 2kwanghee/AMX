@@ -94,8 +94,15 @@ amx_profile_dir_is_safe() {
 	_uid=$(id -u 2>/dev/null) || return 1
 	[ -n "$_uid" ] || return 1
 	# Ownership: -user takes a numeric uid on both GNU and BSD find, so this
-	# does not depend on NSS resolving a username for $_uid.
-	find "$_d" -maxdepth 0 -user "$_uid" >/dev/null 2>&1 || return 1
+	# does not depend on NSS resolving a username for $_uid. MUST test the
+	# OUTPUT, not the exit code (adversarial review N1, real reproduction):
+	# `find PATH -user X` exits 0 whenever find itself ran without error, even
+	# when PATH does not match -user at all (zero matches is not a find
+	# error) — a prior version of this check tested `|| return 1` against the
+	# exit code alone and therefore accepted every directory regardless of
+	# owner (verified: it accepted root-owned /etc, /root, /usr/bin). Only an
+	# EMPTY result means "not owned by $_uid".
+	[ -n "$(find "$_d" -maxdepth 0 -user "$_uid" -print 2>/dev/null)" ] || return 1
 	_perm=$(ls -ld -- "$_d" 2>/dev/null | awk '{print $1}') || return 1
 	# 10-char field: type, owner(rwx), group(rwx), other(rwx). Require: a
 	# directory (F4/F7), owner read+execute so we can actually list/open
@@ -124,18 +131,20 @@ amx_profile_dir_is_safe() {
 # CONFIG_DIR/LOCK_FILE, fixed above, are NEVER reassigned by this block — see
 # the "FIXED ANCHOR" comment above for why that separation must hold.
 #
-# POINTER FORMAT: the active file's content must be exactly ^[0-9a-f]{64}$,
-# optionally followed by ONE trailing newline (command substitution below
-# already strips all trailing newlines, so this case pattern effectively
-# enforces "reject anything with a byte outside [0-9a-f] anywhere, or a
-# length other than 64" — matching, byte-for-byte, the rule canonically
-# defined in ama-agent/internal/seat/profile/profile.go's GetActive doc
-# (adversarial review F2: these two readers disagreeing on this exact point
-# is what let a runner bill one account while a separate reader believed a
-# different one was active). deploy/langfuse/session_usage_hook.py used to be
-# a third independent reimplementation of this same parsing; adversarial
-# review F3 removed its pointer re-read entirely, so it is no longer a party
-# to this rule.
+# POINTER FORMAT: the active file's content must be exactly ^[0-9a-f]{64}$
+# after stripping ANY NUMBER (zero or more) of trailing newlines — `$(cat
+# ...)` below already strips every trailing "\n" per POSIX command-
+# substitution semantics, so this case pattern effectively enforces "reject
+# anything with a byte outside [0-9a-f] anywhere, or a length other than 64"
+# — matching, byte-for-byte, the rule canonically defined in
+# ama-agent/internal/seat/profile/profile.go's GetActive doc (adversarial
+# review F2, tightened by N3 to agree on trailing-newline COUNT too — an
+# earlier revision of the Go side rejected 2+ trailing newlines that this
+# shell side already accepted, the exact two-readers-disagree shape F2 exists
+# to prevent). deploy/langfuse/session_usage_hook.py used to be a third
+# independent reimplementation of this same parsing; adversarial review F3
+# removed its pointer re-read entirely, so it is no longer a party to this
+# rule.
 #
 # Fail-open at every step: an unset AMX_STATE_DIR, a missing/unreadable
 # pointer file, a pointer that is not shaped like a real accountKey, a
@@ -143,6 +152,26 @@ amx_profile_dir_is_safe() {
 # amx_profile_dir_is_safe's ownership/permission check (F4/F7) all leave
 # CLAUDE_CONFIG_DIR exactly as the caller set it — this must never be what
 # stops a runner from starting.
+#
+# KNOWN GAP, deliberately NOT closed (adversarial review N4): the `[ -f ]`,
+# `[ -r ]`, `cat`, `[ -d ]`, `[ ! -L ]` below, and the `find`/`ls -ld` inside
+# amx_profile_dir_is_safe, are all plain stat/open/read syscalls with NO
+# `timeout` around them (unlike the Langfuse block's `.claude.json` read,
+# which F1 wrapped in `timeout 2`). If $AMX_STATE_DIR's filesystem itself
+# hangs (a stalled NFS/9p mount, not a FIFO — the FIFO case is what F1
+# closed), this block can still block before `exec claude`. Closing this for
+# real would mean moving this entire detection block into a `timeout`-wrapped
+# subshell and passing its one result (the resolved profile dir, or nothing)
+# back via command substitution, since a subshell cannot otherwise mutate
+# CLAUDE_CONFIG_DIR in this process. That is a real restructuring of a
+# runner-launch-path script, not a local guard clause — attempting it in this
+# same pass risks introducing a NEW way to block/misbehave the very thing
+# this whole file exists to protect (starting the runner reliably), which is
+# worse than leaving this one gap open. $AMX_STATE_DIR is also not documented
+# anywhere as a network-mounted path today (P3's profile store is unwired —
+# nothing populates this tree yet), so the exposure is theoretical, not
+# observed. Left for a future pass if $AMX_STATE_DIR ever becomes
+# network-backed in practice.
 AMX_ACTIVE_PROFILE_DIR=""
 if [ -n "${AMX_STATE_DIR:-}" ]; then
 	_amx_active_file="$AMX_STATE_DIR/profiles/claude/active"

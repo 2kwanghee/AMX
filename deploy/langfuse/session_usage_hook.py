@@ -496,29 +496,49 @@ def _read_bounded_regular_file(path: str, max_bytes: int) -> bytes | None:
         os.close(fd)
 
 
-def _session_config_home_email() -> str | None:
-    """이 세션이 실제로 쓴 config home의 identity를 읽는다.
+_ACCOUNT_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
-    adversarial review F3: 이전 구현은 Stop 훅(세션 **종료** 시점)에서 P3
-    활성 포인터를 다시 읽었다. 래퍼(``deploy/amx-claude``)는 세션 **기동**
-    시점에 계정을 고정하는데, 세션 도중 전환기가 포인터를 옮기면(그게
-    전환기의 존재 이유다) 포인터 재조회는 방금 끝난 세션의 비용을 엉뚱한
-    계정에 붙인다. 그래서 포인터는 다시 읽지 않는다 — 이 세션이 실제로 물려
-    받아 지금까지 들고 있던 ``CLAUDE_CONFIG_DIR`` 환경변수(래퍼가 세션
-    기동 시 한 번 정하고, claude 프로세스와 그 훅들이 그대로 상속한다)가
-    가리키는 홈만 본다. 그 홈이 P3 프로파일 디렉터리든 기존 공유 풀 홈이든
-    상관없이 같은 파일(``.claude.json``)을 같은 방식으로 읽는다.
 
-    ``CLAUDE_CONFIG_DIR``이 비어 있으면 ``deploy/amx-claude``와 같은 기본값
-    (``$HOME/.claude``)으로 떨어진다. 실패(둘 다 못 구함·파일 없음·FIFO·
-    크기초과·JSON 깨짐·필드 없음)는 모두 ``None`` — tsamx 폴백으로 넘어간다.
+def _resolve_config_home() -> str | None:
+    """이 프로세스가 물려받은 Claude config home. ``CLAUDE_CONFIG_DIR``이
+    비어 있으면 ``deploy/amx-claude``와 같은 기본값(``$HOME/.claude``)으로
+    떨어진다. 둘 다 못 구하면 ``None``.
     """
     config_home = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if not config_home:
-        home = os.environ.get("HOME", "").strip()
-        if not home:
-            return None
-        config_home = os.path.join(home, ".claude")
+    if config_home:
+        return config_home
+    home = os.environ.get("HOME", "").strip()
+    if not home:
+        return None
+    return os.path.join(home, ".claude")
+
+
+def _is_profile_config_home(config_home: str) -> bool:
+    """config_home이 P3 프로파일 레이아웃
+    (``<stateDir>/profiles/<provider>/<64자 소문자 16진수>``) 경로 **모양**인지
+    만 구조적으로 본다 — 그 디렉터리가 실제 있는지, 안에 뭐가 있는지는
+    ``_read_bounded_regular_file``이 파일을 열 때 자연히 걸러진다.
+
+    adversarial review N2: 이 판정이 있어야 이 함수가 "프로파일 모드"만
+    맞히고, 프로파일을 전혀 쓰지 않는 순수 기존 배포에서는(CLAUDE_CONFIG_DIR
+    이 우연히 accountKey 모양의 디렉터리를 가리키는 사실상 불가능한 경우가
+    아닌 한) 항상 거짓을 돌려준다.
+    """
+    normalized = config_home.rstrip(os.sep)
+    account_key = os.path.basename(normalized)
+    if not _ACCOUNT_KEY_RE.fullmatch(account_key):
+        return False
+    provider_dir = os.path.dirname(normalized)
+    if not os.path.basename(provider_dir):
+        return False
+    profiles_dir = os.path.dirname(provider_dir)
+    return os.path.basename(profiles_dir) == "profiles"
+
+
+def _identity_email_from_config_home(config_home: str) -> str | None:
+    """config_home의 ``.claude.json``에서 ``oauthAccount.emailAddress``를
+    읽는다. 실패(파일 없음·FIFO·크기초과·JSON 깨짐·필드 없음)는 모두 ``None``.
+    """
     raw = _read_bounded_regular_file(
         os.path.join(config_home, ".claude.json"), _IDENTITY_FILE_MAX_BYTES
     )
@@ -539,20 +559,48 @@ def _session_config_home_email() -> str | None:
     return None
 
 
+def _session_config_home_email() -> str | None:
+    """이 세션이 실제로 쓴 config home이 P3 프로파일 디렉터리일 때만 그 홈의
+    identity를 읽는다. 그 외(순수 기존 배포의 공유 풀 홈, 개인 ``~/.claude``
+    등)에는 손대지 않고 ``None``을 돌려줘 호출자가 tsamx로 폴백하게 한다.
+
+    adversarial review F3 + N2: F3의 목적(Stop 훅이 세션 **종료** 시점에 P3
+    활성 포인터를 다시 읽지 않는다 — 세션 도중 전환되면 방금 끝난 세션의
+    비용이 엉뚱한 계정에 붙는다)은 유지하되, N2가 실측한 회귀를 되돌린다:
+    이 함수가 프로파일이 아닌 모든 CLAUDE_CONFIG_DIR까지 신뢰해버리면, 프로파일을
+    전혀 안 쓰는 순수 기존 배포에서 이 파일이 tsamx보다 먼저 채택돼 풀의 SSOT
+    (tsamx)를 로컬 파일이 가로챈다 — 08-22 풀 실명 스왑 사건과 같은 형태로
+    두 값이 조용히 어긋날 수 있는 바로 그 경로다. ``_is_profile_config_home``
+    으로 "이 config home은 P3가 실제로 관리하는 프로파일 디렉터리"인 경우만
+    걸러내면, 프로파일 모드에서는 F3의 이득(포인터 재조회 없음)을 그대로
+    누리면서 현행 배포(프로파일 미사용)에서는 이 함수가 항상 None을 돌려줘
+    ``active_account_email``의 동작이 F3 이전과 글자 그대로 같아진다.
+    """
+    config_home = _resolve_config_home()
+    if not config_home or not _is_profile_config_home(config_home):
+        return None
+    return _identity_email_from_config_home(config_home)
+
+
 def active_account_email() -> str | None:
     """현재 활성 계정 이메일.
 
-    조회 순서(design note P3, P2 리뷰 ② + adversarial review F3 해소): 명시적
-    pin(``LANGFUSE_USER_ID``) > 이 세션이 실제로 쓴 config home의 identity
-    (``_session_config_home_email`` — P3 활성 포인터는 다시 읽지 않는다, F3
-    참고) > ``tsamx status --json``의 ``active.email`` > 없음.
+    조회 순서(design note P3, P2 리뷰 ② + adversarial review F3/N2 해소):
+    명시적 pin(``LANGFUSE_USER_ID``) > **config home이 P3 프로파일
+    디렉터리 모양일 때만** 그 홈의 identity(``_session_config_home_email``)
+    > ``tsamx status --json``의 ``active.email`` > 없음.
+
+    프로파일을 쓰지 않는 순수 기존 배포에서는 두 번째 단계가 항상 None이라
+    (N2) tsamx가 계속 SSOT다 — F3 이전과 글자 그대로 같은 동작. 프로파일
+    모드에서만 두 번째 단계가 이기고, 그 경우도 F3의 이유 그대로 포인터를
+    다시 읽지 않는다(세션 도중 전환되면 방금 끝난 세션의 비용이 엉뚱한
+    계정에 붙는 것을 막는다).
 
     tsamx 폴백이 여전히 매번 다시 조회하는 이유는 그대로다: 계정은 전환되고,
     박아둔 값은 전환 즉시 거짓이 된다. ``CLAUDE_CONFIG_DIR``이 이미 설정
     홈을 가리키므로 tsamx는 같은 홈을 본다(``deploy/amx-claude``와 같은
     조회다) — 이 폴백 경로 자체가 P3 이전부터 안고 있던 "세션 도중 전환되면
-    최신 계정을 본다"는 한계는 이번 수정 범위 밖이다(F3는 새로 추가된 포인터
-    재조회만 겨냥한다).
+    최신 계정을 본다"는 한계는 이번 수정 범위 밖이다.
 
     실패(config home 없음·tsamx 없음·타임아웃·JSON 깨짐·필드 없음)는 모두
     ``None``이다 — 계정 없이 보내면 서버가 ``account_id`` NULL로 받아들인다.
