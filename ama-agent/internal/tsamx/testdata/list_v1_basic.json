@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "activeAccountNumber": 1,
+  "accounts": [
+    {
+      "number": 1,
+      "email": "a@x.io",
+      "organizationName": "Acme",
+      "organizationUuid": "uuid-a",
+      "active": true,
+      "disabled": false,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {"pct": 61.2, "resetsAt": "2026-08-23T10:00:00Z"},
+        "sevenDay": {"pct": 44, "resetsAt": "2026-08-28T00:00:00Z"},
+        "spend": {"used": 12.3, "limit": 100, "pct": 12.3, "currency": "USD", "resetsAt": "2026-09-01T00:00:00Z"},
+        "scoped": [{"name": "claude-3-opus", "pct": 30, "resetsAt": "2026-08-30T00:00:00Z"}]
+      },
+      "usageFetchedAt": "2026-08-23T09:59:00Z",
+      "alias": "primary"
+    },
+    {
+      "number": 2,
+      "email": "b@x.io",
+      "organizationName": "Acme",
+      "organizationUuid": "uuid-b",
+      "active": false,
+      "usageStatus": "ok",
+      "usage": {"fiveHour": {"pct": 12, "resetsAt": "2026-08-23T10:00:00Z"}},
+      "alias": ""
+    }
+  ]
+}

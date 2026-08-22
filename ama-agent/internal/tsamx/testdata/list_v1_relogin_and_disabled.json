@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "activeAccountNumber": 1,
+  "accounts": [
+    {
+      "number": 1,
+      "email": "good@x.io",
+      "active": true,
+      "disabled": false,
+      "usageStatus": "ok",
+      "usage": {"fiveHour": {"pct": 10, "resetsAt": "2026-08-23T10:00:00Z"}}
+    },
+    {
+      "number": 2,
+      "email": "dead@x.io",
+      "active": false,
+      "disabled": false,
+      "usageStatus": "relogin_required",
+      "usage": null
+    },
+    {
+      "number": 3,
+      "email": "off@x.io",
+      "active": false,
+      "disabled": true,
+      "usageStatus": "ok",
+      "usage": null
+    }
+  ]
+}

@@ -116,6 +116,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
             <div className="muted mono" style={{ fontSize: 12 }}>
               CPU {fmtPct(s.cpuPct)} · MEM {fmtPct(s.memPct)} · DISK {fmtPct(s.diskPct)}
             </div>
+            <div className="muted mono" style={{ fontSize: 12 }}>
+              시트 엔진 {s.tsamxVersion || '미보고'}
+            </div>
             <div className="srv-tile-accounts">
               {emails.length > 0 ? <AvatarStack emails={emails} /> : <span className="muted" style={{ fontSize: 12 }}>할당 계정 없음</span>}
               {activeEmail && <span className="srv-tile-current">활성 <b>{activeEmail}</b></span>}
