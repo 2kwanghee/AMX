@@ -49,8 +49,14 @@ type DragFrom = { from: 'server' | 'account'; id: string } | null;
 // 노드 좌표 소유권을 CSS Grid → JS 상태로. 서버·계정 노드만 이동, 테넌트는 좌측
 // 고정. 좌표는 gridRef(전체 3열 컨테이너) 기준 캔버스 영역 로컬 픽셀.
 type Pos = { x: number; y: number };
-type Layout = Record<string, Pos>; // key: `srv:<id>` | `acc:<id>`
+// v2: 노드 키(srv:/acc:)는 x·y만 쓰고, 레인 키(lane:cooling/lane:ready)는 w·h도
+// 함께 저장한다(미지정이면 undefined = 기본 폭·자동 높이). 같은 맵에 상위 호환으로
+// 얹었다 — v1 데이터(노드 좌표만)를 그대로 읽을 수 있다.
+type LayoutRect = Pos & { w?: number; h?: number };
+type Layout = Record<string, LayoutRect>; // key: `srv:<id>` | `acc:<id>` | `lane:cooling` | `lane:ready`
 type Dragging = { key: string; pos: Pos } | null;
+type LaneResize = { key: string; w: number; h: number } | null;
+type LaneKind = 'cooling' | 'ready';
 // 노드 액션 팝오버 앵커. flip=true면 노드 상단 위로 펼친다(캔버스 하단 clip 회피).
 type NodeAnchor = { x: number; y: number; flip: boolean };
 
@@ -64,15 +70,23 @@ const BAND_TOP = 2 * GRID; // 밴드 라벨 아래 첫 노드 y
 const SERV_STEP = 7 * GRID; // 서버 노드 세로 간격(168px)
 const ACC_STEP = 3 * GRID; // 계정 노드 세로 간격(72px)
 const CANVAS_PAD = 2 * GRID; // 캔버스 하단 여백
-// 계정 풀 레인 — 계정 열 오른쪽에 세로 박스 2개(충전중·배급처). POOL_X는 계정 열
-// 오른쪽 96px. LANE_GAP은 PoolLaneChip.tsx의 .topo-pool-lanes gap과 같아야 한다.
+// 계정 풀 레인 — 계정 열 오른쪽에 세로 박스 2개(충전중·배급처). 기본 위치일 뿐이며
+// 사용자가 옮기면 layout(lane:cooling/lane:ready)이 우선한다. POOL_X는 계정 열
+// 오른쪽 96px, LANE_GAP은 두 레인 기본 배치 간격.
 const POOL_X = ACCOUNT_X + NODE_W + 4 * GRID; // 744
-const LANE_W = 9 * GRID; // 216 (≈ NODE_W)
+const LANE_W = 9 * GRID; // 216 (≈ NODE_W) — 레인 기본 폭
 const LANE_GAP = 2 * GRID; // 48
 const LANE_TOP = 8; // 밴드 라벨과 대략 정렬
-const POOL_RIGHT = POOL_X + 2 * LANE_W + LANE_GAP + CANVAS_PAD; // 레인 포함 캔버스 우측 끝
+const LANE_W_MIN = 7 * GRID; // 168
+const LANE_H_MIN = 5 * GRID; // 120
+const LANE_W_MAX = 20 * GRID; // 480 — 상식적 상한(캔버스 폭 과다 확장 방지)
+const LANE_H_MAX = 30 * GRID; // 720
+const LANE_DEFAULT_POS: Record<LaneKind, Pos> = {
+  cooling: { x: POOL_X, y: LANE_TOP },
+  ready: { x: POOL_X + LANE_W + LANE_GAP, y: LANE_TOP },
+};
 const FREE_MIN = 900; // 이 폭 미만이면 자동 배치(현행 grid) 폴백
-const LAYOUT_VERSION = 1;
+const LAYOUT_VERSION = 2;
 // 미측정 노드 기본 크기(높이 추정) — 첫 렌더/드롭 겹침 검사 폴백.
 const DEF_SIZE: Record<'srv' | 'acc', { w: number; h: number }> = {
   srv: { w: NODE_W, h: 156 },
@@ -91,13 +105,26 @@ function loadLayout(tenantId: string): Layout {
     const raw = window.localStorage.getItem(layoutStorageKey(tenantId));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as { version?: number; nodes?: unknown };
-    if (parsed?.version !== LAYOUT_VERSION || !parsed.nodes || typeof parsed.nodes !== 'object') return {};
-    // 값 검증 — {x,y}가 유한수인 항목만 채택(손상·비정상 값은 버림).
+    // v1(노드 좌표만)·v2(레인 키에 w·h 추가)는 같은 nodes 맵 형태라 한 경로로
+    // 읽는다 — v1을 읽어도 노드 좌표는 그대로 유지되고, 다음 저장부터 v2로 기록된다.
+    if (
+      (parsed?.version !== 1 && parsed?.version !== LAYOUT_VERSION) ||
+      !parsed.nodes ||
+      typeof parsed.nodes !== 'object'
+    ) {
+      return {};
+    }
+    // 값 검증 — {x,y}가 유한수인 항목만 채택(손상·비정상 값은 버림). w·h는 있을 때만.
     const out: Layout = {};
     for (const [k, v] of Object.entries(parsed.nodes as Record<string, unknown>)) {
       if (v && typeof v === 'object') {
-        const { x, y } = v as { x?: unknown; y?: unknown };
-        if (Number.isFinite(x) && Number.isFinite(y)) out[k] = { x: x as number, y: y as number };
+        const { x, y, w, h } = v as { x?: unknown; y?: unknown; w?: unknown; h?: unknown };
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+          const entry: LayoutRect = { x: x as number, y: y as number };
+          if (Number.isFinite(w)) entry.w = w as number;
+          if (Number.isFinite(h)) entry.h = h as number;
+          out[k] = entry;
+        }
       }
     }
     return out;
@@ -275,10 +302,14 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
   const [dragging, setDragging] = useState<Dragging>(null);
   const [freeMode, setFreeMode] = useState(false);
   const [canvasH, setCanvasH] = useState(0);
-  // 레인 영역 높이 측정 — 노드 높이(canvasH)와 별개로 캔버스 최소 높이에 반영해
-  // 레인이 노드보다 길어도 하단이 잘리지 않게 한다.
-  const laneRef = useRef<HTMLDivElement | null>(null);
-  const [laneBottom, setLaneBottom] = useState(0);
+  // 레인 자동 높이(사용자가 리사이즈로 h를 지정하지 않았을 때) — 실측 DOM 높이.
+  // 캔버스 최소 높이 계산에 쓴다(레인이 노드보다 길어도 하단이 잘리지 않게).
+  const laneElRefs = useRef<Map<LaneKind, HTMLElement>>(new Map());
+  const [laneAutoH, setLaneAutoH] = useState<Partial<Record<LaneKind, number>>>({});
+  const [laneDragging, setLaneDraggingState] = useState<Dragging>(null);
+  const laneDraggingRef = useRef<Dragging>(null);
+  const [laneResizing, setLaneResizingState] = useState<LaneResize>(null);
+  const laneResizingRef = useRef<LaneResize>(null);
   const draggingRef = useRef<Dragging>(null);
   const suppressClickRef = useRef(false);
   // 측정된 노드 크기(px) — 겹침 검사·캔버스 높이 계산에 사용. measure()에서 갱신.
@@ -288,19 +319,51 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
     draggingRef.current = v;
     setDragging(v);
   }, []);
+  const setLaneDrag = useCallback((v: Dragging) => {
+    laneDraggingRef.current = v;
+    setLaneDraggingState(v);
+  }, []);
+  const setLaneResizing = useCallback((v: LaneResize) => {
+    laneResizingRef.current = v;
+    setLaneResizingState(v);
+  }, []);
+  const setLaneEl = useCallback((kind: LaneKind) => (el: HTMLElement | null) => {
+    if (el) laneElRefs.current.set(kind, el);
+    else laneElRefs.current.delete(kind);
+  }, []);
+
+  // 레인 유효 사각형 — 드래그·리사이즈 중이면 그 임시값을, 아니면 저장된 layout을,
+  // 없으면 기본 위치·기본 폭(LANE_W)·자동 높이(h undefined)를 반환한다.
+  function effectiveLaneRect(kind: LaneKind): { x: number; y: number; w: number; h?: number } {
+    const key = `lane:${kind}`;
+    if (laneDraggingRef.current?.key === key) {
+      const saved = layout[key];
+      return { x: laneDraggingRef.current.pos.x, y: laneDraggingRef.current.pos.y, w: saved?.w ?? LANE_W, h: saved?.h };
+    }
+    if (laneResizingRef.current?.key === key) {
+      const saved = layout[key] ?? LANE_DEFAULT_POS[kind];
+      return { x: saved.x, y: saved.y, w: laneResizingRef.current.w, h: laneResizingRef.current.h };
+    }
+    const saved = layout[key];
+    const def = LANE_DEFAULT_POS[kind];
+    return { x: saved?.x ?? def.x, y: saved?.y ?? def.y, w: saved?.w ?? LANE_W, h: saved?.h };
+  }
 
   // 테넌트 전환 시 저장된 배치를 로드(신규 테넌트는 빈 맵).
   useEffect(() => {
     setDrag(null);
+    setLaneDrag(null);
+    setLaneResizing(null);
     setLayout(loadLayout(tenantId));
-  }, [tenantId, setDrag]);
+  }, [tenantId, setDrag, setLaneDrag, setLaneResizing]);
 
   // 현재 노드 집합에 없는 저장 키 가지치기. 데이터 로드 후에만 수행(로딩 중
-  // 빈 목록으로 전량 삭제되는 것을 막는다).
+  // 빈 목록으로 전량 삭제되는 것을 막는다). 레인 키는 노드 존재 여부와 무관하게
+  // 항상 유효 — 대상 계정이 없어도 레인 배치는 유지한다.
   const nodeIdKey = servers.map((s) => s.id).join(',') + '#' + accounts.map((a) => a.id).join(',');
   useEffect(() => {
     if (!serversData || !accountsData) return;
-    const valid = new Set<string>();
+    const valid = new Set<string>(['lane:cooling', 'lane:ready']);
     for (const s of servers) valid.add(`srv:${s.id}`);
     for (const a of accounts) valid.add(`acc:${a.id}`);
     setLayout((prev) => {
@@ -381,6 +444,8 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
 
   const resetLayout = useCallback(() => {
     setDrag(null);
+    setLaneDrag(null);
+    setLaneResizing(null);
     setLayout({});
     if (typeof window !== 'undefined') {
       try {
@@ -389,7 +454,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
         /* noop */
       }
     }
-  }, [tenantId, setDrag]);
+  }, [tenantId, setDrag, setLaneDrag, setLaneResizing]);
 
   // 노드 본문 드래그 이동 — 포트(연결 생성) 위 시작은 제외한다.
   const startNodeDrag = (kind: 'srv' | 'acc', id: string) => (e: ReactPointerEvent) => {
@@ -426,6 +491,107 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
       const d = draggingRef.current;
       setDrag(null);
       if (commit && d && moved) commitPos(d.key, resolveOverlap(d.key, d.pos));
+    };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
+    const keydown = (ev: KeyboardEvent) => { if (ev.key === 'Escape') finish(false); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', keydown);
+  };
+
+  // 레인 헤더 드래그 이동 — 노드와 동일한 스냅·임계값·Esc 취소. 겹침 회피 대상이
+  // 아니라 resolveOverlap을 거치지 않는다. 기존 w·h는 그대로 보존해 커밋한다.
+  const startLaneDrag = (kind: LaneKind) => (e: ReactPointerEvent) => {
+    if (!freeMode) return;
+    const key = `lane:${kind}`;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origin = effectiveLaneRect(kind);
+    let moved = false;
+    let last: Pos | null = null;
+
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) > 4) moved = true;
+      if (!moved) return;
+      const nx = Math.max(0, snap(origin.x + dx));
+      const ny = Math.max(0, snap(origin.y + dy));
+      if (last && last.x === nx && last.y === ny) return;
+      last = { x: nx, y: ny };
+      setLaneDrag({ key, pos: last });
+    };
+    const finish = (commit: boolean) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', keydown);
+      const d = laneDraggingRef.current;
+      setLaneDrag(null);
+      if (commit && d && moved) {
+        setLayout((prev) => {
+          const prevEntry = prev[key];
+          const next: Layout = { ...prev, [key]: { x: d.pos.x, y: d.pos.y, w: prevEntry?.w, h: prevEntry?.h } };
+          saveLayout(tenantId, next);
+          return next;
+        });
+      }
+    };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
+    const keydown = (ev: KeyboardEvent) => { if (ev.key === 'Escape') finish(false); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', keydown);
+  };
+
+  // 레인 우하단 그립 리사이즈 — 폭·높이 동시 조절, 스냅 24px, 최소/상한 클램프.
+  // stopPropagation으로 같은 레인의 헤더 드래그(startLaneDrag)와 겹치지 않게 한다.
+  const startLaneResize = (kind: LaneKind) => (e: ReactPointerEvent) => {
+    if (!freeMode) return;
+    e.stopPropagation();
+    const key = `lane:${kind}`;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const rect = effectiveLaneRect(kind);
+    const startW = rect.w;
+    const startH = rect.h ?? laneAutoH[kind] ?? LANE_H_MIN;
+    let moved = false;
+    let last: { w: number; h: number } | null = null;
+
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) > 4) moved = true;
+      if (!moved) return;
+      const nw = Math.min(LANE_W_MAX, Math.max(LANE_W_MIN, snap(startW + dx)));
+      const nh = Math.min(LANE_H_MAX, Math.max(LANE_H_MIN, snap(startH + dy)));
+      if (last && last.w === nw && last.h === nh) return;
+      last = { w: nw, h: nh };
+      setLaneResizing({ key, w: nw, h: nh });
+    };
+    const finish = (commit: boolean) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', keydown);
+      const cur = laneResizingRef.current;
+      setLaneResizing(null);
+      if (commit && cur && moved) {
+        setLayout((prev) => {
+          const def = LANE_DEFAULT_POS[kind];
+          const prevEntry = prev[key];
+          const next: Layout = {
+            ...prev,
+            [key]: { x: prevEntry?.x ?? def.x, y: prevEntry?.y ?? def.y, w: cur.w, h: cur.h },
+          };
+          saveLayout(tenantId, next);
+          return next;
+        });
+      }
     };
     const up = () => finish(true);
     const cancel = () => finish(false);
@@ -639,20 +805,35 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
     ? poolLanes.cooling.map((a) => a.accountId).join(',') + '#' + poolLanes.ready.map((a) => a.accountId).join(',')
     : '';
 
-  // 레인 컨테이너 하단(offsetTop+높이)을 측정해 캔버스 최소 높이에 더한다.
+  // 레인 자동 높이(사용자가 리사이즈하지 않은 레인) 실측 — ResizeObserver로 DOM
+  // 높이를 따라간다. 폭·명시적 높이는 layout이 이미 알고 있어 측정이 필요 없다.
   useLayoutEffect(() => {
-    const el = laneRef.current;
-    if (!el) {
-      setLaneBottom(0);
+    if (!showLanes || typeof ResizeObserver === 'undefined') {
+      setLaneAutoH({});
       return;
     }
-    const update = () => setLaneBottom(el.offsetTop + el.offsetHeight + CANVAS_PAD);
+    const update = () => {
+      const next: Partial<Record<LaneKind, number>> = {};
+      for (const [k, el] of laneElRefs.current) next[k] = el.offsetHeight;
+      setLaneAutoH(next);
+    };
     update();
-    if (typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(update);
-    ro.observe(el);
+    for (const el of laneElRefs.current.values()) ro.observe(el);
     return () => ro.disconnect();
   }, [showLanes, poolKey]);
+
+  // 레인 실효 사각형 — 캔버스 경계(minWidth·minHeight) 계산에 쓴다. 명시적 h가
+  // 없으면(자동) 실측 laneAutoH로 하단을 추정한다.
+  const coolRect = effectiveLaneRect('cooling');
+  const readyRect = effectiveLaneRect('ready');
+  const laneBottom = showLanes
+    ? Math.max(
+        coolRect.y + (coolRect.h ?? laneAutoH.cooling ?? 0),
+        readyRect.y + (readyRect.h ?? laneAutoH.ready ?? 0),
+      ) + CANVAS_PAD
+    : 0;
+  const laneRight = showLanes ? Math.max(coolRect.x + coolRect.w, readyRect.x + readyRect.w) + CANVAS_PAD : 0;
 
   const hasContent = servers.length > 0 || accounts.length > 0;
   const selectedEdge = aEdges.find((e) => e.id === selected);
@@ -745,16 +926,23 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
               className="topo-canvas-area"
               ref={canvasRef}
               style={{
-                minHeight: Math.max(canvasH, showLanes ? laneBottom : 0, openPopoverBottom) || undefined,
-                minWidth: showLanes ? POOL_RIGHT : undefined,
+                minHeight: Math.max(canvasH, laneBottom, openPopoverBottom) || undefined,
+                minWidth: laneRight || undefined,
               }}
             >
               <div className="topo-band-label" style={{ left: SERVER_X }}>서버 <span className="topo-col-count">{orderedServers.length}</span></div>
               <div className="topo-band-label" style={{ left: ACCOUNT_X }}>계정 <span className="topo-col-count">{orderedAccounts.length}</span></div>
               {showLanes && poolLanes && (
-                <div className="topo-pool-lanes" ref={laneRef} style={{ left: POOL_X, top: LANE_TOP }}>
-                  <PoolLanes cooling={poolLanes.cooling} ready={poolLanes.ready} laneWidth={LANE_W} />
-                </div>
+                <PoolLanes
+                  cooling={poolLanes.cooling}
+                  ready={poolLanes.ready}
+                  rects={{ cooling: coolRect, ready: readyRect }}
+                  dragging={laneDragging?.key ?? null}
+                  resizing={laneResizing?.key ?? null}
+                  onDragStart={startLaneDrag}
+                  onResizeStart={startLaneResize}
+                  laneRef={setLaneEl}
+                />
               )}
               {orderedServers.map((s) => {
                 const key = `srv:${s.id}`;
