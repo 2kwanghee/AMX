@@ -768,6 +768,22 @@ tbody tr.flash { animation: row-flash 0.6s ease-out; }
 .topo-acc.status-quarantined .topo-acc-avatar,
 .topo-acc.status-disabled .topo-acc-avatar { color: var(--canvas-crit); }
 
+/* 호버 상세 카드 — 5h·7d 잔여율, 리셋 시각, 신선도. .topo-srv-detail과 같은
+   패턴(기본 숨김, 노드 호버·포커스 시 표출). */
+.topo-acc-detail {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 7;
+  padding: 10px 12px; background: var(--canvas-bg-2);
+  border: 1px solid var(--canvas-accent); border-radius: 10px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / .45);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity .12s, transform .12s, visibility .12s;
+  pointer-events: none;
+}
+.topo-acc-detail-head { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--canvas-muted); margin-bottom: 8px; }
+.topo-acc-detail-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--canvas-ink); padding: 2px 0; }
+.topo-acc-detail-row.stale { color: var(--canvas-warn); }
+.topo-acc:hover .topo-acc-detail, .topo-acc:focus-visible .topo-acc-detail { opacity: 1; visibility: visible; transform: translateY(0); }
+
 /* 서버 노드 — NMS 장비 카드. 랙 아이콘 + 이름 / 상태·전환모드 / 미니 게이지 2줄
    / 활성 계정. 현행보다 작고 밀도 높게(자유 배치에서 작은 노드가 유리). */
 .topo-srv { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; }
@@ -1309,6 +1325,8 @@ tbody tr.usage-detail-row:hover > td { background: var(--surface-2); }
 }
 .pool-cool-gauge.done .pool-cool-fill { background: var(--ok); animation: none; }
 .pool-cool-pct { font-size: 11px; color: var(--ink); width: 40px; text-align: right; flex: none; }
+/* 충전소 진입 사유(4단계 — 자동화 가시화). 시계 아래 한 줄, 값이 없으면 "판정 사유 없음". */
+.pool-cool-reason { font-size: 11px; margin-top: 4px; }
 
 /* 권고·체인 항목 도착 하이라이트(카드와 같은 keyframe 재사용). */
 .pool-reco-item.new { animation: pool-card-enter var(--m-move) var(--ease-out); }

@@ -8,6 +8,7 @@ import type { AssignmentActionVerb as Verb } from '@/lib/api-client/client';
 import type {
   Account,
   AccountPage,
+  AccountUsageSummary,
   AlertPage,
   Assignment,
   AssignmentPage,
@@ -17,7 +18,6 @@ import type {
   ServerPage,
   TenantPage,
 } from '@/lib/api-client/types';
-import { accountWindows } from '@/lib/usage-format';
 import { groupAccountsByLane } from '@/lib/pool';
 import { DirectImport } from '../accounts/DirectImportModal';
 import { EditAccount } from '../accounts/EditAccountModal';
@@ -197,24 +197,14 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
   const providerOf = new Map(accounts.map((a) => [a.id, a.provider]));
   const activeByServer = currentActiveByServer(assignments, accounts);
 
-  // 계정 5h 소진율 배선 — 각 온라인 서버의 usage payload(accounts[].windows 중
-  // window_minutes=300, 없으면 five_hour 폴백)를 계정 이메일로 모아 계정 노드
-  // 서브라인에 전달한다. 계정은 서버당 유일 할당이라 이메일→pct 는 충돌 없이
-  // 결정된다. 값이 없으면 undefined 그대로 두어 서브라인은 프로바이더·상태만
-  // 표시(기존 degrade 유지).
-  const onlineIds = orderedServers.filter((s) => s.status === 'online').map((s) => s.id);
-  const { data: usageSnaps } = useSWR(
-    onlineIds.length ? ['topo-usage', tenantId, onlineIds.join(',')] : null,
-    () => Promise.all(onlineIds.map((id) => api.getUsage(tenantId, id).catch(() => null))),
-    { refreshInterval: 30000, shouldRetryOnError: false },
-  );
-  const usagePctByEmail = new Map<string, number>();
-  for (const snap of usageSnaps ?? []) {
-    for (const acc of snap?.payload?.accounts ?? []) {
-      const email = acc.account?.email;
-      const pct = accountWindows(acc).find((w) => w.windowMinutes === 300)?.pct;
-      if (email && pct != null) usagePctByEmail.set(email, pct);
-    }
+  // 계정 잔여 사용량 배선(account-remaining-usage-plan.md 3단계) — 계정 API가
+  // 이미 계정마다 usage{fiveHour,sevenDay,fetchedAt,stale}를 내려주므로(1단계),
+  // 서버별 usage 스냅샷을 따로 폴링해 이메일로 조인하던 이전 방식을 걷어내고
+  // accountsData 하나로 단일화한다 — 온라인 서버에 붙은 계정만 보이던 제약도
+  // 함께 없어진다(계정 API는 마지막 관측을 서버 온라인 여부와 무관하게 낸다).
+  const usageByEmail = new Map<string, AccountUsageSummary>();
+  for (const a of accounts) {
+    if (a.usage) usageByEmail.set(a.email, a.usage);
   }
 
   const minServerIdx = new Map<string, number>();
@@ -801,6 +791,9 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
   // 일시 실패해도 SWR이 쥔 마지막 데이터로 유지해, 30초마다 레인이 깜빡이지 않는다.
   const poolLanes = poolData ? groupAccountsByLane(poolData.accounts) : null;
   const showLanes = freeMode && poolLanes !== null;
+  // cooling 판정 사유(4단계)에 쓰는 서버별 교체 임계 — GET /pool이 이미
+  // servers[].poolPolicy로 내려주므로 새 API 없이 조인만 한다.
+  const poolPolicyOfServer = new Map((poolData?.servers ?? []).map((s) => [s.serverId, s.poolPolicy]));
   const poolKey = poolLanes
     ? poolLanes.cooling.map((a) => a.accountId).join(',') + '#' + poolLanes.ready.map((a) => a.accountId).join(',')
     : '';
@@ -936,6 +929,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
                 <PoolLanes
                   cooling={poolLanes.cooling}
                   ready={poolLanes.ready}
+                  policyOfServer={poolPolicyOfServer}
                   rects={{ cooling: coolRect, ready: readyRect }}
                   dragging={laneDragging?.key ?? null}
                   resizing={laneResizing?.key ?? null}
@@ -984,7 +978,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
                       email={a.email}
                       status={a.status}
                       provider={a.provider}
-                      usagePct={usagePctByEmail.get(a.email)}
+                      usage={usageByEmail.get(a.email)}
                       nodeRef={setNode(key)}
                       onClick={guardClick(() => openAccAction(a.id))}
                       onPortDown={startDrag('account', a.id)}
@@ -1026,7 +1020,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
                       email={a.email}
                       status={a.status}
                       provider={a.provider}
-                      usagePct={usagePctByEmail.get(a.email)}
+                      usage={usageByEmail.get(a.email)}
                       nodeRef={setNode(`acc:${a.id}`)}
                       onClick={guardClick(() => openAccAction(a.id))}
                       onPortDown={startDrag('account', a.id)}

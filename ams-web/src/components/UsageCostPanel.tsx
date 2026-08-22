@@ -4,10 +4,13 @@ import { useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { api, krApiError } from '@/lib/api-client/client';
 import type {
+  AccountPage,
+  AccountUsageSummary,
   UsageCostAccountLine,
   UsageCostResponse,
   UsageCostServerLine,
 } from '@/lib/api-client/types';
+import { fmtRemainingWindow } from '@/lib/usage-format';
 import { Icon, LiveDot, ProviderTag, fmtTime, useMarkOnData } from './common';
 
 // 비용은 분 단위로 튀는 값이 아니다(일 단위 롤업 + 진행 중 tail). 다른 패널보다
@@ -96,6 +99,23 @@ export function UsageCostPanel({
     { refreshInterval: POLL },
   );
   useMarkOnData(data);
+
+  // "현재 잔여" 열의 재료 — 계정 API가 이미 이메일당 usage 요약을 내려주므로
+  // (account-remaining-usage-plan.md 1단계) 여기서는 이메일로만 조인한다.
+  // AccountsPanel과 같은 SWR 키를 써서 두 패널이 동시에 열려도 요청이 겹치지
+  // 않는다.
+  const { data: accountsData } = useSWR<AccountPage>(
+    ['accounts', tenantId],
+    () => api.listAccounts(tenantId),
+    { refreshInterval: POLL },
+  );
+  const usageByEmail = useMemo(() => {
+    const m = new Map<string, AccountUsageSummary>();
+    for (const a of accountsData?.items ?? []) {
+      if (a.email && a.usage) m.set(a.email, a.usage);
+    }
+    return m;
+  }, [accountsData]);
 
   const servers = data?.servers ?? [];
   const subtotals = data?.subtotals ?? [];
@@ -208,6 +228,7 @@ export function UsageCostPanel({
                   setOpen((prev) => ({ ...prev, [s.serverId]: !prev[s.serverId] }))
                 }
                 onGoAccounts={onGoAccounts}
+                usageByEmail={usageByEmail}
               />
             ))}
             {isLoading && !data && (
@@ -232,11 +253,13 @@ function ServerRows({
   open,
   onToggle,
   onGoAccounts,
+  usageByEmail,
 }: {
   line: UsageCostServerLine;
   open: boolean;
   onToggle: () => void;
   onGoAccounts?: () => void;
+  usageByEmail: Map<string, AccountUsageSummary>;
 }) {
   const name = line.name || line.serverId.slice(0, 8);
   return (
@@ -280,14 +303,20 @@ function ServerRows({
                   <th className="num">사용률</th>
                   <th className="num">분담률</th>
                   <th className="num">배분액</th>
+                  <th className="num">현재 잔여</th>
                 </tr>
               </thead>
               <tbody>
                 {line.accounts.map((a) => (
-                  <AccountRow key={a.accountId} line={a} onGoAccounts={onGoAccounts} />
+                  <AccountRow
+                    key={a.accountId}
+                    line={a}
+                    onGoAccounts={onGoAccounts}
+                    usage={a.email ? usageByEmail.get(a.email) : undefined}
+                  />
                 ))}
                 {line.accounts.length === 0 && (
-                  <tr><td colSpan={6} className="muted">이 서버에 놓인 계정이 없습니다.</td></tr>
+                  <tr><td colSpan={7} className="muted">이 서버에 놓인 계정이 없습니다.</td></tr>
                 )}
               </tbody>
             </table>
@@ -301,9 +330,11 @@ function ServerRows({
 function AccountRow({
   line,
   onGoAccounts,
+  usage,
 }: {
   line: UsageCostAccountLine;
   onGoAccounts?: () => void;
+  usage?: AccountUsageSummary;
 }) {
   const noPrice = line.basis === 'no_price' || line.monthlyPrice == null;
   return (
@@ -329,6 +360,13 @@ function AccountRow({
       <td className="num">
         <Money amount={line.cost} currency={line.currency} />
         <span className="usage-basis">{BASIS_LABEL[line.basis] ?? line.basis}</span>
+      </td>
+      <td className="num">
+        {usage ? (
+          <span className={usage.stale ? 'muted' : undefined}>{fmtRemainingWindow(usage.fiveHour)}</span>
+        ) : (
+          <span className="muted">—</span>
+        )}
       </td>
     </tr>
   );
