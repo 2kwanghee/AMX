@@ -273,6 +273,89 @@ def test_active_account_email_swallows_tsamx_failure(monkeypatch, tmp_path):
     assert mod.active_account_email() is None
 
 
+def _write_active_profile(tmp_path, email, key=None):
+    """P3 활성 프로파일 포인터 레이아웃을 그대로 재현: 시험용 헬퍼."""
+    import hashlib
+
+    if key is None:
+        key = hashlib.sha256(email.strip().lower().encode()).hexdigest()
+    provider_dir = tmp_path / "profiles" / "claude"
+    profile_dir = provider_dir / key
+    profile_dir.mkdir(parents=True)
+    (provider_dir / "active").write_text(key)
+    (profile_dir / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"emailAddress": email}})
+    )
+    return key
+
+
+def test_active_account_email_prefers_profile_pointer_over_tsamx(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
+    _write_active_profile(tmp_path, "profile-user@example.com")
+
+    def _boom(*a, **kw):
+        raise AssertionError("tsamx must not be consulted when the profile pointer resolves")
+
+    monkeypatch.setattr(mod.subprocess, "run", _boom)
+    assert mod.active_account_email() == "profile-user@example.com"
+
+
+def test_active_account_email_falls_back_to_tsamx_when_no_profile_pointer(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))  # set, but no active file under it
+
+    class _Proc:
+        returncode = 0
+        stdout = b'{"active": {"email": "tsamx-user@example.com"}}'
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **kw: _Proc())
+    assert mod.active_account_email() == "tsamx-user@example.com"
+
+
+def test_active_account_email_pin_beats_profile_pointer(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.setenv("LANGFUSE_USER_ID", "pinned@example.com")
+    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
+    _write_active_profile(tmp_path, "profile-user@example.com")
+    assert mod.active_account_email() == "pinned@example.com"
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "not-a-hex-key",
+        "0" * 63,  # one short of 64
+        "0" * 65,  # one over 64
+    ],
+)
+def test_active_profile_email_rejects_malformed_pointer(monkeypatch, tmp_path, corrupt):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
+    provider_dir = tmp_path / "profiles" / "claude"
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "active").write_text(corrupt)
+    assert mod._active_profile_email() is None
+
+
+def test_active_profile_email_none_when_state_dir_unset(monkeypatch):
+    mod = _load_module()
+    monkeypatch.delenv("AMX_STATE_DIR", raising=False)
+    assert mod._active_profile_email() is None
+
+
+def test_active_profile_email_none_when_profile_dir_missing(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
+    provider_dir = tmp_path / "profiles" / "claude"
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "active").write_text("a" * 64)  # well-shaped, but no such profile dir
+    assert mod._active_profile_email() is None
+
+
 # -- iterations 귀속 ----------------------------------------------------------
 # 아래 픽스처는 기본 프로필 실측 레코드의 형태를 그대로 옮긴 것이다(값만 축약).
 # 최상위 message.model 과 flat 카운터는 **마지막** iteration을 반영하는데 최상위

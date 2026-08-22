@@ -36,6 +36,17 @@ set -eu
 # The runner and AMA MUST agree on the config home. Default to Claude's own
 # default (~/.claude) when CLAUDE_CONFIG_DIR is unset, so the lock path matches
 # the credential path claude will actually read.
+#
+# FIXED ANCHOR, P3 invariant (design note P3, resolving P2 review item ③):
+# CONFIG_DIR/LOCK_FILE below are captured from CLAUDE_CONFIG_DIR EXACTLY AS
+# GIVEN, before the active-profile block further down ever touches that
+# variable. AMA's own deliver lock (internal/tsamx/exec.go's lockConfigHome)
+# resolves the SAME formula — the daemon's own ConfigDir, else the driver's
+# DefaultConfigHome — and that side never consults an active profile pointer
+# either, so the two sides only stay pointed at the same file as long as
+# NEITHER side lets a per-profile override leak into this computation. Do not
+# move this below the profile block, and do not reassign CONFIG_DIR/LOCK_FILE
+# anywhere else in this file.
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 LOCK_FILE="$CONFIG_DIR/.amx-deliver.lock"
 
@@ -59,6 +70,50 @@ fi
 # residual exposure. `-c true` acquires+releases without holding across claude.
 # AMX_DELIVER_WAIT overrides the wait bound (seconds; default 5).
 flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
+
+# --- Active profile pointer (P3, optional) -----------------------------------
+# internal/seat/profile (P2) + internal/seat.Switcher (P3) can stage a Claude
+# account into its own config-home directory
+# ($AMX_STATE_DIR/profiles/claude/<accountKey>/) instead of the shared
+# CONFIG_DIR above. Neither is wired to anything yet as of this commit — no
+# caller ever writes the active pointer file — so this block is always a
+# no-op today; it exists so the wrapper is ready the day something does.
+#
+# Only CLAUDE_CONFIG_DIR for THIS claude invocation is touched here.
+# CONFIG_DIR/LOCK_FILE, fixed above, are NEVER reassigned by this block — see
+# the "FIXED ANCHOR" comment above for why that separation must hold.
+#
+# Fail-open at every step: an unset AMX_STATE_DIR, a missing/unreadable
+# pointer file, a pointer that is not shaped like a real accountKey (64
+# lowercase hex chars), or a profile directory that does not exist (or is a
+# symlink) all leave CLAUDE_CONFIG_DIR exactly as the caller set it — this
+# must never be what stops a runner from starting.
+AMX_ACTIVE_PROFILE_DIR=""
+if [ -n "${AMX_STATE_DIR:-}" ]; then
+	_amx_active_file="$AMX_STATE_DIR/profiles/claude/active"
+	if [ -f "$_amx_active_file" ] && [ -r "$_amx_active_file" ]; then
+		_amx_active_key=$(cat "$_amx_active_file" 2>/dev/null || true)
+		case "$_amx_active_key" in
+		"" | *[!0-9a-f]* )
+			: # empty, or contains a character outside [0-9a-f]: not a real accountKey
+			;;
+		* )
+			if [ "${#_amx_active_key}" -eq 64 ]; then
+				_amx_profile_dir="$AMX_STATE_DIR/profiles/claude/$_amx_active_key"
+				if [ -d "$_amx_profile_dir" ] && [ ! -L "$_amx_profile_dir" ]; then
+					AMX_ACTIVE_PROFILE_DIR="$_amx_profile_dir"
+					CLAUDE_CONFIG_DIR="$_amx_profile_dir"
+					export CLAUDE_CONFIG_DIR
+				fi
+				unset _amx_profile_dir
+			fi
+			;;
+		esac
+		unset _amx_active_key
+	fi
+	unset _amx_active_file
+fi
+# -----------------------------------------------------------------------------
 
 # --- Langfuse tracing (P3, optional) -----------------------------------------
 # If (and only if) `<CLAUDE_CONFIG_DIR>/amx-langfuse.env` exists, load it and,
@@ -84,15 +139,31 @@ if [ -f "$LF_ENV_FILE" ] && [ -r "$LF_ENV_FILE" ]; then
 		. "$LF_ENV_FILE"
 		if [ "${TRACE_TO_LANGFUSE:-}" = "true" ]; then
 			# Account attribution: default LANGFUSE_USER_ID to the currently
-			# active AMX account (tsamx active email), unless the env file
-			# already pinned it. Bounded to 2s via timeout(1). If timeout(1) is
-			# absent (some minimal images), we SKIP the lookup entirely rather
-			# than run tsamx unbounded — leaving LANGFUSE_USER_ID unset (pin it
-			# in the env file on such hosts).
-			if [ -z "${LANGFUSE_USER_ID:-}" ] \
-				&& command -v timeout >/dev/null 2>&1 \
-				&& command -v tsamx >/dev/null 2>&1; then
-				_lf_email=$(timeout 2 tsamx status --json 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("active") or {}).get("email") or "")' 2>/dev/null)
+			# active AMX account, unless the env file already pinned it.
+			# Resolution order (design note P3, resolving P2 review item ②):
+			#   1. the P3 active-profile pointer resolved above
+			#      (AMX_ACTIVE_PROFILE_DIR) — reads the email straight out of
+			#      that profile's own .claude.json, no subprocess involved;
+			#   2. `tsamx status --json`'s active.email (pre-P3 behavior,
+			#      kept as the fallback for as long as tsamx is what actually
+			#      manages the pool);
+			#   3. unset — LANGFUSE_USER_ID stays empty, same as today.
+			# Step 1 is always skipped today (AMX_ACTIVE_PROFILE_DIR is only
+			# ever set once something calls internal/seat.Switcher, and
+			# nothing does yet), so this is a pure addition, not a behavior
+			# change. Step 2 is bounded to 2s via timeout(1); if timeout(1) is
+			# absent (some minimal images) it is skipped entirely rather than
+			# run tsamx unbounded — pin LANGFUSE_USER_ID in the env file on
+			# such hosts.
+			if [ -z "${LANGFUSE_USER_ID:-}" ]; then
+				if [ -n "${AMX_ACTIVE_PROFILE_DIR:-}" ] && command -v python3 >/dev/null 2>&1; then
+					_lf_email=$(python3 -c 'import sys,json;d=json.load(open(sys.argv[1]));print((d.get("oauthAccount") or {}).get("emailAddress") or "")' "$AMX_ACTIVE_PROFILE_DIR/.claude.json" 2>/dev/null)
+				fi
+				if [ -z "${_lf_email:-}" ] \
+					&& command -v timeout >/dev/null 2>&1 \
+					&& command -v tsamx >/dev/null 2>&1; then
+					_lf_email=$(timeout 2 tsamx status --json 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("active") or {}).get("email") or "")' 2>/dev/null)
+				fi
 				if [ -n "${_lf_email:-}" ]; then
 					LANGFUSE_USER_ID="$_lf_email"
 				fi

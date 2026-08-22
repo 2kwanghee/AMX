@@ -441,19 +441,64 @@ def build_models(by_model: dict[str, dict]) -> list[dict]:
     return out
 
 
+def _active_profile_email() -> str | None:
+    """P3 활성 프로파일 포인터(``internal/seat/profile`` + ``internal/seat.
+    Switcher``, 이 커밋 시점에는 어디에도 배선되지 않았다)를 통한 이메일 조회.
+
+    ``$AMX_STATE_DIR/profiles/claude/active``가 없거나, 내용이 accountKey
+    모양(64자 소문자 16진수)이 아니거나, 그 계정 디렉터리가 없거나 심링크이면
+    전부 ``None``이다 — ``tsamx status --json`` 폴백으로 넘어간다는 뜻이라
+    이 함수 자체가 예외를 던지는 일은 없다(subprocess도 부르지 않는다).
+    """
+    state_dir = os.environ.get("AMX_STATE_DIR", "").strip()
+    if not state_dir:
+        return None
+    active_path = os.path.join(state_dir, "profiles", "claude", "active")
+    try:
+        with open(active_path, "r", encoding="utf-8") as f:
+            key = f.read().strip()
+    except OSError:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", key):
+        return None
+    profile_dir = os.path.join(state_dir, "profiles", "claude", key)
+    if os.path.islink(profile_dir) or not os.path.isdir(profile_dir):
+        return None
+    try:
+        with open(os.path.join(profile_dir, ".claude.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("oauthAccount")
+    if not isinstance(oauth, dict):
+        return None
+    email = oauth.get("emailAddress")
+    if isinstance(email, str) and email.strip():
+        return email.strip()[:320]
+    return None
+
+
 def active_account_email() -> str | None:
-    """현재 활성 계정 이메일. ``tsamx status --json``의 ``active.email``.
+    """현재 활성 계정 이메일.
 
-    설치 시점의 값을 박아두지 않고 매번 물어보는 이유: 계정은 전환되고, 박아둔 값은
-    전환 즉시 거짓이 된다. ``CLAUDE_CONFIG_DIR``이 이미 설정 홈을 가리키므로 tsamx는
-    같은 홈을 본다(``deploy/amx-claude``와 같은 조회다).
+    조회 순서(design note P3, P2 리뷰 ② 해소): 명시적 pin
+    (``LANGFUSE_USER_ID``) > P3 활성 프로파일 포인터(``_active_profile_email``)
+    > ``tsamx status --json``의 ``active.email`` > 없음. 설치 시점의 값을
+    박아두지 않고 매번 물어보는 이유: 계정은 전환되고, 박아둔 값은 전환 즉시
+    거짓이 된다. ``CLAUDE_CONFIG_DIR``이 이미 설정 홈을 가리키므로 tsamx는 같은
+    홈을 본다(``deploy/amx-claude``와 같은 조회다).
 
-    실패(tsamx 없음·타임아웃·JSON 깨짐·필드 없음)는 모두 ``None``이다 — 계정 없이
-    보내면 서버가 ``account_id`` NULL로 받아들인다.
+    실패(포인터 없음·tsamx 없음·타임아웃·JSON 깨짐·필드 없음)는 모두 ``None``이다
+    — 계정 없이 보내면 서버가 ``account_id`` NULL로 받아들인다.
     """
     pinned = os.environ.get("LANGFUSE_USER_ID", "").strip()
     if pinned:
         return pinned[:320]
+    profile_email = _active_profile_email()
+    if profile_email:
+        return profile_email
     try:
         proc = subprocess.run(
             ["tsamx", "status", "--json"],
