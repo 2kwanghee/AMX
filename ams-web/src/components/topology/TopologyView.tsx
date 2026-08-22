@@ -19,6 +19,7 @@ import type {
 } from '@/lib/api-client/types';
 import { accountWindows } from '@/lib/usage-format';
 import { groupAccountsByLane } from '@/lib/pool';
+import { DirectImport } from '../accounts/DirectImportModal';
 import { EditAccount } from '../accounts/EditAccountModal';
 import { RegisterModal } from '../accounts/RegisterModal';
 import { currentActiveByServer } from '../AssignmentsPanel';
@@ -50,6 +51,8 @@ type DragFrom = { from: 'server' | 'account'; id: string } | null;
 type Pos = { x: number; y: number };
 type Layout = Record<string, Pos>; // key: `srv:<id>` | `acc:<id>`
 type Dragging = { key: string; pos: Pos } | null;
+// 노드 액션 팝오버 앵커. flip=true면 노드 상단 위로 펼친다(캔버스 하단 clip 회피).
+type NodeAnchor = { x: number; y: number; flip: boolean };
 
 const GRID = 24; // 스냅 격자(px). 설정 노출은 후속.
 const NODE_W = 264; // 자유 배치 시 노드 폭(= 11*GRID)
@@ -75,6 +78,9 @@ const DEF_SIZE: Record<'srv' | 'acc', { w: number; h: number }> = {
   srv: { w: NODE_W, h: 156 },
   acc: { w: NODE_W, h: 52 },
 };
+// 노드 액션 팝오버 예상 높이(px) — 캔버스 하단 clip 판정용 상한 추정치.
+// 서버는 버튼 8개(줄바꿈 포함, ~180~200px), 계정은 버튼 2개.
+const POPOVER_H: Record<'srv' | 'acc', number> = { srv: 210, acc: 90 };
 
 const snap = (v: number) => Math.round(v / GRID) * GRID;
 const layoutStorageKey = (tenantId: string) => `amx.topo.layout.${tenantId}`;
@@ -218,7 +224,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
 
   // -- 콘솔 통합 액션(서버·계정 노드 클릭) -----------------------------------
   // 메뉴 이동 없이 노드 클릭 → 액션 팝오버 → (필요 시) 패널과 같은 추출 모달.
-  // 위치는 nodeAnchors(측정된 노드 하단 중심)를 그대로 쓴다.
+  // 위치는 nodeAnchors(측정된 노드 하단/상단 앵커 + flip)를 그대로 쓴다.
   const [srvActionId, setSrvActionId] = useState<string | null>(null);
   const [accActionId, setAccActionId] = useState<string | null>(null);
   const [usageOf, setUsageOf] = useState<Server | null>(null);
@@ -229,19 +235,28 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [creatingServer, setCreatingServer] = useState(false);
   const [creatingAccount, setCreatingAccount] = useState(false);
-  const [nodeAnchors, setNodeAnchors] = useState<Record<string, Pos>>({});
+  const [creatingDirectImport, setCreatingDirectImport] = useState(false);
+  const [nodeAnchors, setNodeAnchors] = useState<Record<string, NodeAnchor>>({});
+
+  // 노드 pointerdown이 캔버스까지 버블돼(아래 onPointerDown) 클릭보다 먼저 상태를
+  // 지운다 — 그 지우기 직전 값을 여기 담아 뒀다가 click 시점에 "같은 노드 재클릭"을
+  // 판별해 토글 닫힘을 만든다.
+  const lastSrvActionRef = useRef<string | null>(null);
+  const lastAccActionRef = useRef<string | null>(null);
 
   function openSrvAction(id: string) {
     setSelected(null);
     setAccActionId(null);
-    setSrvActionId(id);
+    setSrvActionId(lastSrvActionRef.current === id ? null : id);
   }
   function openAccAction(id: string) {
     setSelected(null);
     setSrvActionId(null);
-    setAccActionId(id);
+    setAccActionId(lastAccActionRef.current === id ? null : id);
   }
   function closeNodeActions() {
+    lastSrvActionRef.current = srvActionId;
+    lastAccActionRef.current = accActionId;
     setSrvActionId(null);
     setAccActionId(null);
   }
@@ -487,22 +502,6 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
       const r = el.getBoundingClientRect();
       if (r.width && r.height) nodeSize.current.set(k, { w: r.width, h: r.height });
     }
-    // 노드 액션 팝오버 앵커(하단 중심 + 여백) — 자유 배치·그리드 폴백 모두 동일하게
-    // nodeRefs의 실측 DOM 위치에서 뽑으므로 두 모드에서 팝오버가 그대로 동작한다.
-    const nextAnchors: Layout = {};
-    for (const s of orderedServers) {
-      const el = nodeRefs.current.get(`srv:${s.id}`);
-      if (!el) continue;
-      const r = el.getBoundingClientRect();
-      nextAnchors[`srv:${s.id}`] = { x: r.left - base.left + r.width / 2, y: r.bottom - base.top + 10 };
-    }
-    for (const a of orderedAccounts) {
-      const el = nodeRefs.current.get(`acc:${a.id}`);
-      if (!el) continue;
-      const r = el.getBoundingClientRect();
-      nextAnchors[`acc:${a.id}`] = { x: r.left - base.left + r.width / 2, y: r.bottom - base.top + 10 };
-    }
-    setNodeAnchors(nextAnchors);
     const wide = grid.offsetWidth >= FREE_MIN;
     setFreeMode(wide);
     // 자유 배치는 absolute라 컨테이너가 붕괴 — 노드 최하단 + 여백으로 높이 산정.
@@ -513,6 +512,36 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
       bottom += CANVAS_PAD;
     }
     setCanvasH(bottom);
+    // 노드 액션 팝오버 앵커(기본 하단 중심 + 여백) — nodeRefs의 실측 DOM 위치에서
+    // 뽑으므로 자유 배치·그리드 폴백 모두 동일 코드 경로로 동작한다. 자유 배치에서
+    // 캔버스 하단(overflow:hidden)에 팝오버가 잘리면 상세 카드와 같은 flip 패턴으로
+    // 노드 위쪽으로 뒤집는다(그리드 폴백은 canvasH가 0이라 flip 대상 아님).
+    const nextAnchors: Record<string, NodeAnchor> = {};
+    for (const s of orderedServers) {
+      const el = nodeRefs.current.get(`srv:${s.id}`);
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      const bottomY = r.bottom - base.top + 10;
+      const flip = wide && bottom > 0 && bottomY + POPOVER_H.srv > bottom;
+      nextAnchors[`srv:${s.id}`] = {
+        x: r.left - base.left + r.width / 2,
+        y: flip ? r.top - base.top - 10 : bottomY,
+        flip,
+      };
+    }
+    for (const a of orderedAccounts) {
+      const el = nodeRefs.current.get(`acc:${a.id}`);
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      const bottomY = r.bottom - base.top + 10;
+      const flip = wide && bottom > 0 && bottomY + POPOVER_H.acc > bottom;
+      nextAnchors[`acc:${a.id}`] = {
+        x: r.left - base.left + r.width / 2,
+        y: flip ? r.top - base.top - 10 : bottomY,
+        flip,
+      };
+    }
+    setNodeAnchors(nextAnchors);
     setMEdges(nextM);
     setAEdges(nextA);
     setSize({ w: grid.offsetWidth, h: Math.max(grid.offsetHeight, bottom) });
@@ -645,8 +674,9 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
         {hasContent && freeMode && (
           <span className="topo-toolbar-hint">노드를 끌어 배치 · 24px 격자 스냅</span>
         )}
-        <button type="button" className="topo-reset" onClick={() => setCreatingServer(true)}>서버 등록</button>
-        <button type="button" className="topo-reset" onClick={() => setCreatingAccount(true)}>계정 등록</button>
+        <button type="button" className="topo-reset primary" onClick={() => setCreatingServer(true)}>서버 등록</button>
+        <button type="button" className="topo-reset primary" onClick={() => setCreatingAccount(true)}>계정 등록</button>
+        <button type="button" className="topo-reset" onClick={() => setCreatingDirectImport(true)}>API 키 가져오기</button>
         {hasContent && freeMode && (
           <button type="button" className="topo-reset" title="자동 배치로 되돌립니다" onClick={resetLayout}>정렬 초기화</button>
         )}
@@ -824,6 +854,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
               server={srvActionServer}
               x={srvActionPos.x}
               y={srvActionPos.y}
+              flip={srvActionPos.flip}
               onClose={closeNodeActions}
               onMutate={() => mutateServers()}
               onUsage={() => setUsageOf(srvActionServer)}
@@ -840,6 +871,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
               account={accActionAccount}
               x={accActionPos.x}
               y={accActionPos.y}
+              flip={accActionPos.flip}
               onClose={closeNodeActions}
               onMutate={() => mutateAccounts()}
               onEdit={() => setEditingAccount(accActionAccount)}
@@ -917,6 +949,13 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
           tenantId={tenantId}
           onClose={() => setCreatingAccount(false)}
           onDone={() => { setCreatingAccount(false); mutateAccounts(); }}
+        />
+      )}
+      {creatingDirectImport && (
+        <DirectImport
+          tenantId={tenantId}
+          onClose={() => setCreatingDirectImport(false)}
+          onDone={() => { setCreatingDirectImport(false); mutateAccounts(); }}
         />
       )}
       {editingAccount && (
@@ -1001,16 +1040,34 @@ function EdgePopover({
   );
 }
 
+// 노드 액션 팝오버 공통 키보드 처리 — 열릴 때 첫 버튼 포커스, Escape로 닫기.
+// EdgePopover에는 아직 이런 장치가 없어(선 팝오버는 이번 변경 범위 밖) 노드
+// 팝오버에만 최소로 둔다.
+function useNodePopoverKeys(rootRef: { current: HTMLDivElement | null }, onClose: () => void) {
+  useEffect(() => {
+    (rootRef.current?.querySelector('button') as HTMLButtonElement | null)?.focus();
+    function onKey(ev: KeyboardEvent) {
+      if (ev.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+
 // 서버 노드 액션 팝오버 — 서버 패널 타일의 동작 전부(전환 모드·사용량 갱신·사용량·
 // 이벤트·정책·등록 토큰·에이전트 업데이트·삭제)를 메뉴 이동 없이 여기서 낸다.
 // 모달을 여는 버튼은 팝오버를 먼저 닫는다(모달이 화면을 덮으므로). 전환 모드·
 // 삭제는 성공 시 목록을 재검증(onMutate)하고 팝오버를 닫는다. 사용량 갱신은
 // 원래 패널 타일과 동일하게 결과를 기다리지 않는 발사 후 잊는 동작이라 팝오버를 유지한다.
+// 삭제는 2단계 확인(첫 클릭에 "정말 삭제"로 강조, 두 번째 클릭에 실행) — 팝오버가
+// 닫히면 이 컴포넌트가 언마운트되므로 confirmDelete 상태는 자연히 리셋된다.
 function ServerActionPopover({
   tenantId,
   server,
   x,
   y,
+  flip,
   onClose,
   onMutate,
   onUsage,
@@ -1023,6 +1080,7 @@ function ServerActionPopover({
   server: Server;
   x: number;
   y: number;
+  flip: boolean;
   onClose: () => void;
   onMutate: () => void;
   onUsage: () => void;
@@ -1032,6 +1090,9 @@ function ServerActionPopover({
   onUpdate: () => void;
 }) {
   const act = useAction();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useNodePopoverKeys(rootRef, onClose);
 
   function toggleMode() {
     act.run(
@@ -1049,11 +1110,17 @@ function ServerActionPopover({
   }
 
   function remove() {
+    if (!confirmDelete) { setConfirmDelete(true); return; }
     act.run(() => api.deleteServer(tenantId, server.id), () => { onMutate(); onClose(); });
   }
 
   return (
-    <div className="topo-popover node" style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
+    <div
+      ref={rootRef}
+      className={`topo-popover node${flip ? ' flip' : ''}`}
+      style={{ left: x, top: y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
       <div className="topo-popover-head">{server.name}</div>
       {act.error && <div className="topo-popover-err">{act.error}</div>}
       <div className="topo-popover-actions">
@@ -1085,9 +1152,9 @@ function ServerActionPopover({
           <span className="vbtn-icon"><Icon name="rotate" size={14} /></span>
           에이전트 업데이트
         </button>
-        <button className="vbtn danger" disabled={act.busy} onClick={remove}>
+        <button className={`vbtn danger${confirmDelete ? ' confirm' : ''}`} disabled={act.busy} onClick={remove}>
           <span className="vbtn-icon"><Icon name="trash" size={14} /></span>
-          삭제
+          {confirmDelete ? '정말 삭제' : '삭제'}
         </button>
       </div>
     </div>
@@ -1095,12 +1162,13 @@ function ServerActionPopover({
 }
 
 // 계정 노드 액션 팝오버 — 계정 패널 행의 동작(수정·삭제)을 그대로 낸다. 삭제는
-// 패널과 같은 수준(확인 모달 없이 즉시 실행)을 유지한다.
+// 서버 팝오버와 같은 2단계 확인으로 바꾼다(패널 자체의 즉시 삭제 동작은 그대로 둔다).
 function AccountActionPopover({
   tenantId,
   account,
   x,
   y,
+  flip,
   onClose,
   onMutate,
   onEdit,
@@ -1109,18 +1177,28 @@ function AccountActionPopover({
   account: Account;
   x: number;
   y: number;
+  flip: boolean;
   onClose: () => void;
   onMutate: () => void;
   onEdit: () => void;
 }) {
   const act = useAction();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useNodePopoverKeys(rootRef, onClose);
 
   function remove() {
+    if (!confirmDelete) { setConfirmDelete(true); return; }
     act.run(() => api.deleteAccount(tenantId, account.id), () => { onMutate(); onClose(); });
   }
 
   return (
-    <div className="topo-popover node" style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
+    <div
+      ref={rootRef}
+      className={`topo-popover node${flip ? ' flip' : ''}`}
+      style={{ left: x, top: y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
       <div className="topo-popover-head"><span className="mono">{account.email}</span></div>
       {act.error && <div className="topo-popover-err">{act.error}</div>}
       <div className="topo-popover-actions">
@@ -1128,9 +1206,9 @@ function AccountActionPopover({
           <span className="vbtn-icon"><Icon name="user" size={14} /></span>
           수정
         </button>
-        <button className="vbtn danger" disabled={act.busy} onClick={remove}>
+        <button className={`vbtn danger${confirmDelete ? ' confirm' : ''}`} disabled={act.busy} onClick={remove}>
           <span className="vbtn-icon"><Icon name="trash" size={14} /></span>
-          삭제
+          {confirmDelete ? '정말 삭제' : '삭제'}
         </button>
       </div>
     </div>
