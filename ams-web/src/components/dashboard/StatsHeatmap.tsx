@@ -10,9 +10,16 @@ export function StatsHeatmap({ tenantId, range }: { tenantId: string; range: Sta
   const { data } = useStatsHeatmap(tenantId, range);
 
   return (
-    <div className="panel">
-      <h2>요일 · 시간대별 세션</h2>
-      <Heatmap cells={data?.cells ?? []} />
-    </div>
+    <section className="panel dash-card dash-span-6">
+      <div className="dash-card-head">
+        <h2>
+          요일 · 시간대별 세션
+          <span className="dash-card-sub">UTC 기준</span>
+        </h2>
+      </div>
+      <div className="dash-card-body">
+        <Heatmap cells={data?.cells ?? []} />
+      </div>
+    </section>
   );
 }

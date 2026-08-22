@@ -1376,14 +1376,19 @@ tbody tr.usage-detail-row:hover > td { background: var(--surface-2); }
 
 /* -- KPI 타일 ---------------------------------------------------------- */
 .chart-kpi {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 14px 16px; background: var(--surface); border: 1px solid var(--border);
+  display: flex; flex-direction: column; justify-content: center; gap: 8px;
+  min-height: 96px;
+  padding: 16px 20px; background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px; text-align: left; font: inherit; color: inherit;
   box-shadow: var(--shadow); cursor: default;
 }
 button.chart-kpi { cursor: pointer; transition: border-color var(--m-fast), box-shadow var(--m-fast); }
 button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb(15 118 110 / .12); }
-.chart-kpi-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.chart-kpi-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+.chart-kpi-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 값·증감·스파크라인을 한 줄에 묶는다. 예전처럼 값 아래에 증감만 따로 두면
+   여백만 넓어지고 화살표가 혼자 떠 있는 것처럼 보인다. */
+.chart-kpi-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .chart-kpi-icon { display: inline-flex; flex: 0 0 auto; }
 .chart-kpi-teal .chart-kpi-icon { color: var(--kpi-teal); }
 .chart-kpi-indigo .chart-kpi-icon { color: var(--kpi-indigo); }
@@ -1393,12 +1398,15 @@ button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb
   font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums;
   color: var(--ink); line-height: 1.1;
 }
-.chart-kpi-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 26px; }
 .chart-kpi-delta { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
 .chart-kpi-delta.up { color: var(--ok); }
 .chart-kpi-delta.down { color: var(--crit); }
 .chart-kpi-arrow { font-size: 10px; }
-.chart-kpi-spark { color: var(--accent); line-height: 0; }
+.chart-kpi-spark {
+  color: var(--accent); line-height: 0; margin-left: auto; align-self: center;
+  width: 96px; height: 28px; flex: 0 0 auto;
+}
+.chart-kpi-spark .spark { width: 96px; height: 28px; }
 .chart-kpi-teal .chart-kpi-spark { color: var(--kpi-teal); }
 .chart-kpi-indigo .chart-kpi-spark { color: var(--kpi-indigo); }
 .chart-kpi-amber .chart-kpi-spark { color: var(--kpi-amber); }
@@ -1407,9 +1415,13 @@ button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb
 /* -- 누적 영역 시계열 ---------------------------------------------------- */
 .chart-area-wrap { position: relative; }
 .chart-area-svg { display: block; width: 100%; height: auto; }
-.chart-area-band { opacity: .88; }
-.chart-grid-line { stroke: var(--border); stroke-width: 1; }
-.chart-axis-label { font-size: 10px; fill: var(--muted); }
+/* 면은 옅게, 경계는 선으로. 불투명 단색으로 채우면 시리즈가 겹칠 때 벽처럼
+   보이고 그리드가 전부 가려진다. */
+.chart-area-band { fill-opacity: .18; }
+.chart-area-line { fill: none; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart-area-dot { stroke: var(--surface); stroke-width: 1.5; }
+.chart-grid-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; }
+.chart-axis-label { font-size: 11px; fill: var(--muted); }
 .chart-crosshair { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
 .chart-tooltip {
   position: absolute; transform: translateX(-4px); min-width: 140px;
@@ -1424,16 +1436,16 @@ button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb
 .chart-tooltip-value { font-variant-numeric: tabular-nums; color: var(--muted); }
 
 /* -- 도넛 ---------------------------------------------------------------- */
-.chart-donut-wrap { display: flex; align-items: center; gap: 16px; }
+.chart-donut-wrap { display: flex; align-items: center; gap: 18px; min-width: 0; }
 .chart-donut-svg { flex: 0 0 auto; }
 .chart-donut-seg {
   transform-box: fill-box; transform-origin: center; cursor: default;
   transition: transform var(--m-fast) var(--ease-out), opacity var(--m-fast);
 }
 .chart-donut-seg.hover { transform: scale(1.05); }
-.chart-donut-big { font-size: 20px; font-weight: 700; fill: var(--ink); }
-.chart-donut-small { font-size: 10.5px; fill: var(--muted); }
-.chart-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.chart-donut-big { font-size: 18px; font-weight: 700; fill: var(--ink); }
+.chart-donut-small { font-size: 10px; fill: var(--muted); }
+.chart-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1 1 auto; }
 .chart-legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 4px; border-radius: 6px; }
 .chart-legend-item.hover { background: var(--surface-2); }
 .chart-legend-swatch { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
@@ -1441,30 +1453,52 @@ button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb
 .chart-legend-value { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* -- 순위 바(FLIP) --------------------------------------------------------- */
-.chart-rank { display: flex; flex-direction: column; }
-.chart-rank-row { display: grid; grid-template-columns: 96px 1fr 64px; align-items: center; gap: 10px; will-change: transform; }
-.chart-rank-label { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chart-rank-track { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.chart-rank { display: flex; flex-direction: column; gap: 2px; }
+/* 라벨 칸은 이메일 로컬파트가 다 보이는 폭(최대 180px)을 잡되 좁은 카드에서는
+   줄어들 수 있게 minmax의 최솟값을 0으로 둔다. 부제는 별도 목록이 아니라 같은
+   행의 둘째 줄이다. */
+.chart-rank-row {
+  display: grid; grid-template-columns: minmax(0, 180px) minmax(40px, 1fr) 56px;
+  grid-template-rows: auto auto; align-items: center;
+  column-gap: 10px; row-gap: 2px; padding: 5px 0; will-change: transform;
+}
+.chart-rank-label {
+  grid-row: 1; grid-column: 1;
+  font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chart-rank-track { grid-row: 1; grid-column: 2; height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
 .chart-rank-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--m-base) var(--ease-out); }
-.chart-rank-value { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.chart-rank-value { grid-row: 1; grid-column: 3; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.chart-rank-sub {
+  grid-row: 2; grid-column: 1 / -1;
+  font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* -- 원형 잔여 게이지 ------------------------------------------------------ */
 .chart-ring { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.chart-ring.compact { gap: 0; line-height: 0; }
 .chart-ring-track { stroke: var(--surface-2); }
 .chart-ring-fill { stroke: var(--accent); transition: stroke-dashoffset var(--m-base) var(--ease-out), stroke var(--m-fast); }
 .chart-ring-fill.warn { stroke: var(--warn); }
 .chart-ring-fill.crit { stroke: var(--crit); }
-.chart-ring-text { font-size: 15px; font-weight: 700; fill: var(--ink); font-variant-numeric: tabular-nums; }
+.chart-ring-text { font-weight: 700; fill: var(--ink); font-variant-numeric: tabular-nums; }
 .chart-ring-window { font-size: 10.5px; color: var(--muted); }
 .chart-ring-caption { font-size: 11px; color: var(--ink); }
 
 /* -- 히트맵 --------------------------------------------------------------- */
-.chart-heatmap { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted); }
-.chart-heatmap-hours { display: grid; grid-template-columns: repeat(24, 1fr); padding-left: 28px; }
-.chart-heatmap-hour-label { text-align: center; }
+/* 셀은 카드 폭을 채우도록 늘리되(1fr) aspect-ratio로 정사각형을 지키고, 폭이
+   넓은 카드에서 22px 넘게 커지지 않도록 격자 전체의 최대 폭을 묶어 둔다.
+   고정 폭으로 두면 6칸짜리 카드에서 왼쪽 절반만 쓰고 오른쪽이 빈다. */
+.chart-heatmap {
+  display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted);
+  /* 요일 라벨(20) + 간격(4) + 셀 24개(22) + 셀 간격 23개(2) */
+  max-width: calc(24px + 24 * 22px + 23 * 2px);
+}
+.chart-heatmap-hours { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; margin-left: 24px; }
+.chart-heatmap-hour-label { text-align: center; font-size: 10px; white-space: nowrap; }
 .chart-heatmap-row { display: flex; align-items: center; gap: 4px; }
-.chart-heatmap-day-label { width: 24px; flex: 0 0 auto; text-align: right; }
-.chart-heatmap-cells { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; flex: 1 1 auto; }
+.chart-heatmap-day-label { width: 20px; flex: 0 0 auto; text-align: right; font-size: 11px; }
+.chart-heatmap-cells { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; flex: 1 1 auto; min-width: 0; }
 .chart-heatmap-cell {
   aspect-ratio: 1; border-radius: 3px;
   background: color-mix(in srgb, var(--accent) calc(var(--intensity, 0) * 100%), var(--surface-2));
@@ -1476,17 +1510,19 @@ button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb
 }
 
 /* -- 상키(서버→계정 흐름) --------------------------------------------------- */
-.chart-sankey-svg { display: block; width: 100%; height: auto; }
+.chart-sankey-wrap { width: 100%; min-width: 0; }
+.chart-sankey-svg { display: block; }
+/* 링크 색은 소스 서버별로 인라인 지정된다(Sankey.tsx). 여기서는 투명도만 잡는다. */
 .chart-sankey-link {
   fill: none; stroke: var(--accent); stroke-opacity: .35;
-  transition: stroke-opacity var(--m-fast), stroke var(--m-fast);
+  transition: stroke-opacity var(--m-fast);
   cursor: default;
 }
-.chart-sankey-link.hover { stroke-opacity: .8; stroke: var(--kpi-indigo); }
-.chart-sankey-link.dim { stroke-opacity: .12; }
-.chart-sankey-node { fill: var(--ink); opacity: .85; }
+.chart-sankey-link.hover { stroke-opacity: .7; }
+.chart-sankey-link.dim { stroke-opacity: .1; }
+.chart-sankey-node { fill: var(--ink); opacity: .9; }
 .chart-sankey-node.account { fill: var(--kpi-indigo); }
-.chart-sankey-node-label { font-size: 10.5px; fill: var(--ink); }
+.chart-sankey-node-label { font-size: 11px; fill: var(--muted); }
 
 @media (prefers-reduced-motion: reduce) {
   .chart-heatmap-cell { animation: none; }
@@ -1500,26 +1536,68 @@ button.chart-kpi:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgb
 }
 
 /* -- 대시보드 홈 레이아웃 (dashboard-redesign-plan.md §4) ------------------- */
-.dash-range-row { display: flex; justify-content: flex-end; margin-bottom: 14px; }
+/* 위젯 배치는 12컬럼 그리드 하나로 통일한다(.dash-grid). 예전처럼 .row를 겹쳐
+   쌓으면 같은 줄 카드끼리 높이가 어긋나고 간격이 제각각이 된다. 여기 선택자는
+   전부 .dash-/.chart- 접두 안에만 있어 상황판·다른 탭에는 닿지 않는다. */
+.dash-range-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
 
-/* 계정 잔여 게이지 격자 — 카드 하나에 5h/7d 링 두 개. */
-.dash-gauge-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px;
+.dash-grid {
+  display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 16px; align-items: stretch;
 }
-.dash-gauge-card {
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 10px; background: var(--surface-2); border-radius: 10px;
+.dash-span-4 { grid-column: span 4; }
+.dash-span-6 { grid-column: span 6; }
+.dash-span-8 { grid-column: span 8; }
+.dash-kpis {
+  grid-column: 1 / -1;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px;
 }
-.dash-gauge-card-email {
-  font-size: 11.5px; color: var(--ink); max-width: 100%;
+
+.dash-card {
+  margin-bottom: 0; padding: 16px 20px; min-width: 0;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.dash-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 22px; }
+.dash-card h2 {
+  margin: 0; font-size: 13px; font-weight: 600; color: var(--ink);
+  display: inline-flex; align-items: baseline; gap: 8px; min-width: 0;
+}
+.dash-card-sub { font-size: 11px; font-weight: 400; color: var(--muted); white-space: nowrap; }
+.dash-card-select {
+  display: inline-flex; align-items: center; gap: 6px; margin: 0;
+  font-size: 11px; color: var(--muted); white-space: nowrap; flex: 0 0 auto;
+}
+.dash-card-select select { width: auto; padding: 4px 8px; font-size: 12px; }
+/* 같은 줄 카드는 높이가 맞춰지므로(align-items: stretch) 내용이 짧은 카드는
+   남는 자리를 위아래로 나눠 가운데 정렬한다 — 위로만 붙이면 아래가 통째로
+   비어 보인다. */
+.dash-card-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+
+/* 계정 잔여 사용량 — 계정당 한 줄. 예전 카드 격자는 계정이 두엇뿐일 때
+   왼쪽에만 몰리고 오른쪽이 통째로 비었다. */
+.dash-remain-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+/* 이메일 한 줄 + 게이지 한 줄. 넷을 한 줄에 밀어 넣으면 4칸 카드 폭에서
+   계정마다 다른 지점에서 줄바꿈이 일어나 목록이 들쭉날쭉해진다. */
+.dash-remain-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dash-remain-email {
+  min-width: 0; font-size: 13px; color: var(--ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.dash-gauge-card-rings { display: flex; gap: 10px; }
+.dash-remain-gauges { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.dash-remain-cell { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.dash-remain-meta { display: flex; flex-direction: column; gap: 1px; }
+.dash-remain-win { font-size: 10px; color: var(--muted); }
+.dash-remain-text { font-size: 11px; color: var(--ink); white-space: nowrap; }
+.dash-remain-more { font-size: 11px; color: var(--muted); }
 
-/* 계정 순위 바 밑 부제 목록(최다 모델·프로젝트·서버) — RankBars 라벨 칸은
-   96px 고정폭이라 부제까지 넣을 자리가 없어 별도 목록으로 붙인다. */
-.dash-rank-notes { list-style: none; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--border); }
-.dash-rank-notes li {
-  display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 12px;
+/* 최근 활동 — 행 간격만 대시보드 쪽에서 조금 넉넉하게 잡는다. */
+.dash-activity .activity-item { padding: 10px 2px; }
+.dash-activity .activity-time { font-size: 11px; }
+
+@media (max-width: 1200px) {
+  .dash-span-4, .dash-span-8 { grid-column: span 6; }
+  .dash-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-.dash-rank-notes-email { flex: 0 0 auto; color: var(--ink); font-weight: 600; }
+@media (max-width: 820px) {
+  .dash-span-4, .dash-span-6, .dash-span-8 { grid-column: 1 / -1; }
+}

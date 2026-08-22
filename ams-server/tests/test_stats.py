@@ -337,6 +337,37 @@ def test_flows_links_server_to_account(client, app_env):
     assert link["value"] == 500.0
 
 
+def test_flows_collapses_deleted_accounts_into_one_node(client, app_env):
+    """지워진 계정들은 노드 하나로 합치고 링크 값을 더한다.
+
+    usage_daily_rollup.account_id에는 FK가 없어서(모델 docstring 참조) 계정이
+    지워져도 행이 남는다. 그 행들을 계정마다 노드로 펼치면 라벨이 전부
+    "(삭제된 계정)"이라 서로 구별되지 않는 노드만 늘어난다.
+    """
+    tenant_id = _seed_tenant()
+    server_a = _seed_server(tenant_id, name="flow-del-srv")
+    account_live = _seed_account(tenant_id, "flow-live@ex.com")
+    gone_1, gone_2 = uuid.uuid4(), uuid.uuid4()
+    today = datetime.now(UTC).date()
+    _add_rollup(tenant_id, today, server_a, account_live, held=100)
+    _add_rollup(tenant_id, today, server_a, gone_1, held=30)
+    _add_rollup(tenant_id, today, server_a, gone_2, held=20)
+
+    r = client.get(f"{API}/tenants/{tenant_id}/stats/flows?range=7d")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    account_nodes = [n for n in body["nodes"] if n["kind"] == "account"]
+    assert {n["id"] for n in account_nodes} == {f"account:{account_live}", "account:deleted"}
+    assert next(n for n in account_nodes if n["id"] == "account:deleted")["label"] == "(삭제된 계정)"
+
+    by_target = {link["target"]: link["value"] for link in body["links"]}
+    assert by_target[f"account:{account_live}"] == 100.0
+    # 30 + 20 — 합산된 링크 하나로만 나온다.
+    assert by_target["account:deleted"] == 50.0
+    assert len([link for link in body["links"] if link["target"] == "account:deleted"]) == 1
+
+
 def test_accounts_top_model_top_project_top_server_and_windows(client, app_env):
     tenant_id = _seed_tenant()
     server_a = _seed_server(tenant_id, name="acc-srv-a")

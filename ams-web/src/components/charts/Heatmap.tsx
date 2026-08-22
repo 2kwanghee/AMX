@@ -49,7 +49,10 @@ export function Heatmap({ cells, weekdayLabels = DEFAULT_WEEKDAYS }: HeatmapProp
           <div className="chart-heatmap-cells">
             {row.map((value, hour) => {
               const idx = day * 24 + hour;
-              const intensity = scale(value);
+              // 0은 빈 칸(--surface-2)으로 두고, 값이 있는 칸은 15%부터 시작한다.
+              // 1건짜리 칸이 0건과 구별되지 않으면 히트맵의 의미가 없다.
+              const raw = scale(value);
+              const intensity = raw <= 0 ? 0 : 0.15 + raw * 0.85;
               const delay = Math.min(idx * STAGGER_STEP_MS, STAGGER_CAP_MS);
               return (
                 <span
