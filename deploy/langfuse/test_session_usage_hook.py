@@ -39,6 +39,11 @@ def hook(monkeypatch, tmp_path):
     # tsamx가 실제로 설치된 호스트에서도 테스트가 네트워크/외부 상태에 매이지 않게.
     monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
     monkeypatch.setattr(mod, "active_account_email", lambda: None)
+    # 기존 테스트는 모두 "자식(DEFERRED=1)"의 집계·전송 로직만 검증한다 — 분리
+    # 프로세스 재실행 자체는 아래 지연 실행 전용 테스트에서 따로 다룬다. 최대 대기를
+    # 0으로 둬 트랜스크립트가 비어 있는 케이스(no-op 계열)가 폴링으로 느려지지 않게 한다.
+    monkeypatch.setenv("AMX_SESSION_USAGE_DEFERRED", "1")
+    monkeypatch.setattr(mod, "_DEFER_MAX_SECONDS", 0.0)
     return mod
 
 
@@ -733,6 +738,90 @@ def test_label_folding_alone_is_not_truncation(hook):
     state = hook._new_state()
     hook.aggregate([_assistant(mid="m1", model="not a valid label!!")], state)
     assert state["truncated"] is False
+
+
+# -- 지연 실행(자기 자신을 분리 프로세스로 재실행) ---------------------------
+# Claude Code가 Stop 훅 발화 **뒤에** 트랜스크립트에 assistant 레코드를 쓰기 때문에,
+# 1차 호출은 기다리지 않고 자식(DEFERRED=1)에게 넘긴다. 위 `hook` 픽스처는 이미
+# DEFERRED=1·_DEFER_MAX_SECONDS=0을 깔아 두므로, 아래 테스트는 필요한 만큼만 되돌린다.
+
+
+def test_first_call_spawns_detached_child_and_returns_immediately(hook, monkeypatch, transcript_file):
+    # 1차 호출(DEFERRED 미설정)이면 집계는 전혀 하지 않고 자식만 띄운다.
+    monkeypatch.delenv("AMX_SESSION_USAGE_DEFERRED", raising=False)
+    monkeypatch.setenv("AMX_SESSION_INGEST_URL", "http://ams.test/ingest")
+    monkeypatch.setenv("AMX_SESSION_INGEST_TOKEN", "tok")
+    monkeypatch.setattr(hook, "aggregate", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("1차 호출은 집계하면 안 된다")))
+
+    calls: list[dict] = []
+    written: list[bytes] = []
+
+    class _FakeStdin:
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            pass
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdin = _FakeStdin()
+
+    def _fake_popen(args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return _FakeProc()
+
+    monkeypatch.setattr(hook.subprocess, "Popen", _fake_popen)
+    payload = {"session_id": "sess-1", "transcript_path": str(transcript_file)}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+
+    assert hook.main() == 0
+    assert len(calls) == 1
+    kwargs = calls[0]["kwargs"]
+    assert kwargs["env"]["AMX_SESSION_USAGE_DEFERRED"] == "1"
+    assert kwargs["start_new_session"] is True
+    assert written and json.loads(written[0].decode("utf-8")) == payload
+
+
+def test_first_call_swallows_popen_failure(hook, monkeypatch, transcript_file):
+    monkeypatch.delenv("AMX_SESSION_USAGE_DEFERRED", raising=False)
+    monkeypatch.setenv("AMX_SESSION_INGEST_URL", "http://ams.test/ingest")
+    monkeypatch.setenv("AMX_SESSION_INGEST_TOKEN", "tok")
+
+    def _boom(*a, **kw):
+        raise OSError("no fork")
+
+    monkeypatch.setattr(hook.subprocess, "Popen", _boom)
+    payload = {"session_id": "sess-1", "transcript_path": str(transcript_file)}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert hook.main() == 0  # Popen 실패도 exit 0 불변식을 지킨다.
+
+
+def test_deferred_child_waits_for_assistant_records_to_appear(hook, monkeypatch, tmp_path):
+    # 처음엔 assistant 레코드가 없는 트랜스크립트다가, 폴링 도중(=time.sleep 호출 시점에)
+    # 줄이 추가되면 다음 시도에서 잡아 전송한다.
+    path = tmp_path / "sess-live.jsonl"
+    path.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(hook, "_DEFER_MAX_SECONDS", 5.0)
+
+    def _fake_sleep(seconds):
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(_assistant(mid="m1") + "\n")
+
+    monkeypatch.setattr(hook.time, "sleep", _fake_sleep)
+    out = _run(hook, monkeypatch, {"session_id": "sess-live", "transcript_path": str(path)})
+    assert out is not None
+    assert [m["model"] for m in out["payload"]["models"]] == ["claude-opus-5"]
+
+
+def test_deferred_child_gives_up_after_max_wait_without_sending(hook, monkeypatch, tmp_path):
+    # 끝까지(=deadline까지) assistant 레코드가 없으면 아무 것도 보내지 않는다.
+    path = tmp_path / "sess-empty.jsonl"
+    path.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(hook, "_DEFER_MAX_SECONDS", 0.05)
+    monkeypatch.setattr(hook, "_DEFER_POLL_INTERVAL_SECONDS", 0.01)
+    out = _run(hook, monkeypatch, {"session_id": "sess-empty", "transcript_path": str(path)})
+    assert out is None
 
 
 if __name__ == "__main__":
