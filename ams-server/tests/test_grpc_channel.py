@@ -146,6 +146,37 @@ def test_enroll_promotes_and_sends_signed_session_setup(app_env):
         assert server.agent_id == AGENT_ID
 
 
+def test_register_hostname_is_stored_on_server(app_env):
+    """Register.hostname(agent의 os.Hostname())이 servers.hostname에 반영된다.
+
+    session_usage 훅이 같은 socket.gethostname()을 보내므로, 이 값이 맞아야
+    resolve_server_id가 세션을 서버로 귀속시킬 수 있다.
+    """
+    signer = signing.Signer.from_env_or_generate()
+    tenant_id, _account_id, server_id = _seed_tenant_account_server()
+    token = _issue_enroll(tenant_id, server_id)
+
+    async def scenario():
+        async with _Harness(signer) as h, h.channel() as channel:
+            stub = pb_grpc.AmxControlPlaneStub(channel)
+            call = stub.Session()
+            await call.write(
+                pb.AmaMessage(
+                    register=pb.Register(
+                        agent_id=AGENT_ID, enroll_token=token, hostname="Runner-1"
+                    )
+                )
+            )
+            cmd = await _read(call)
+            assert cmd.WhichOneof("cmd") == "session_setup"
+            await call.done_writing()
+
+    asyncio.run(scenario())
+    with get_sessionmaker()() as db:
+        server = inventory.get_server(db, tenant_id, server_id)
+        assert server.hostname == "Runner-1"
+
+
 def test_commands_are_bound_to_the_authenticated_agent(app_env):
     """Every command AMS emits carries target_agent_id == the session's agent
     (recipient binding). SessionSetup and the deliver both."""

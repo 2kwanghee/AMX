@@ -160,6 +160,8 @@ def get_session_usage(
                 session_id=r.session_id,
                 model=r.model,
                 account_email=email,
+                server_id=r.server_id,
+                project=r.project,
                 input_tokens=r.input_tokens,
                 output_tokens=r.output_tokens,
                 cache_read_tokens=r.cache_read_tokens,

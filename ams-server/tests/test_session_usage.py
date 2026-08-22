@@ -40,6 +40,18 @@ def _seed_tenant() -> uuid.UUID:
 _CODEX_SECRET = '{"auth_mode": "chatgpt", "tokens": {"refresh_token": "rt"}}'
 
 
+def _seed_server(tenant_id: uuid.UUID, name: str, hostname: str | None) -> uuid.UUID:
+    from app.db import get_sessionmaker
+    from app.services import inventory
+
+    with get_sessionmaker()() as db:
+        server = inventory.create_server(
+            db, tenant_id, name=name, hostname=hostname, switch_mode="auto"
+        )
+        db.commit()
+        return server.id
+
+
 def _seed_account(tenant_id: uuid.UUID, email: str, provider: str = "claude") -> uuid.UUID:
     from app.db import get_sessionmaker
 
@@ -268,6 +280,130 @@ def test_codex_account_with_same_email_is_not_attributed(client, monkeypatch):
     assert r.status_code == 200
     assert r.json()["accountResolved"] is False
     assert _rows()[0].account_id is None
+
+
+# -- 서버·프로젝트 축 -----------------------------------------------------------
+
+
+def test_hostname_matching_server_stores_server_id(client, monkeypatch):
+    tenant_id = _enable(monkeypatch)
+    server_id = _seed_server(tenant_id, "srv-a", "runner-1")
+    r = _post(client, _body())
+    assert r.status_code == 200, r.text
+    assert _rows()[0].server_id == server_id
+
+
+def test_unmatched_hostname_stores_null_server_id(client, monkeypatch):
+    _enable(monkeypatch)
+    r = _post(client, _body(hostname="no-such-host"))
+    assert r.status_code == 200, r.text
+    assert _rows()[0].server_id is None
+
+
+def test_cwd_last_path_segment_is_stored_as_project(client, monkeypatch):
+    _enable(monkeypatch)
+    assert _post(client, _body(cwd="/home/u/work/AMX/")).status_code == 200
+    assert _rows()[0].project == "AMX"
+
+
+def test_windows_cwd_last_path_segment_is_stored_as_project(client, monkeypatch):
+    _enable(monkeypatch)
+    assert _post(client, _body(cwd="C:\\ws\\AMX")).status_code == 200
+    assert _rows()[0].project == "AMX"
+
+
+def test_missing_cwd_stores_null_project(client, monkeypatch):
+    _enable(monkeypatch)
+    body = _body()
+    body.pop("cwd")
+    assert _post(client, body).status_code == 200
+    assert _rows()[0].project is None
+
+
+def test_rereport_replaces_server_id_and_project(client, monkeypatch):
+    tenant_id = _enable(monkeypatch)
+    server_a = _seed_server(tenant_id, "srv-a", "runner-1")
+    server_b = _seed_server(tenant_id, "srv-b", "runner-2")
+    assert _post(client, _body(hostname="runner-1", cwd="/work/AMX")).status_code == 200
+    row = _rows()[0]
+    assert row.server_id == server_a
+    assert row.project == "AMX"
+
+    assert _post(client, _body(hostname="runner-2", cwd="/work/Other")).status_code == 200
+    rows = _rows()
+    assert len(rows) == 1  # 같은 세션·모델의 재보고 — 행이 늘지 않는다.
+    row = rows[0]
+    assert row.server_id == server_b
+    assert row.project == "Other"
+
+
+def _touch_last_seen(server_id: uuid.UUID, when: datetime) -> None:
+    from app.db import get_sessionmaker
+    from app.models import Server
+
+    with get_sessionmaker()() as db:
+        server = db.get(Server, server_id)
+        server.last_seen_at = when
+        db.commit()
+
+
+def test_hostname_match_is_case_insensitive(client, monkeypatch):
+    tenant_id = _enable(monkeypatch)
+    server_id = _seed_server(tenant_id, "srv-a", "Runner-1")
+    r = _post(client, _body(hostname="runner-1"))
+    assert r.status_code == 200, r.text
+    assert _rows()[0].server_id == server_id
+
+
+def test_same_hostname_multiple_servers_picks_latest_last_seen(client, monkeypatch):
+    tenant_id = _enable(monkeypatch)
+    older = _seed_server(tenant_id, "srv-old", "runner-1")
+    newer = _seed_server(tenant_id, "srv-new", "runner-1")
+    now = datetime.now(UTC)
+    _touch_last_seen(older, now - timedelta(hours=1))
+    _touch_last_seen(newer, now)
+    r = _post(client, _body(hostname="runner-1"))
+    assert r.status_code == 200, r.text
+    assert _rows()[0].server_id == newer
+
+
+def test_same_hostname_other_tenant_server_not_matched(client, monkeypatch):
+    tenant_id = _enable(monkeypatch)
+    other_tenant = _seed_tenant()
+    _seed_server(other_tenant, "srv-other-tenant", "runner-1")
+    r = _post(client, _body(hostname="runner-1"))
+    assert r.status_code == 200, r.text
+    assert _rows(tenant_id)[0].server_id is None
+
+
+def test_whitespace_only_cwd_stores_null_project(client, monkeypatch):
+    _enable(monkeypatch)
+    assert _post(client, _body(cwd="   ")).status_code == 200
+    assert _rows()[0].project is None
+
+
+def test_bare_root_cwd_stores_null_project(client, monkeypatch):
+    _enable(monkeypatch)
+    assert _post(client, _body(cwd="/")).status_code == 200
+    assert _rows()[0].project is None
+
+
+def test_windows_drive_root_cwd_stores_null_project(client, monkeypatch):
+    _enable(monkeypatch)
+    assert _post(client, _body(cwd="C:\\")).status_code == 200
+    assert _rows()[0].project is None
+
+
+def test_bare_windows_drive_letter_cwd_stores_null_project(client, monkeypatch):
+    _enable(monkeypatch)
+    assert _post(client, _body(cwd="C:")).status_code == 200
+    assert _rows()[0].project is None
+
+
+def test_unc_cwd_last_path_segment_is_stored_as_project(client, monkeypatch):
+    _enable(monkeypatch)
+    assert _post(client, _body(cwd="//srv/share/x/")).status_code == 200
+    assert _rows()[0].project == "x"
 
 
 def test_negative_token_is_422(client, monkeypatch):

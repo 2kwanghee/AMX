@@ -626,10 +626,8 @@ class SessionUsageIngest(Wire):
     # tsamx가 보고한 활성 계정 이메일. 훅 조회가 실패하면 없이 온다 — 그래도 세션
     # 단위 데이터는 유효하므로 서버는 account_id를 NULL로 두고 받아들인다.
     account_email: str | None = Field(default=None, max_length=320)
-    # hostname·cwd는 받되 **저장하지 않는다**: 수집 대상은 비용 구조 축뿐이라
-    # session_usage에 대응 컬럼이 없다. 훅이 이미 보내는 값이라 거부하면 422가 되므로
-    # 받아서 무시하고, 길이 상한만 걸어 둔다(나중에 컬럼이 필요해지면 스키마 변경 없이
-    # 마이그레이션만 추가하면 된다).
+    # hostname은 servers.hostname과 대조해 server_id로, cwd는 마지막 경로 요소만
+    # project로 저장한다(services.session_usage.record_session_usage).
     hostname: str | None = Field(default=None, max_length=253)
     cwd: str | None = Field(default=None, max_length=1024)
     # 훅이 읽기 상한(줄 수·바이트·레코드당 iterations)에 걸려 일부를 버렸으면 True.
@@ -652,6 +650,8 @@ class SessionUsageRow(Wire):
     session_id: str
     model: str
     account_email: str | None = None
+    server_id: uuid.UUID | None = None
+    project: str | None = None
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
