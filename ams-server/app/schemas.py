@@ -38,6 +38,11 @@ AssignmentState = Literal[
 # 계정 풀(기획서 §2.1). accounts.status 와 축이 다르다 — 이건 배급 순환의 위치다.
 PoolState = Literal["ready", "leased", "recalling", "cooling", "pinned", "held"]
 PoolMode = Literal["manual", "auto"]
+# 시트 엔진 P1(docs/design-notes/seat-engine-plan.md §5 결정 1). "owner"는
+# 소유자 라벨이 있는 계정을 같은 라벨의 서버로만 로테이션하고, 라벨이 비어 있으면
+# 조직 공용으로 전 서버 후보다. "server"(기본값)는 소유자를 보지 않는 현행
+# 그대로다 — owner 는 라벨을 정비한 뒤 서버별로 거는 옵트인이다(08-23 리뷰 F1).
+RotationScope = Literal["owner", "server"]
 PoolRecommendationKind = Literal["prefetch", "swap", "recall_idle", "lease"]
 PoolChainStep = Literal["deliver", "switch", "recall", "done", "failed"]
 PoolEventKind = Literal[
@@ -217,12 +222,18 @@ class ServerCreate(Wire):
     name: str = Field(min_length=1)
     hostname: str | None = None
     switch_mode: SwitchMode = "auto"
+    # Free-text label (a person, a team); see models.Server.owner. Blank/omitted
+    # means "org-wide" — every account may lease onto it (rotation_scope=owner).
+    owner: str | None = Field(default=None, max_length=200)
 
 
 class ServerUpdate(Wire):
     name: str | None = Field(default=None, min_length=1)
     hostname: str | None = None
     status: ServerStatus | None = None
+    # None = leave unchanged; an explicit "" clears it back to org-wide (same
+    # convention as AccountUpdate.owner).
+    owner: str | None = Field(default=None, max_length=200)
     # O4-C policy (design note O4-C). Provided fields are written; unset fields
     # are left untouched (detected via model_fields_set). threshold_pct None
     # clears central control back to the tsamx-local default.
@@ -240,6 +251,7 @@ class Server(Wire):
     tenant_id: uuid.UUID
     name: str
     hostname: str | None = None
+    owner: str | None = None
     switch_mode: SwitchMode
     threshold_pct: float | None = None
     default_strategy: SwitchStrategy | None = None
@@ -283,6 +295,11 @@ class PoolPolicy(Wire):
     prefetch_at_pct: int = Field(default=70, ge=0, le=100)
     min_lease_minutes: int = Field(default=30, ge=0, le=1440)
     ready_return_pct: int = Field(default=20, ge=0, le=100)
+    # 시트 엔진 P1 §5 결정 1(08-23 리뷰 F1 반영). 기본값은 "server" — 소유자를
+    # 보지 않는 현행 그대로다. owner 라벨이 이미 붙은 계정이 있는 채로 이 값을
+    # "owner"로 바꾸면 라벨 없는 서버 전체에서 그 계정이 후보를 잃는다. "owner"는
+    # 서버·계정 owner 라벨을 정비한 뒤 서버별로 거는 옵트인이다.
+    rotation_scope: RotationScope = "server"
 
 
 class PoolPolicyUpdate(Wire):
@@ -294,6 +311,7 @@ class PoolPolicyUpdate(Wire):
     prefetch_at_pct: int | None = Field(default=None, ge=0, le=100)
     min_lease_minutes: int | None = Field(default=None, ge=0, le=1440)
     ready_return_pct: int | None = Field(default=None, ge=0, le=100)
+    rotation_scope: RotationScope | None = None
 
 
 class WindowState(Wire):
@@ -324,6 +342,12 @@ class PoolAccount(Wire):
     # 서버의 후보 필터와 같은 함수(services.pool.ineligible_reason)가 낸 값이다.
     auto_eligible: bool = True
     ineligible_reason: str | None = None
+    # 계약 밖 추가분(08-23 리뷰 F3). owner 불일치는 ineligible_reason 에 넣지
+    # 않는다 — 그 함수는 "이 계정은 지속적으로 부적격"이라는 계정 단위 판정이고
+    # owner 불일치는 "이 서버에는 못 간다"는 서버-계정 쌍의 판정이라 성격이
+    # 다르다. 대신 이 라벨을 그대로 노출해 콘솔이 서버 owner 와 눈으로 대조할
+    # 수 있게 한다.
+    owner: str | None = None
 
 
 class PoolServer(Wire):
@@ -336,6 +360,13 @@ class PoolServer(Wire):
     # 전달이 진행 중인 배정이 하나라도 있으면 True — 이 서버에는 권고가 생기지 않는다.
     in_flight: bool = False
     max_pct: float | None = None
+    # 계약 밖 추가분(08-23 리뷰 F3). PoolAccount.owner 와 눈으로 대조하는 용도.
+    owner: str | None = None
+    # 계약 밖 추가분(08-23 리뷰 F3). 지금 이 서버가 뽑을 수 있는 후보 계정 수 —
+    # services.pool._candidates 를 그대로 호출한 값이라 build_recommendations
+    # 가 실제로 보는 것과 항상 같다. 0이면 "왜 권고가 안 뜨는지" 콘솔에서 바로
+    # 보인다(owner 라벨 불일치가 원인의 하나일 수 있다).
+    candidate_count: int | None = None
 
 
 class PoolRecommendation(Wire):

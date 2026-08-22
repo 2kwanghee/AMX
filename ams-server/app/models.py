@@ -363,6 +363,13 @@ class Server(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     hostname: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Free-text label for whoever this server belongs to — same shape as
+    # accounts.owner and the same reasoning (no FK to admins, see above). Blank
+    # means "org-wide" and is the rotation-scope policy input in P1
+    # (docs/design-notes/seat-engine-plan.md §5 decision 1, app/services/pool.py
+    # _candidates): a blank-owner account may lease onto any server, and a
+    # blank-owner server accepts only blank-owner accounts.
+    owner: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Only the hash of the one-shot enrollment token is stored (§7).
     enroll_token_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     enroll_token_expires_at: Mapped[datetime | None] = mapped_column(

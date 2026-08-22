@@ -13,6 +13,7 @@ import type {
 import { currentActiveByServer } from './AssignmentsPanel';
 import { CreateServer } from './servers/CreateServerModal';
 import { POLL } from './servers/constants';
+import { EditServer } from './servers/EditServerModal';
 import { EnrollTokenModal } from './servers/EnrollTokenModal';
 import { EventsModal } from './servers/EventsModal';
 import { PolicyModal } from './servers/PolicyModal';
@@ -23,6 +24,7 @@ import {
   Badge,
   Icon,
   LiveDot,
+  ownerSuggestions,
   SwitchModePill,
   TimeCell,
   useAction,
@@ -61,11 +63,13 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
   const [eventsOf, setEventsOf] = useState<Server | null>(null);
   const [tokenOf, setTokenOf] = useState<EnrollTokenResponse | null>(null);
   const [updateOf, setUpdateOf] = useState<Server | null>(null);
+  const [editingOf, setEditingOf] = useState<Server | null>(null);
   const act = useAction();
   const now = useNow(1000);
   const servers = data?.items ?? [];
 
   const accItems = accountsData?.items ?? [];
+  const ownerOptions = ownerSuggestions(servers, accItems);
   const asgItems = assignData?.items ?? [];
   const emailOf = new Map(accItems.map((a) => [a.id, a.email]));
   const activeByServer = currentActiveByServer(asgItems, accItems);
@@ -100,6 +104,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
               <div style={{ minWidth: 0 }}>
                 <div className="srv-tile-name">{s.name}</div>
                 {s.hostname && <div className="srv-tile-host">{s.hostname}</div>}
+                <div className="muted" style={{ fontSize: 12 }}>
+                  소유자 {s.owner || '—'}
+                </div>
               </div>
               <div className="srv-tile-status">
                 <span className={`srv-dot ${s.status}`} aria-hidden="true" />
@@ -124,6 +131,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
               {activeEmail && <span className="srv-tile-current">활성 <b>{activeEmail}</b></span>}
             </div>
             <div className="srv-tile-actions">
+              <button className="tile-btn" title="수정" onClick={() => setEditingOf(s)}>
+                <Icon name="edit" size={15} />
+              </button>
               <button className="tile-btn" title={s.switchMode === 'auto' ? '수동 전환으로' : '자동 전환으로'} disabled={act.busy} onClick={() => toggleMode(s)}>
                 <Icon name={s.switchMode === 'auto' ? 'hand' : 'zap'} size={15} />
               </button>
@@ -170,7 +180,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
         <table>
           <thead>
             <tr>
-              <th>이름</th><th>상태</th><th>전환 모드</th><th className="num">할당 계정</th>
+              <th>이름</th><th>소유자</th><th>상태</th><th>전환 모드</th><th className="num">할당 계정</th>
               <th className="num">CPU</th><th className="num">MEM</th><th className="num">DISK</th>
               <th>마지막 접속</th><th>동작</th>
             </tr>
@@ -179,6 +189,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
             {servers.map((s) => (
               <tr key={s.id}>
                 <td>{s.name}<div className="muted">{s.hostname}</div></td>
+                <td>{s.owner ? s.owner : <span className="muted">—</span>}</td>
                 <td><Badge value={s.status} /></td>
                 <td><SwitchModePill mode={s.switchMode} /></td>
                 <td className="num">{s.assignedAccountCount ?? 0}</td>
@@ -188,6 +199,9 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
                 <td><TimeCell iso={s.lastSeenAt} /></td>
                 <td>
                   <div className="actions row-actions">
+                    <button className="tile-btn" title="수정" onClick={() => setEditingOf(s)}>
+                      <Icon name="edit" size={15} />
+                    </button>
                     <button
                       className="tile-btn"
                       title={s.switchMode === 'auto' ? '수동 전환으로' : '자동 전환으로'}
@@ -247,7 +261,7 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
               </tr>
             ))}
             {servers.length === 0 && (
-              <tr><td colSpan={9} className="muted">등록된 서버가 없습니다. '서버 등록'으로 시작하세요.</td></tr>
+              <tr><td colSpan={10} className="muted">등록된 서버가 없습니다. '서버 등록'으로 시작하세요.</td></tr>
             )}
           </tbody>
         </table>
@@ -255,7 +269,12 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
       )}
 
       {creating && (
-        <CreateServer tenantId={tenantId} onClose={() => setCreating(false)} onDone={() => { setCreating(false); mutate(); }} />
+        <CreateServer
+          tenantId={tenantId}
+          ownerSuggestions={ownerOptions}
+          onClose={() => setCreating(false)}
+          onDone={() => { setCreating(false); mutate(); }}
+        />
       )}
       {usageOf && <UsageModal tenantId={tenantId} server={usageOf} onClose={() => setUsageOf(null)} />}
       {eventsOf && <EventsModal tenantId={tenantId} server={eventsOf} onClose={() => setEventsOf(null)} />}
@@ -275,6 +294,15 @@ export function ServersPanel({ tenantId, variant = 'full' }: { tenantId: string;
         />
       )}
       {tokenOf && <EnrollTokenModal token={tokenOf} onClose={() => setTokenOf(null)} />}
+      {editingOf && (
+        <EditServer
+          tenantId={tenantId}
+          server={editingOf}
+          ownerSuggestions={ownerOptions}
+          onClose={() => setEditingOf(null)}
+          onDone={() => { setEditingOf(null); mutate(); }}
+        />
+      )}
     </div>
   );
 }

@@ -57,6 +57,33 @@ export function krLabel(value?: string): string {
   return KR_LABEL[value] ?? value;
 }
 
+// -- 소유자 입력 자동완성 -----------------------------------------------------
+// 이미 로드된 계정·서버 목록에서 owner 값을 모아 중복 없이 돌려준다. 자유
+// 입력 오타로 같은 사람이 "이광희"·"이 광희"처럼 다른 라벨로 갈리면
+// rotation_scope=owner 정책이 조용히 쪼개진다 — 새 API 없이 쓸 수 있는
+// 가장 값싼 방지책이다(08-23 리뷰 F3-b).
+export function ownerSuggestions(...lists: Array<Array<{ owner?: string | null }>>): string[] {
+  const set = new Set<string>();
+  for (const list of lists) {
+    for (const item of list) {
+      const v = item.owner?.trim();
+      if (v) set.add(v);
+    }
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b, 'ko'));
+}
+
+export function OwnerDatalist({ id, options }: { id: string; options: string[] }) {
+  if (options.length === 0) return null;
+  return (
+    <datalist id={id}>
+      {options.map((o) => (
+        <option key={o} value={o} />
+      ))}
+    </datalist>
+  );
+}
+
 // -- 인라인 아이콘 세트 -------------------------------------------------------
 // 외부 리소스 없이 stroke 기반 Lucide풍 단순 패스를 직접 작성한다. 모든 아이콘은
 // currentColor를 따르며 24x24 viewBox 위에 그린다. name으로 골라 재사용한다.
@@ -83,6 +110,7 @@ export type IconName =
   | 'refresh'
   | 'check'
   | 'help'
+  | 'edit'
   | 'claude'
   | 'codex';
 
@@ -218,6 +246,11 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <circle cx="12" cy="12" r="10" />
       <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4" />
       <line x1="12" y1="17" x2="12.01" y2="17" />
+    </>
+  ),
+  edit: (
+    <>
+      <path d="M17 3a2.83 2.83 0 0 1 4 4L7 21l-4 1 1-4Z" />
     </>
   ),
   // Claude — 4각 스파클(큰 별 + 작은 별) 조합

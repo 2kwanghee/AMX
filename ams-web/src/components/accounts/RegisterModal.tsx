@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { api } from '@/lib/api-client/client';
 import type { OauthStartResponse, Provider } from '@/lib/api-client/types';
-import { CopyButton, Modal, fmtTime, krLabel, useAction } from '../common';
+import { CopyButton, Modal, OwnerDatalist, fmtTime, krLabel, useAction } from '../common';
 
 // 계정 등록 — 프로바이더에 따라 경로가 갈린다.
 //  claude: §5.5 중앙 OAuth 대행. 인증 코드는 BFF를 통해 정확히 한 번
@@ -12,10 +12,12 @@ import { CopyButton, Modal, fmtTime, krLabel, useAction } from '../common';
 //    codex login으로 만든 auth.json을 그대로 반입한다.
 export function RegisterModal({
   tenantId,
+  ownerSuggestions,
   onClose,
   onDone,
 }: {
   tenantId: string;
+  ownerSuggestions?: string[];
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -48,7 +50,7 @@ export function RegisterModal({
     return (
       <Modal title="Codex 계정 반입" onClose={onClose}>
         {providerSelect}
-        <CodexImportFields tenantId={tenantId} onDone={onDone} />
+        <CodexImportFields tenantId={tenantId} ownerSuggestions={ownerSuggestions} onDone={onDone} />
       </Modal>
     );
   }
@@ -128,7 +130,17 @@ export function RegisterModal({
 // (운영자가 붙여넣은 것을 눈으로 확인해야 한다). 대신 등록에 성공하면 즉시
 // 상태에서 지우고, 어떤 경로로도 로깅하지 않는다. 모달을 닫으면 컴포넌트가
 // 언마운트되므로 실패한 채 남은 값도 함께 사라진다.
-function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () => void }) {
+const OWNER_LIST_ID = 'account-owner-suggestions';
+
+function CodexImportFields({
+  tenantId,
+  ownerSuggestions,
+  onDone,
+}: {
+  tenantId: string;
+  ownerSuggestions?: string[];
+  onDone: () => void;
+}) {
   const [email, setEmail] = useState('');
   const [secret, setSecret] = useState('');
   const [owner, setOwner] = useState('');
@@ -167,7 +179,9 @@ function CodexImportFields({ tenantId, onDone }: { tenantId: string; onDone: () 
         onChange={(e) => setOwner(e.target.value)}
         autoComplete="off"
         placeholder="담당자·팀 이름"
+        list={OWNER_LIST_ID}
       />
+      <OwnerDatalist id={OWNER_LIST_ID} options={ownerSuggestions ?? []} />
       <label>월 구독료 (선택)</label>
       <input
         value={price}

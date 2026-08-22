@@ -37,7 +37,7 @@ from app.models import (
     TenantDek,
     UsageSnapshot,
 )
-from app.services import alerts
+from app.services import alerts, providers
 
 # "Field not supplied" for PATCH arguments whose None is itself a value the
 # caller can mean (update_account.monthly_price: None clears the price).
@@ -586,6 +586,11 @@ def update_account(
     if status is not None:
         account.status = status
     if owner is not None:
+        # 이미 이 계정을 물고 있는 서버가 있으면, 이 라벨 변경으로 그 배정이
+        # rotation_scope=owner 경계를 넘게 될 수 있다(예: 서버와 다른 owner로
+        # 바뀜). 여기서 회수를 강제하지 않는다 — 자동 회수는 사람의 결정을
+        # 되돌리는 부작용이 크다. 그 상태는 그대로 유지되고, PoolAccount.owner/
+        # PoolServer.owner 노출(08-23 리뷰 F3)로 콘솔에서 눈에 보이게만 한다.
         account.owner = owner
     if monthly_price is not UNSET:
         # None here is a real value — "clear the price" — which is why this one
@@ -645,13 +650,20 @@ def delete_account(db: Session, tenant_id: uuid.UUID, account_id: uuid.UUID) -> 
 
 # -- Servers ------------------------------------------------------------------
 def create_server(
-    db: Session, tenant_id: uuid.UUID, *, name: str, hostname: str | None, switch_mode: str
+    db: Session,
+    tenant_id: uuid.UUID,
+    *,
+    name: str,
+    hostname: str | None,
+    switch_mode: str,
+    owner: str | None = None,
 ) -> Server:
     get_tenant(db, tenant_id)
     server = Server(
         tenant_id=tenant_id,
         name=name,
         hostname=hostname,
+        owner=owner,
         switch_mode=switch_mode,
         status="offline",
     )
@@ -696,6 +708,7 @@ def update_server(
     name: str | None,
     hostname: str | None,
     status: str | None,
+    owner: str | None = None,
 ) -> Server:
     server = get_server(db, tenant_id, server_id)
     if name is not None:
@@ -704,6 +717,14 @@ def update_server(
         server.hostname = hostname
     if status is not None:
         server.status = status
+    if owner is not None:
+        # Same convention as update_account: None means "don't touch", an
+        # explicit "" clears it back to org-wide. Existing assignments on this
+        # server are not touched even if this relabel pushes them across a
+        # rotation_scope=owner boundary — no forced recall (that would undo an
+        # operator's own action). The mismatch stays live and only becomes
+        # visible via PoolAccount.owner/PoolServer.owner (08-23 review F3).
+        server.owner = owner
     server.updated_at = _now()
     try:
         db.commit()
@@ -885,8 +906,11 @@ def assigned_account_count(db: Session, server_id: uuid.UUID) -> int:
 
 
 # -- Assignments --------------------------------------------------------------
-def _reject_second_codex_account(db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID) -> None:
-    """One Codex account per server — enforced here because delivery cannot.
+def _reject_second_codex_account(
+    db: Session, tenant_id: uuid.UUID, server_id: uuid.UUID, provider: str
+) -> None:
+    """One account of a per_server_limit=1 provider (today only Codex) per
+    server — enforced here because delivery cannot.
 
     Codex keeps its credential in a single `auth.json` under the runner's config
     home. Delivering a second Codex account to the same server overwrites the
@@ -895,16 +919,20 @@ def _reject_second_codex_account(db: Session, tenant_id: uuid.UUID, server_id: u
     the assignment row already exists and the operator is looking at a failed
     command; the contract is that AMS never creates the assignment at all.
 
-    Claude is unaffected: its accounts live side by side under distinct config
-    entries, and a server holding several of them is the normal case.
+    Claude is unaffected (providers.per_server_limit is None): its accounts
+    live side by side under distinct config entries, and a server holding
+    several of them is the normal case. Callers only reach here when
+    ``providers.per_server_limit(provider) == 1`` (see the call site below),
+    so ``provider`` here is always that limited provider — not a literal
+    "codex" (08-23 review, minor).
 
     The count below is a plain SELECT, so two simultaneous POSTs would both read
     zero and both insert. There is no unique index that can express the rule
     (the deciding column, `provider`, lives on `accounts`, not `assignments`),
     so the server row is locked FOR UPDATE first and held until commit: the
     check and the insert become atomic against each other. The lock is taken
-    only on the Codex path and only on the one row, so concurrent Claude
-    assignments — and assignments to any other server — are unaffected.
+    only on the limited-provider path and only on the one row, so concurrent
+    Claude assignments — and assignments to any other server — are unaffected.
     """
     db.execute(select(Server.id).where(Server.id == server_id).with_for_update())
     existing = db.scalar(
@@ -915,7 +943,7 @@ def _reject_second_codex_account(db: Session, tenant_id: uuid.UUID, server_id: u
             Assignment.tenant_id == tenant_id,
             Assignment.server_id == server_id,
             Assignment.state != "detached",
-            Account.provider == "codex",
+            Account.provider == provider,
         )
     )
     if existing:
@@ -952,8 +980,11 @@ def create_assignment(
             "the account before assigning it to a server.",
         )
     get_server(db, tenant_id, server_id)
-    if account.provider == "codex":
-        _reject_second_codex_account(db, tenant_id, server_id)
+    if providers.per_server_limit(account.provider) == 1:
+        _reject_second_codex_account(db, tenant_id, server_id, account.provider)
+    # rotation_scope(P1, app/services/pool.py _candidates)는 자동화 후보 필터일
+    # 뿐 수동 연결은 그대로 통과시킨다 — 감사 로그가 이미 남으니 운영자가 직접
+    # 누른 연결까지 막을 이유가 없다.
 
     assignment = Assignment(
         tenant_id=tenant_id,
