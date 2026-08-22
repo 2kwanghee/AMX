@@ -247,12 +247,16 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
   function openSrvAction(id: string) {
     setSelected(null);
     setAccActionId(null);
-    setSrvActionId(lastSrvActionRef.current === id ? null : id);
+    const wasOpen = lastSrvActionRef.current === id;
+    lastSrvActionRef.current = null; // 비교 즉시 소비 — 다음 상관없는 재클릭에 남지 않게.
+    setSrvActionId(wasOpen ? null : id);
   }
   function openAccAction(id: string) {
     setSelected(null);
     setSrvActionId(null);
-    setAccActionId(lastAccActionRef.current === id ? null : id);
+    const wasOpen = lastAccActionRef.current === id;
+    lastAccActionRef.current = null;
+    setAccActionId(wasOpen ? null : id);
   }
   function closeNodeActions() {
     lastSrvActionRef.current = srvActionId;
@@ -512,34 +516,37 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
       bottom += CANVAS_PAD;
     }
     setCanvasH(bottom);
-    // 노드 액션 팝오버 앵커(기본 하단 중심 + 여백) — nodeRefs의 실측 DOM 위치에서
-    // 뽑으므로 자유 배치·그리드 폴백 모두 동일 코드 경로로 동작한다. 자유 배치에서
-    // 캔버스 하단(overflow:hidden)에 팝오버가 잘리면 상세 카드와 같은 flip 패턴으로
-    // 노드 위쪽으로 뒤집는다(그리드 폴백은 canvasH가 0이라 flip 대상 아님).
+    // 노드 액션 팝오버 앵커. 아래 공간이 부족해도 위 공간까지 부족하면(캔버스 상단
+    // 가까이 있는 노드) 무조건 뒤집지 않는다 — "위 공간이 POPOVER_H 이상 확보될
+    // 때만" 뒤집어야 뒤집힌 팝오버가 캔버스 위로 잘리는 걸 막는다. 자유 배치는
+    // canvasH(=bottom, 방금 계산)를, 그리드 폴백은 실측 컨테이너 높이를 하단
+    // 경계로 쓴다 — 이 시점엔 아직 size state가 이전 렌더 값이라(이번 measure의
+    // 결과가 반영되기 전) grid.offsetHeight를 직접 재서 쓴다(값 자체는 이번
+    // 사이클이 끝나면 size.h가 되는 것과 같다). 위·아래 모두 부족하면 뒤집지
+    // 않고 아래로 연다 — 그리드 폴백은 노드 자체가 일반 흐름이라 컨테이너가
+    // 대개 콘텐츠를 따라 늘어나 있어 이 낙폭이 실제로는 드물다(자유 배치는
+    // openPopoverBottom으로 캔버스를 늘려 커버한다).
+    const boundBottom = wide ? bottom : grid.offsetHeight;
     const nextAnchors: Record<string, NodeAnchor> = {};
     for (const s of orderedServers) {
       const el = nodeRefs.current.get(`srv:${s.id}`);
       if (!el) continue;
       const r = el.getBoundingClientRect();
-      const bottomY = r.bottom - base.top + 10;
-      const flip = wide && bottom > 0 && bottomY + POPOVER_H.srv > bottom;
-      nextAnchors[`srv:${s.id}`] = {
-        x: r.left - base.left + r.width / 2,
-        y: flip ? r.top - base.top - 10 : bottomY,
-        flip,
-      };
+      const belowY = r.bottom - base.top + 10;
+      const topY = r.top - base.top - 10;
+      const belowInsufficient = boundBottom > 0 && belowY + POPOVER_H.srv > boundBottom;
+      const flip = belowInsufficient && topY >= POPOVER_H.srv;
+      nextAnchors[`srv:${s.id}`] = { x: r.left - base.left + r.width / 2, y: flip ? topY : belowY, flip };
     }
     for (const a of orderedAccounts) {
       const el = nodeRefs.current.get(`acc:${a.id}`);
       if (!el) continue;
       const r = el.getBoundingClientRect();
-      const bottomY = r.bottom - base.top + 10;
-      const flip = wide && bottom > 0 && bottomY + POPOVER_H.acc > bottom;
-      nextAnchors[`acc:${a.id}`] = {
-        x: r.left - base.left + r.width / 2,
-        y: flip ? r.top - base.top - 10 : bottomY,
-        flip,
-      };
+      const belowY = r.bottom - base.top + 10;
+      const topY = r.top - base.top - 10;
+      const belowInsufficient = boundBottom > 0 && belowY + POPOVER_H.acc > boundBottom;
+      const flip = belowInsufficient && topY >= POPOVER_H.acc;
+      nextAnchors[`acc:${a.id}`] = { x: r.left - base.left + r.width / 2, y: flip ? topY : belowY, flip };
     }
     setNodeAnchors(nextAnchors);
     setMEdges(nextM);
@@ -654,6 +661,14 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
   const srvActionPos = srvActionId ? nodeAnchors[`srv:${srvActionId}`] : undefined;
   const accActionAccount = accActionId ? accounts.find((a) => a.id === accActionId) : undefined;
   const accActionPos = accActionId ? nodeAnchors[`acc:${accActionId}`] : undefined;
+  // 열린 노드 팝오버가 아래로 펼쳐질 때(비-flip) 그 하단 소요를 자유 배치 캔버스
+  // minHeight에 반영한다 — 위·아래 모두 부족해 flip 못 하고 아래로 연 경우에도
+  // 캔버스 자체가 늘어나 잘리지 않게 한다(그리드 폴백은 이 minHeight 메커니즘이
+  // 없어 대상 아님).
+  const openPopoverBottom = Math.max(
+    srvActionPos && !srvActionPos.flip ? srvActionPos.y + POPOVER_H.srv + CANVAS_PAD : 0,
+    accActionPos && !accActionPos.flip ? accActionPos.y + POPOVER_H.acc + CANVAS_PAD : 0,
+  );
 
   return (
     <div
@@ -730,7 +745,7 @@ export function TopologyView({ tenantId }: { tenantId: string }) {
               className="topo-canvas-area"
               ref={canvasRef}
               style={{
-                minHeight: Math.max(canvasH, showLanes ? laneBottom : 0) || undefined,
+                minHeight: Math.max(canvasH, showLanes ? laneBottom : 0, openPopoverBottom) || undefined,
                 minWidth: showLanes ? POOL_RIGHT : undefined,
               }}
             >
