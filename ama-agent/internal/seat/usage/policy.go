@@ -21,6 +21,32 @@
 // DO NOT change the constants below without re-running the measurement that
 // justified them. A tightened value risks 429-blocking real accounts; a
 // loosened one erodes the safety margin the whole design leans on.
+//
+// KNOWN RISK, NOT CLOSED BY THIS PACKAGE (P6 shadow-run double consumption):
+// tsamx's own collector persists its plan (nextPollAt/pollIntervalS) and its
+// 429/backoff history in its usage store (cache/usage.json — see
+// tsamx/src/tsamx/usage_store.py's module docstring), and every tsamx-side
+// surface (list/status/TUI/menu bar/auto) reads and contributes to that ONE
+// lease so they collectively stay under the measured budget. This package
+// has no access to that store and cannot join its lease. If a future P6
+// shadow run ever calls this package's Collector.Fetch on a cadence of its
+// own WHILE tsamx also polls the same identity, the two are two independent
+// consumers of one shared, machine-invisible budget (see the docstring
+// above) — their combined rate is not bounded by either side's policy alone,
+// and a 429 either one draws can floor the OTHER's cadence too (the 429 is
+// scoped to the account/token, not to which process asked). Two options for
+// whoever wires P6, neither implemented here:
+//
+//	(a) shadow-only comparison: P6 reads tsamx's persisted cache/usage.json
+//	    measurement to compare against, and this package's Collector never
+//	    calls the network itself in shadow mode;
+//	(b) real lease-sharing: this package's future scheduler joins tsamx's
+//	    usage_store.py lease/claim protocol (or a successor store both
+//	    engines share) instead of planning independently.
+//
+// This is a documentation-only note per the P4 review (M4); no code in this
+// package guards against double consumption, and none should be added here
+// without first deciding (a) vs (b) at the design-note level.
 package usage
 
 import (
@@ -99,7 +125,7 @@ const (
 	// Post429MaxIntervalS — wider than the normal candidate ceiling so
 	// several machines can each back off far enough that their combined rate
 	// fits under the shared budget.
-	Post429BackoffMult = 1.5
+	Post429BackoffMult  = 1.5
 	Post429MaxIntervalS = 1800.0
 
 	// EscalationMarginPct is the distance from the switch threshold at which
@@ -119,6 +145,114 @@ const (
 	fiveHourWindowMinutes = 5 * 60
 	sevenDayWindowMinutes = 7 * 24 * 60
 )
+
+// Failure-backoff constants, ported from tsamx/src/tsamx/usage_store.py
+// (NOT poll_policy.py — this is the store's per-failure "when to try again"
+// curve, a different concern from plan_after_fetch's per-success cadence
+// above, but the P4 review (M1) asked for it explicitly: "실패 종류별 다음
+// 시각 계산" — the thing that actually decides the next poll after a 429,
+// timeout, or other fetch error, which nothing in this package computed
+// before this port).
+const (
+	// BackoffBaseS/BackoffCapS/BackoffMaxShift: the plain exponential curve
+	// used when the server sent no Retry-After (or a non-rate-limited
+	// Retry-After of 0): BackoffBaseS * 2^min(max(0,failures-1),
+	// BackoffMaxShift), capped at BackoffCapS.
+	BackoffBaseS    = 30.0
+	BackoffCapS     = 600.0
+	BackoffMaxShift = 32
+
+	// RetryAfterMarginS is added to a rate-limited (429) Retry-After ask
+	// ABOVE BackoffCapS, before the RetryAfterFloorCapS clamp below — see
+	// usage_store.py's RETRY_AFTER_MARGIN_S comment (measured: 20 of 35
+	// lapsed blocks re-blocked within 900s of their own stated deadline).
+	RetryAfterMarginS = 900.0
+
+	// RetryAfterFloorCapS bounds a rate-limited (429) ask, margin included,
+	// so a pathological or absurd Retry-After (an "Infinity" literal, a
+	// multi-day value) cannot park an account indefinitely. A non-rate-
+	// limited ask is bounded by TrustMaxAgeS instead (see FailureBackoffS).
+	RetryAfterFloorCapS = 4500.0
+
+	// TrustMaxAgeS bounds a NON-rate-limited failure's Retry-After ask (a
+	// 503/504 etc. can also carry the header); it is a different, smaller
+	// ceiling than RetryAfterFloorCapS because a non-429 last_good value
+	// stops being decision-trusted after this many seconds regardless
+	// (usage_store.py's TRUST_MAX_AGE_S), so parking the row longer than
+	// that would leave it both un-pollable and unknown at the same time.
+	TrustMaxAgeS = 3600.0
+)
+
+// FailureBackoffS is the seconds to wait before the next attempt after a
+// failed fetch, ported branch-for-branch from
+// tsamx.usage_store._failure_backoff_s. consecutiveFailures is the failure
+// streak INCLUDING this one (matches the Python call site: `failures =
+// consecutive_failures + 1` is computed by the caller before this is
+// called — see NextPollAfterFetchError). retryAfterS is the server's
+// Retry-After in seconds when present (nil when absent, matching Python's
+// `retry_after_s: float | None`). rateLimited must be true only for a 429
+// (Python: `rate_limited=rec.error == "http-429"` at the one call site,
+// usage_store.py's record()) — it selects which of the two ceilings
+// (RetryAfterFloorCapS vs TrustMaxAgeS) bounds a large Retry-After ask, and
+// whether a `Retry-After: 0` gets the EdgeBackoffS floor (the saturated-
+// budget edge) or falls through to the plain exponential curve.
+func FailureBackoffS(consecutiveFailures int, retryAfterS *float64, rateLimited bool) float64 {
+	shift := consecutiveFailures - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > BackoffMaxShift {
+		shift = BackoffMaxShift
+	}
+	computed := math.Min(BackoffBaseS*math.Pow(2, float64(shift)), BackoffCapS)
+
+	if retryAfterS == nil {
+		return computed
+	}
+	if *retryAfterS == 0 {
+		if !rateLimited {
+			// A `Retry-After: 0` on a non-429 (e.g. a Cloudflare 503 saying
+			// "retry now") is not the saturated-budget edge poll_policy's
+			// EdgeBackoffS was measured on; fall through to the plain curve.
+			return computed
+		}
+		return math.Min(math.Max(computed, EdgeBackoffS), BackoffCapS)
+	}
+
+	asked := *retryAfterS
+	if *retryAfterS > BackoffCapS && rateLimited {
+		asked = *retryAfterS + RetryAfterMarginS
+	}
+	if rateLimited {
+		asked = math.Min(asked, RetryAfterFloorCapS)
+	} else {
+		asked = math.Min(asked, TrustMaxAgeS)
+	}
+	return math.Max(asked, computed)
+}
+
+// NextPollAfterFetchError is the next-poll-time-by-failure-kind calculator
+// the P4 review asked for: it turns a *FetchError from Collector.Fetch,
+// together with the account's failure streak so far (NOT including this
+// failure — this function adds 1 itself, matching usage_store.py record()'s
+// `failures = int(row.get("consecutiveFailures") or 0) + 1` immediately
+// before its own call to `_failure_backoff_s`), into the instant the next
+// attempt should run. rateLimited is derived from fe.Kind == "http-429",
+// matching the one call site in tsamx (usage_store.py's record:
+// `rate_limited=rec.error == "http-429"`). A nil fe returns now unchanged
+// (nothing to back off from).
+//
+// This package is stateless: the caller (a future P5 scheduler) owns
+// persisting consecutiveFailuresBefore across calls, exactly as
+// PlanAfterFetch's caller owns persisting prevIntervalS/last429At.
+func NextPollAfterFetchError(now time.Time, consecutiveFailuresBefore int, fe *FetchError) time.Time {
+	if fe == nil {
+		return now
+	}
+	rateLimited := fe.Kind == "http-429"
+	backoff := FailureBackoffS(consecutiveFailuresBefore+1, fe.RetryAfterS, rateLimited)
+	return now.Add(secondsToDuration(backoff))
+}
 
 // relevantWindow is one (label, pct, resetsAt) window that gates an account,
 // mirroring tsamx.oauth.relevant_windows's tuple shape. resetsAt is the raw
@@ -404,15 +538,45 @@ func PlanAfterFetch(in PlanInput) Plan {
 	return Plan{NextPollAt: nextPoll, IntervalS: interval}
 }
 
-// Recent429At reports whether last429At (the zero Time means "never seen")
-// falls within RecentWindow429S of now — the convenience a caller uses to
-// compute PlanInput.Recent429 from a persisted last-429 timestamp, without
-// duplicating the window arithmetic at every call site.
-func Recent429At(last429At, now time.Time) bool {
+// Recent429 reports whether a token 429'd recently enough to keep
+// PlanAfterFetch's post-429 cadence engaged, ported EXACTLY from
+// usage_store.UsageEntry.recent_429 (usage_store.py:300-333) — a naive
+// `now - last429At < RecentWindow429S` (this package's original, incorrect
+// P4 draft) anchors on the WRONG instant and, per that method's own
+// docstring, is precisely the failure mode it exists to avoid:
+//
+// An hour-scale Retry-After is honored as one long backoff during which no
+// attempt runs, so the 429 leaves only ONE stamp, at the block's START
+// (last429At). Anchoring recency on that start means the first success
+// AFTER the block already lands at (or past) last429At + the block's own
+// length — if that length is close to RecentWindow429S, the naive check
+// already reads "not recent" at the very moment AIMD needs to be armed, so
+// it never engages and machines sharing the token never converge.
+//
+// The fix anchors on the backoff's END instead — but ONLY while the LIVE
+// backoff is actually a 429 backoff: last429At is (by this package's
+// contract, mirroring the Python row) never cleared, while backoffUntil and
+// lastError are overwritten by ANY later failure. Without the lastError
+// guard, an unrelated timeout on a token that 429'd long ago would install a
+// fresh backoffUntil and spuriously re-arm the post-429 cadence. A success
+// clears lastError/backoffUntil entirely (mirrored here as an empty
+// lastError / zero backoffUntil), so only a 429 can ever set both together.
+//
+//   - last429At: the zero Time means "never seen" -> never recent.
+//   - backoffUntil/lastError: the CURRENT fetch-state fields the caller
+//     already tracks alongside last429At (usage_store.py's UsageEntry rows
+//     these exact three fields together) — pass the zero Time / "" when the
+//     account has no live backoff.
+//   - now: the instant recency is evaluated at.
+func Recent429(last429At, backoffUntil time.Time, lastError string, now time.Time) bool {
 	if last429At.IsZero() {
 		return false
 	}
-	return now.Sub(last429At) < secondsToDuration(RecentWindow429S)
+	anchor := last429At
+	if lastError == "http-429" && !backoffUntil.IsZero() && backoffUntil.After(anchor) {
+		anchor = backoffUntil
+	}
+	return now.Before(anchor.Add(secondsToDuration(RecentWindow429S)))
 }
 
 // secondsToDuration converts a float64 seconds value (as every constant and

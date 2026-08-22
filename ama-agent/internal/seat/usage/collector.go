@@ -23,6 +23,37 @@ const usageEndpoint = "https://api.anthropic.com/api/oauth/usage"
 // tsamx.oauth.OAUTH_BETA_HEADER.
 const oauthBetaHeader = "oauth-2025-04-20"
 
+// requestUserAgent is sent on every Fetch (M5, P4 review). poll_policy.py's
+// module docstring measures the endpoint's budget as scoped to "identity ×
+// UA-class" — a dimension of the measured shape, not just the account/token.
+// Leaving this unset (Go's http.Client default, "Go-http-client/1.1") would
+// silently move this collector's traffic into a UA-class nobody has ever
+// measured the 429 behavior of, under either the account-scoped or the
+// token-scoped regime poll_policy.py describes.
+//
+// Chosen value: tsamx's own "tsamx/1.0" (oauth.py's request_usage_data),
+// not a distinct new string. Reasoning: this package's requests are, in
+// every case this constant matters (P4 is inert; once wired, P6's shadow
+// run reads the SAME accounts tsamx already polls — see this file's package
+// doc, M4), traffic against an identity tsamx already has measured,
+// established behavior against under exactly this UA string. A fresh UA
+// value would open a SECOND, never-measured UA-class bucket for the same
+// account with unknown 429 behavior — introducing an unmeasured input
+// exactly like leaving it unset would, just under a different label. Reusing
+// tsamx's string keeps this collector's traffic inside the measured
+// envelope instead of adding one. This is a client identification string
+// only (not a credential, not an authentication claim) shared between two
+// pieces of software this repo owns and operates on the same account's
+// behalf, so there is no impersonation of a third party.
+//
+// This choice does NOT resolve M4's double-consumption risk (a shared UA
+// string does not share a request budget) — it only keeps the UA dimension
+// of the measurement from being silently invalidated. Revisit if either
+// engine's UA is ever used server-side to size a SEPARATE per-engine
+// budget, which would flip this reasoning (that has not been measured
+// either way).
+const requestUserAgent = "tsamx/1.0"
+
 // defaultTimeout bounds a single Fetch call end-to-end (connect, TLS, first
 // byte, body read). tsamx's urllib call used a 5s timeout
 // (request_usage_data); this collector uses a slightly wider default because
@@ -117,6 +148,7 @@ func (c *Collector) Fetch(ctx context.Context, accessToken string) (*provider.Us
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("anthropic-beta", oauthBetaHeader)
+	req.Header.Set("User-Agent", requestUserAgent)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -248,29 +280,28 @@ type rawLimitModel struct {
 // the canonical Windows[] list (the "dual record" the provider.Usage doc
 // comment describes), in five_hour-then-seven_day order, matching what
 // internal/reporter already expects from a driver.
+//
+// Id/WindowMinutes are set ONLY on the Windows[] copies, never on the
+// FiveHour/SevenDay struct fields themselves — this mirrors the existing
+// contract exactly: provider.Window's own doc comment ("Id and WindowMinutes
+// are set only on entries carried in Usage.Windows... the legacy
+// FiveHour/SevenDay fields leave them zero-valued") and
+// internal/tsamx/exec.go's claudeWindows (which builds the canonical list by
+// copying FiveHour/SevenDay and stamping id/windowMinutes onto the COPIES,
+// leaving the originals untouched). An earlier draft of this function
+// stamped both fields identically, which would read as a genuine structural
+// difference from every other driver's output to any future P6 shadow-run
+// comparison between this collector and the tsamx bridge (P4 review, m1).
 func normalizeUsage(raw rawUsageResponse) *provider.Usage {
 	out := &provider.Usage{}
 
 	if raw.FiveHour != nil && raw.FiveHour.Utilization != nil {
-		w := provider.Window{
-			Id:            "five_hour",
-			WindowMinutes: fiveHourWindowMinutes,
-			Pct:           *raw.FiveHour.Utilization,
-			ResetsAt:      raw.FiveHour.ResetsAt,
-		}
-		out.FiveHour = &w
-		out.Windows = append(out.Windows, w)
+		out.FiveHour = &provider.Window{Pct: *raw.FiveHour.Utilization, ResetsAt: raw.FiveHour.ResetsAt}
 	}
 	if raw.SevenDay != nil && raw.SevenDay.Utilization != nil {
-		w := provider.Window{
-			Id:            "seven_day",
-			WindowMinutes: sevenDayWindowMinutes,
-			Pct:           *raw.SevenDay.Utilization,
-			ResetsAt:      raw.SevenDay.ResetsAt,
-		}
-		out.SevenDay = &w
-		out.Windows = append(out.Windows, w)
+		out.SevenDay = &provider.Window{Pct: *raw.SevenDay.Utilization, ResetsAt: raw.SevenDay.ResetsAt}
 	}
+	out.Windows = claudeWindows(out.FiveHour, out.SevenDay)
 
 	if eu := raw.ExtraUsage; eu != nil && eu.IsEnabled &&
 		eu.UsedCredits != nil && eu.MonthlyLimit != nil && eu.Utilization != nil {
@@ -304,6 +335,29 @@ func normalizeUsage(raw rawUsageResponse) *provider.Usage {
 
 	if out.FiveHour == nil && out.SevenDay == nil && out.Spend == nil && len(out.Scoped) == 0 {
 		return nil // mirrors build_usage_result's `return result if result else None`
+	}
+	return out
+}
+
+// claudeWindows projects fiveHour/sevenDay onto the neutral Windows list,
+// tagging COPIES with their id and window length in minutes — never
+// mutating the originals. Deliberately mirrors
+// internal/tsamx/exec.go's claudeWindows (same name, same shape, same
+// order) rather than sharing code with it: that function is in
+// internal/tsamx, which this package must not import (P4 stays
+// provider/policy-only and inert), and duplicating six lines is cheaper
+// than creating a cross-package dependency for them.
+func claudeWindows(fiveHour, sevenDay *provider.Window) []provider.Window {
+	var out []provider.Window
+	if fiveHour != nil {
+		w := *fiveHour
+		w.Id, w.WindowMinutes = "five_hour", fiveHourWindowMinutes
+		out = append(out, w)
+	}
+	if sevenDay != nil {
+		w := *sevenDay
+		w.Id, w.WindowMinutes = "seven_day", sevenDayWindowMinutes
+		out = append(out, w)
 	}
 	return out
 }

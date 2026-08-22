@@ -24,10 +24,11 @@ func newTestCollector(t *testing.T, handler http.HandlerFunc) *Collector {
 }
 
 func TestFetch_Success(t *testing.T) {
-	var sawAuth, sawBeta string
+	var sawAuth, sawBeta, sawUA string
 	c := newTestCollector(t, func(w http.ResponseWriter, r *http.Request) {
 		sawAuth = r.Header.Get("Authorization")
 		sawBeta = r.Header.Get("anthropic-beta")
+		sawUA = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"five_hour": {"utilization": 42.5, "resets_at": "2026-08-23T10:00:00Z"},
@@ -47,17 +48,33 @@ func TestFetch_Success(t *testing.T) {
 	if sawBeta != oauthBetaHeader {
 		t.Fatalf("anthropic-beta header = %q, want %q", sawBeta, oauthBetaHeader)
 	}
+	if sawUA != requestUserAgent {
+		t.Fatalf("User-Agent header = %q, want %q", sawUA, requestUserAgent)
+	}
 	if got == nil {
 		t.Fatal("Fetch returned nil usage on a well-formed response")
 	}
 	if got.FiveHour == nil || got.FiveHour.Pct != 42.5 || got.FiveHour.ResetsAt != "2026-08-23T10:00:00Z" {
 		t.Errorf("FiveHour = %+v, want pct 42.5", got.FiveHour)
 	}
+	// m1 (P4 review): FiveHour/SevenDay must carry NO Id/WindowMinutes — only
+	// the Windows[] copies below do (bridge.go's provider.Window contract,
+	// mirrored by internal/tsamx/exec.go's claudeWindows). A regression here
+	// would read as a genuine structural difference to any future P6
+	// shadow-run comparison against the tsamx bridge.
+	if got.FiveHour.Id != "" || got.FiveHour.WindowMinutes != 0 {
+		t.Errorf("FiveHour = %+v, want Id=\"\" WindowMinutes=0 (legacy field, not the canonical list)", got.FiveHour)
+	}
 	if got.SevenDay == nil || got.SevenDay.Pct != 10.0 {
 		t.Errorf("SevenDay = %+v, want pct 10.0", got.SevenDay)
 	}
-	if len(got.Windows) != 2 || got.Windows[0].Id != "five_hour" || got.Windows[1].Id != "seven_day" {
-		t.Errorf("Windows = %+v, want [five_hour, seven_day] in that order", got.Windows)
+	if got.SevenDay.Id != "" || got.SevenDay.WindowMinutes != 0 {
+		t.Errorf("SevenDay = %+v, want Id=\"\" WindowMinutes=0", got.SevenDay)
+	}
+	if len(got.Windows) != 2 ||
+		got.Windows[0].Id != "five_hour" || got.Windows[0].WindowMinutes != fiveHourWindowMinutes ||
+		got.Windows[1].Id != "seven_day" || got.Windows[1].WindowMinutes != sevenDayWindowMinutes {
+		t.Errorf("Windows = %+v, want [five_hour/300, seven_day/10080] in that order", got.Windows)
 	}
 	if got.Spend == nil || got.Spend.Used != 12.5 || got.Spend.Limit != 50.0 || got.Spend.Pct != 25.0 {
 		t.Errorf("Spend = %+v, want used=12.5 limit=50 pct=25", got.Spend)

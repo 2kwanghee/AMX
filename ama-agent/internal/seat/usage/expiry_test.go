@@ -36,46 +36,70 @@ func itoa(v int64) string {
 	return string(buf[i:])
 }
 
-func TestJudgeIdleExpiry_NotYetExpired(t *testing.T) {
+// --- JudgeIdleExpiry (C1: token_expired vs relogin_required must not conflate) ---
+
+func TestJudgeIdleExpiry_NotYetExpired_HasRefreshToken(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
-	// Expires 1 hour from now — well outside ExpiryBufferMS (5 minutes).
 	exp := now.Add(1 * time.Hour).UnixMilli()
 	status := JudgeIdleExpiry(credJSON(&exp, "at-real", "rt-real"), now)
-	if !status.Judgeable {
-		t.Fatal("Judgeable = false, want true (expiresAt present)")
-	}
-	if status.Expired {
-		t.Fatal("Expired = true, want false (1h remaining)")
+	if !status.Judgeable || status.Status != "" {
+		t.Fatalf("status = %+v, want Judgeable=true Status=\"\" (healthy, not yet expired)", status)
 	}
 }
 
-func TestJudgeIdleExpiry_Expired(t *testing.T) {
+// A `claude setup token` account: long-lived accessToken, NO refreshToken,
+// not yet expired. Must read as healthy (Status ""), never
+// StatusReloginRequired merely for lacking a refresh token — see
+// internal/provider/claude.Driver.Fingerprint's doc on this account shape,
+// and JudgeIdleExpiry's doc (C1) on why this exact case is the false
+// positive the first version of this function would have produced for.
+func TestJudgeIdleExpiry_NotYetExpired_NoRefreshToken_IsHealthy(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
-	// Expired 1 hour ago.
+	exp := now.Add(1 * time.Hour).UnixMilli()
+	status := JudgeIdleExpiry(credJSON(&exp, "at-real", ""), now)
+	if !status.Judgeable || status.Status != "" {
+		t.Fatalf("status = %+v, want Judgeable=true Status=\"\" (setup-token shape, still valid)", status)
+	}
+}
+
+// The core C1 fix: an expired access token with a refresh token present is
+// TRANSIENT (token_expired), not a quarantine signal.
+func TestJudgeIdleExpiry_Expired_HasRefreshToken_IsTokenExpiredNotRelogin(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	exp := now.Add(-1 * time.Hour).UnixMilli()
 	status := JudgeIdleExpiry(credJSON(&exp, "at-real", "rt-real"), now)
-	if !status.Judgeable || !status.Expired {
-		t.Fatalf("status = %+v, want Judgeable=true Expired=true", status)
+	if !status.Judgeable || status.Status != StatusTokenExpired {
+		t.Fatalf("status = %+v, want Judgeable=true Status=%q", status, StatusTokenExpired)
+	}
+}
+
+// Expired AND no refresh token at all: nothing can recover it without a
+// human re-login. This is the one relogin_required case decidable without a
+// network call.
+func TestJudgeIdleExpiry_Expired_NoRefreshToken_IsReloginRequired(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	exp := now.Add(-1 * time.Hour).UnixMilli()
+	status := JudgeIdleExpiry(credJSON(&exp, "at-real", ""), now)
+	if !status.Judgeable || status.Status != StatusReloginRequired {
+		t.Fatalf("status = %+v, want Judgeable=true Status=%q", status, StatusReloginRequired)
 	}
 }
 
 func TestJudgeIdleExpiry_WithinBufferCountsAsExpired(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
-	// Expires in 4 minutes — inside the 5-minute ExpiryBufferMS.
-	exp := now.Add(4 * time.Minute).UnixMilli()
+	exp := now.Add(4 * time.Minute).UnixMilli() // inside the 5-minute ExpiryBufferMS
 	status := JudgeIdleExpiry(credJSON(&exp, "at-real", "rt-real"), now)
-	if !status.Judgeable || !status.Expired {
-		t.Fatalf("status = %+v, want Judgeable=true Expired=true (within buffer)", status)
+	if !status.Judgeable || status.Status != StatusTokenExpired {
+		t.Fatalf("status = %+v, want Judgeable=true Status=%q (within buffer)", status, StatusTokenExpired)
 	}
 }
 
 func TestJudgeIdleExpiry_JustOutsideBufferIsNotExpired(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
-	// Expires in 5 minutes + 1 second — just outside ExpiryBufferMS.
-	exp := now.Add(5*time.Minute + time.Second).UnixMilli()
+	exp := now.Add(5*time.Minute + time.Second).UnixMilli() // just outside ExpiryBufferMS
 	status := JudgeIdleExpiry(credJSON(&exp, "at-real", "rt-real"), now)
-	if !status.Judgeable || status.Expired {
-		t.Fatalf("status = %+v, want Judgeable=true Expired=false", status)
+	if !status.Judgeable || status.Status != "" {
+		t.Fatalf("status = %+v, want Judgeable=true Status=\"\"", status)
 	}
 }
 
@@ -85,16 +109,16 @@ func TestJudgeIdleExpiry_NoExpiresAtIsUnjudgeable(t *testing.T) {
 	if status.Judgeable {
 		t.Fatal("Judgeable = true, want false (no expiresAt claim)")
 	}
-	if status.Expired {
-		t.Fatal("Expired = true, want false when unjudgeable (must not false-positive quarantine)")
+	if status.Status != "" {
+		t.Fatalf("Status = %q, want \"\" when unjudgeable (must not false-positive quarantine)", status.Status)
 	}
 }
 
 func TestJudgeIdleExpiry_UnparseableJSONIsUnjudgeable(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	status := JudgeIdleExpiry([]byte(`not json at all`), now)
-	if status.Judgeable || status.Expired {
-		t.Fatalf("status = %+v, want Judgeable=false Expired=false", status)
+	if status.Judgeable || status.Status != "" {
+		t.Fatalf("status = %+v, want Judgeable=false Status=\"\"", status)
 	}
 }
 
@@ -106,6 +130,8 @@ func TestJudgeIdleExpiry_MissingClaudeAiOauthBlockIsUnjudgeable(t *testing.T) {
 	}
 }
 
+// --- ParseCredentialExpiry: never returns token bytes ---
+
 func TestParseCredentialExpiry_NeverReturnsTokenBytes(t *testing.T) {
 	exp := int64(1234567890000)
 	cred := credJSON(&exp, "sk-ant-oat01-SECRET-ACCESS", "sk-ant-ort01-SECRET-REFRESH")
@@ -116,11 +142,7 @@ func TestParseCredentialExpiry_NeverReturnsTokenBytes(t *testing.T) {
 	if !got.HasAccessToken || !got.HasRefreshToken {
 		t.Fatalf("got = %+v, want both HasAccessToken and HasRefreshToken true", got)
 	}
-	// The struct carries only booleans/ints — this is a static assertion in
-	// spirit; the runtime check below is a best-effort belt-and-suspenders
-	// scan of a %+v dump for either secret substring.
-	dump := ""
-	dump += boolToStr(got.HasAccessToken) + boolToStr(got.HasRefreshToken)
+	dump := boolToStr(got.HasAccessToken) + boolToStr(got.HasRefreshToken)
 	if strings.Contains(dump, "SECRET") {
 		t.Fatalf("dump unexpectedly carries token material: %q", dump)
 	}
@@ -141,13 +163,61 @@ func TestCredentialExpiry_IsExpired_UnknownIsNotExpired(t *testing.T) {
 	}
 }
 
-func TestStatusReloginRequired_MatchesReporterLiteral(t *testing.T) {
-	// This is a pinned-string test, not a cross-package import (see
-	// StatusReloginRequired's doc comment on why this package does not
-	// depend on internal/reporter). If reporter.go's usageStatusQuarantined
-	// literal ever changes, this constant — and this test — must be updated
-	// by hand alongside it.
-	if StatusReloginRequired != "relogin_required" {
-		t.Fatalf("StatusReloginRequired = %q, want %q", StatusReloginRequired, "relogin_required")
+// --- ExtractOAuthTokens (C2) ---
+
+func TestExtractOAuthTokens_ReturnsBothTokensAndExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	exp := now.Add(1 * time.Hour).UnixMilli()
+	access, refresh, expiry, err := ExtractOAuthTokens(credJSON(&exp, "at-123", "rt-456"))
+	if err != nil {
+		t.Fatalf("ExtractOAuthTokens failed: %v", err)
+	}
+	if access != "at-123" || refresh != "rt-456" {
+		t.Fatalf("access=%q refresh=%q, want at-123/rt-456", access, refresh)
+	}
+	if expiry.ExpiresAtMS == nil || *expiry.ExpiresAtMS != exp {
+		t.Fatalf("expiry = %+v, want ExpiresAtMS=%d", expiry, exp)
+	}
+	if !expiry.HasAccessToken || !expiry.HasRefreshToken {
+		t.Fatalf("expiry = %+v, want both Has* true", expiry)
+	}
+}
+
+func TestExtractOAuthTokens_MissingFieldsReturnEmptyStringsNotError(t *testing.T) {
+	access, refresh, expiry, err := ExtractOAuthTokens([]byte(`{"claudeAiOauth":{}}`))
+	if err != nil {
+		t.Fatalf("ExtractOAuthTokens failed: %v", err)
+	}
+	if access != "" || refresh != "" {
+		t.Fatalf("access=%q refresh=%q, want both empty", access, refresh)
+	}
+	if expiry.HasAccessToken || expiry.HasRefreshToken || expiry.ExpiresAtMS != nil {
+		t.Fatalf("expiry = %+v, want all zero-ish", expiry)
+	}
+}
+
+func TestExtractOAuthTokens_UnparseableJSONErrors(t *testing.T) {
+	_, _, _, err := ExtractOAuthTokens([]byte(`not json`))
+	if err == nil {
+		t.Fatal("expected an error for unparseable JSON")
+	}
+}
+
+// TestExtractOAuthTokens_NeverLeaksIntoErrors is the leak-prevention test C2
+// asked for: the one function in this package that returns token material
+// must never fold that material into an error value, for any input shape
+// (malformed structure around a real-looking token, wrong types, etc.).
+func TestExtractOAuthTokens_NeverLeaksIntoErrors(t *testing.T) {
+	const secret = "sk-ant-oat01-EXTRACT-LEAK-CHECK-7d2e"
+	inputs := [][]byte{
+		[]byte(`{"claudeAiOauth":{"accessToken":"` + secret + `","refreshToken":"rt","expiresAt":"not-a-number"}}`),
+		[]byte(`{"claudeAiOauth":"` + secret + `"}`),                // wrong type for the whole block
+		[]byte(`{"claudeAiOauth":{"accessToken":` + `12345` + `}}`), // wrong type for accessToken itself
+	}
+	for _, in := range inputs {
+		_, _, _, err := ExtractOAuthTokens(in)
+		if err != nil && strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked token material: %q", err.Error())
+		}
 	}
 }
