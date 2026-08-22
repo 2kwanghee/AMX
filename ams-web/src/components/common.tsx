@@ -83,6 +83,7 @@ export type IconName =
   | 'refresh'
   | 'check'
   | 'help'
+  | 'edit'
   | 'claude'
   | 'codex';
 
@@ -218,6 +219,11 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <circle cx="12" cy="12" r="10" />
       <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4" />
       <line x1="12" y1="17" x2="12.01" y2="17" />
+    </>
+  ),
+  edit: (
+    <>
+      <path d="M17 3a2.83 2.83 0 0 1 4 4L7 21l-4 1 1-4Z" />
     </>
   ),
   // Claude — 4각 스파클(큰 별 + 작은 별) 조합

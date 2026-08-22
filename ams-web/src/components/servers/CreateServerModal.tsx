@@ -15,6 +15,7 @@ export function CreateServer({
 }) {
   const [name, setName] = useState('');
   const [hostname, setHostname] = useState('');
+  const [owner, setOwner] = useState('');
   const [mode, setMode] = useState<'auto' | 'manual'>('manual');
   const act = useAction();
   return (
@@ -23,6 +24,16 @@ export function CreateServer({
       <input value={name} onChange={(e) => setName(e.target.value)} />
       <label>호스트명</label>
       <input value={hostname} onChange={(e) => setHostname(e.target.value)} />
+      <label>소유자 (선택)</label>
+      <input
+        value={owner}
+        onChange={(e) => setOwner(e.target.value)}
+        autoComplete="off"
+        placeholder="담당자·팀 이름"
+      />
+      <p className="muted" style={{ marginTop: -6 }}>
+        비워 두면 조직 공용 — 모든 계정을 받을 수 있습니다.
+      </p>
       <label>전환 모드</label>
       <select value={mode} onChange={(e) => setMode(e.target.value as 'auto' | 'manual')}>
         <option value="manual">수동</option>
@@ -34,7 +45,16 @@ export function CreateServer({
         style={{ marginTop: 14 }}
         disabled={act.busy || !name}
         onClick={() =>
-          act.run(() => api.createServer(tenantId, { name, hostname: hostname || undefined, switchMode: mode }), onDone)
+          act.run(
+            () =>
+              api.createServer(tenantId, {
+                name,
+                hostname: hostname || undefined,
+                owner: owner.trim() || undefined,
+                switchMode: mode,
+              }),
+            onDone,
+          )
         }
       >
         등록

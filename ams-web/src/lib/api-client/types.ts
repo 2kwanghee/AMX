@@ -129,6 +129,9 @@ export interface Server {
   tenantId: string;
   name: string;
   hostname?: string;
+  // Free-text label (a person, a team); see api-client Account.owner. Blank
+  // means "org-wide" under rotation_scope=owner (server accepts any account).
+  owner?: string | null;
   switchMode: SwitchMode;
   // O4-B/O4-C central policy (design §O4). null = no central override; the
   // agent falls back to its tsamx-local default.
@@ -158,11 +161,14 @@ export interface Server {
 export interface ServerCreate {
   name: string;
   hostname?: string;
+  owner?: string;
   switchMode?: SwitchMode;
 }
 export interface ServerUpdate {
   name?: string;
   hostname?: string;
+  // 미제공 = 유지. 명시적 ""는 조직 공용으로 되돌린다(AccountUpdate.owner와 같은 관례).
+  owner?: string;
   status?: ServerStatus;
   // O4 central policy. A field present with null clears the central override
   // back to the tsamx-local default; an omitted field is left untouched.

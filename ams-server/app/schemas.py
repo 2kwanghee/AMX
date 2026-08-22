@@ -217,12 +217,18 @@ class ServerCreate(Wire):
     name: str = Field(min_length=1)
     hostname: str | None = None
     switch_mode: SwitchMode = "auto"
+    # Free-text label (a person, a team); see models.Server.owner. Blank/omitted
+    # means "org-wide" — every account may lease onto it (rotation_scope=owner).
+    owner: str | None = Field(default=None, max_length=200)
 
 
 class ServerUpdate(Wire):
     name: str | None = Field(default=None, min_length=1)
     hostname: str | None = None
     status: ServerStatus | None = None
+    # None = leave unchanged; an explicit "" clears it back to org-wide (same
+    # convention as AccountUpdate.owner).
+    owner: str | None = Field(default=None, max_length=200)
     # O4-C policy (design note O4-C). Provided fields are written; unset fields
     # are left untouched (detected via model_fields_set). threshold_pct None
     # clears central control back to the tsamx-local default.
@@ -240,6 +246,7 @@ class Server(Wire):
     tenant_id: uuid.UUID
     name: str
     hostname: str | None = None
+    owner: str | None = None
     switch_mode: SwitchMode
     threshold_pct: float | None = None
     default_strategy: SwitchStrategy | None = None

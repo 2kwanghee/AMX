@@ -645,13 +645,20 @@ def delete_account(db: Session, tenant_id: uuid.UUID, account_id: uuid.UUID) -> 
 
 # -- Servers ------------------------------------------------------------------
 def create_server(
-    db: Session, tenant_id: uuid.UUID, *, name: str, hostname: str | None, switch_mode: str
+    db: Session,
+    tenant_id: uuid.UUID,
+    *,
+    name: str,
+    hostname: str | None,
+    switch_mode: str,
+    owner: str | None = None,
 ) -> Server:
     get_tenant(db, tenant_id)
     server = Server(
         tenant_id=tenant_id,
         name=name,
         hostname=hostname,
+        owner=owner,
         switch_mode=switch_mode,
         status="offline",
     )
@@ -696,6 +703,7 @@ def update_server(
     name: str | None,
     hostname: str | None,
     status: str | None,
+    owner: str | None = None,
 ) -> Server:
     server = get_server(db, tenant_id, server_id)
     if name is not None:
@@ -704,6 +712,10 @@ def update_server(
         server.hostname = hostname
     if status is not None:
         server.status = status
+    if owner is not None:
+        # Same convention as update_account: None means "don't touch", an
+        # explicit "" clears it back to org-wide.
+        server.owner = owner
     server.updated_at = _now()
     try:
         db.commit()

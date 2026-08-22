@@ -51,7 +51,12 @@ def list_servers(
 @router.post("/servers", response_model=schemas.Server, status_code=status.HTTP_201_CREATED)
 def create_server(tenant_id: uuid.UUID, body: schemas.ServerCreate, db: DbSession, principal: AdminPrincipal):
     server = inventory.create_server(
-        db, tenant_id, name=body.name, hostname=body.hostname, switch_mode=body.switch_mode
+        db,
+        tenant_id,
+        name=body.name,
+        hostname=body.hostname,
+        switch_mode=body.switch_mode,
+        owner=body.owner,
     )
     return _to_wire(db, server)
 
@@ -66,7 +71,13 @@ def update_server(
     tenant_id: uuid.UUID, server_id: uuid.UUID, body: schemas.ServerUpdate, db: DbSession, principal: AdminPrincipal
 ):
     server = inventory.update_server(
-        db, tenant_id, server_id, name=body.name, hostname=body.hostname, status=body.status
+        db,
+        tenant_id,
+        server_id,
+        name=body.name,
+        hostname=body.hostname,
+        status=body.status,
+        owner=body.owner,
     )
     # O4-C policy fields are set only when actually present in the PATCH body
     # (so a name-only PATCH does not clear the policy), then re-delivered to a
