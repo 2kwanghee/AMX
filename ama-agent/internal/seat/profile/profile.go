@@ -391,8 +391,10 @@ func (s *Store) Create(providerKey, accountKey string, tmpl Template) (string, e
 // profile for (drv.Name(), accountKey), delegating the vendor-specific file
 // layout to drv.StageCredential, then writes a staged marker recording
 // drv.Fingerprint(credentialJSON) — ONLY after StageCredential returns
-// without error, so Complete()==true is a guarantee that write finished, not
-// that it merely started.
+// without error, so Complete()==true means the write finished AND the bytes
+// on disk are still the ones Stage put there. It is not a claim that the
+// credential is usable: a later in-place rotation by the vendor's runner
+// moves the fingerprint and flips Complete to false (see Complete).
 //
 // The FIRST thing Stage does after acquiring the lock is delete any existing
 // marker (N2): a re-Stage of an already-complete profile (a rotated
@@ -455,18 +457,25 @@ func (s *Store) Stage(drv provider.Driver, accountKey string, credentialJSON []b
 //
 //   - a re-Stage that died after invalidating the old marker but before
 //     writing the new one leaves no marker at all -> false, correctly;
-//   - a marker planted directly on disk (bypassing Stage entirely) without a
-//     matching, or without ANY, credential file present is never mistaken
-//     for a real Stage: reading the live credential file to compute its
-//     fingerprint fails outright (no credential -> false, nil) or succeeds
-//     with a fingerprint that will not equal an unrelated planted marker.
+//   - a marker planted WITHOUT a matching credential file (or without any
+//     credential file at all) reads as false: computing the live
+//     fingerprint either fails outright or yields a value the planted
+//     marker does not match. A marker planted TOGETHER with the credential
+//     it names still reads as true — the fingerprint is an unkeyed hash, so
+//     this detects truncation and drift, NOT forgery by someone who already
+//     has write access inside the profile directory.
 //
-// A profile that is Create()d but never Stage()d, a Stage that died
-// mid-write, and a live credential that has drifted from what was last
-// staged (an external rotation, a tampered marker) all read as
-// !Complete — in every case the runner would hit a login screen or use a
-// credential AMS does not believe is current, so P3 must treat any
-// !Complete as not-ready rather than assuming existence implies usability.
+// A profile that is Create()d but never Stage()d, and a Stage that died
+// mid-write, read as !Complete — the runner would hit a login screen.
+//
+// CAUTION for P3 (do not wire !Complete straight through to "not ready"):
+// a credential rotated IN PLACE by the vendor's own runner also reads as
+// !Complete, because the live bytes no longer match what Stage recorded.
+// That is a HEALTHY account, not a broken one — this repo already handles
+// local rotation as a normal event (see internal/resync). Treating every
+// !Complete as not-ready would flip every rotated account to unusable.
+// P3 must distinguish "no/short credential" from "credential present but
+// fingerprint moved", and re-record the marker on an observed rotation.
 func (s *Store) Complete(drv provider.Driver, accountKey string) (bool, error) {
 	dir, _, err := s.resolveProfile(drv.Name(), accountKey)
 	if err != nil {
