@@ -805,6 +805,31 @@ func (s *Store) SetActive(providerKey, accountKey string) error {
 // real AccountKey output at all — a distinct failure from ErrActiveMissing,
 // since that content could not have come from a legitimate SetActive call
 // and is never used to build a path.
+//
+// POINTER FORMAT — canonical rule (adversarial review F2; this is the ONE
+// place this rule is defined, and it MUST match the independent
+// reimplementation in deploy/amx-claude's active-pointer case pattern
+// byte-for-byte, or the two readers disagree about which profile is active —
+// which is exactly the "runner bills one account, [a reader elsewhere]
+// attributes the cost to another" bug F2 reproduced): the file's content must
+// be EITHER exactly `^[0-9a-f]{64}$` with nothing else, OR that same
+// 64-hex-char string followed by exactly one trailing "\n" and nothing after
+// it. Anything else — leading whitespace, internal whitespace, a trailing
+// "\r", two or more trailing newlines, any other stray byte — is rejected as
+// an invalid pointer, NOT silently trimmed. atomicWrite (see SetActive) never
+// appends a trailing newline on this package's own write path, so the
+// "\n"-tolerant branch exists only for a pointer file some other tool wrote
+// by hand. strings.TrimSuffix removes AT MOST one trailing "\n" (never more),
+// which is what makes this the correct primitive here — strings.TrimSpace
+// would strip leading whitespace and multiple trailing newlines too, silently
+// ACCEPTING malformed pointers the other reader rejects (the exact F2 bug).
+//
+// deploy/langfuse/session_usage_hook.py used to be a third independent
+// reimplementation of this same parsing, but adversarial review F3 removed
+// its pointer re-read entirely (it now reads the session's own
+// CLAUDE_CONFIG_DIR instead of asking "what's active right now" — see that
+// file's _session_config_home_email doc) — so it is no longer a party to
+// this rule at all, not a third place that must be kept in sync with it.
 func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err error) {
 	dir, err := s.resolveProviderDir(providerKey)
 	if err != nil {
@@ -817,7 +842,7 @@ func (s *Store) GetActive(providerKey string) (accountKey, configDir string, err
 		}
 		return "", "", rerr
 	}
-	key := strings.TrimSpace(string(raw))
+	key := strings.TrimSuffix(string(raw), "\n")
 	if key == "" {
 		return "", "", ErrNoActive
 	}

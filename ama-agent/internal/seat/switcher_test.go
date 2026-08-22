@@ -2,6 +2,7 @@ package seat
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/2kwanghee/AMX/ama-agent/internal/provider"
@@ -284,5 +285,98 @@ func TestRepairStillEnforcesAssignedSet(t *testing.T) {
 	_, err := sw.Repair([]string{nonexistent})
 	if !errors.Is(err, ErrNotReady) {
 		t.Fatalf("Repair to a candidate with no staged credential: err = %v, want ErrNotReady", err)
+	}
+}
+
+// --- F6 (adversarial review): C10 rollback + Repair candidate skip ------
+
+// TestSwitchRollsBackWhenReadBackFailsAfterSetActive deterministically
+// reproduces a C10 violation via testAfterSetActive (a genuine one needs a
+// real filesystem race that would be flaky to assert on) and checks Switch
+// restores the PREVIOUS active pointer rather than leaving it dangling at a
+// profile that no longer resolves.
+func TestSwitchRollsBackWhenReadBackFailsAfterSetActive(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	sw := New(s, drv)
+	first := stageAccount(t, s, drv, "rollback-first@example.com")
+	second := stageAccount(t, s, drv, "rollback-second@example.com")
+	if _, err := sw.Switch(first, []string{first, second}); err != nil {
+		t.Fatalf("Switch(first): %v", err)
+	}
+
+	// Simulate something removing `second`'s profile in the gap between
+	// SetActive(second) succeeding and Switch's own C10 read-back.
+	sw.testAfterSetActive = func() {
+		if err := s.Remove(drv.Name(), second); err != nil {
+			t.Fatalf("Remove(second) in test hook: %v", err)
+		}
+	}
+
+	_, err := sw.Switch(second, []string{first, second})
+	if err == nil {
+		t.Fatal("Switch must report an error when the C10 read-back fails")
+	}
+	if !strings.Contains(err.Error(), "rolled back to previous active") {
+		t.Fatalf("error = %v, want it to say the pointer was rolled back", err)
+	}
+
+	key, _, gerr := s.GetActive(drv.Name())
+	if gerr != nil || key != first {
+		t.Fatalf("after a failed switch, GetActive = (%q, %v), want (%q, nil) — rollback must restore the previous active", key, gerr, first)
+	}
+}
+
+// TestSwitchWithNoPreviousActiveReportsNoRollbackTarget covers the
+// first-ever-switch case: there is nothing to roll back to, and Switch must
+// say so rather than claiming a rollback that did not happen.
+func TestSwitchWithNoPreviousActiveReportsNoRollbackTarget(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	sw := New(s, drv)
+	target := stageAccount(t, s, drv, "no-previous@example.com")
+
+	sw.testAfterSetActive = func() {
+		if err := s.Remove(drv.Name(), target); err != nil {
+			t.Fatalf("Remove(target) in test hook: %v", err)
+		}
+	}
+
+	_, err := sw.Switch(target, []string{target})
+	if err == nil {
+		t.Fatal("Switch must report an error when the C10 read-back fails")
+	}
+	if !strings.Contains(err.Error(), "no previous active to roll back to") {
+		t.Fatalf("error = %v, want it to say there was no previous active to roll back to", err)
+	}
+}
+
+// TestRepairSkipsNotReadyCandidateAndTriesNext is F6's Repair half: a stale
+// or never-staged entry earlier in assignedKeys must not make Repair give up
+// when a later candidate is perfectly usable.
+func TestRepairSkipsNotReadyCandidateAndTriesNext(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	sw := New(s, drv)
+	gone := stageAccount(t, s, drv, "gone3@example.com")
+	if _, err := sw.Switch(gone, []string{gone}); err != nil {
+		t.Fatalf("Switch(gone): %v", err)
+	}
+	if err := s.Remove(drv.Name(), gone); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	notReady := profile.AccountKey("not-ready@example.com")
+	if _, err := s.Create(drv.Name(), notReady, profile.Template{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ready := stageAccount(t, s, drv, "ready@example.com")
+
+	info, err := sw.Repair([]string{notReady, ready})
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if info.AccountKey != ready {
+		t.Fatalf("Repair = %q, want it to skip the not-ready candidate and land on %q", info.AccountKey, ready)
 	}
 }

@@ -60,6 +60,16 @@ type Switcher struct {
 	// provider.Driver). Its Name() determines which provider this Switcher
 	// operates on.
 	Driver provider.Driver
+
+	// testAfterSetActive, when non-nil, runs immediately after SetActive
+	// succeeds and before Switch's C10 read-back. TEST-ONLY (unexported, only
+	// this package's own tests can set it): SetActive's atomic rename makes a
+	// genuine C10 violation vanishingly rare and impossible to force from
+	// outside without a flaky real race, so tests use this hook to
+	// deterministically reproduce "something else changed the pointer/profile
+	// in the gap" and exercise the rollback path below. New never sets it, so
+	// it is always nil in production.
+	testAfterSetActive func()
 }
 
 // New returns a Switcher over store for drv's provider.
@@ -102,6 +112,16 @@ func (sw *Switcher) Active() (ActiveInfo, error) {
 //     true in every real case; the check exists so a violation is a loud
 //     error here rather than a silent contract break a caller discovers
 //     later.
+//   - Rollback on a C10 violation (adversarial review F6): the pointer's
+//     PREVIOUS value is read before SetActive ever writes, so that if the
+//     read-back disagrees, Switch attempts to restore that previous value
+//     rather than leaving the provider pointed at nothing/something unread-
+//     backable. Best-effort only — reaching this branch at all means
+//     something already unusual happened (a concurrent writer, a filesystem
+//     that lied about a completed rename), so the rollback write can fail for
+//     the same reason the forward one's read-back just did; the returned
+//     error says which case occurred (rolled back / rollback also failed / no
+//     previous value existed to roll back to).
 func (sw *Switcher) Switch(targetKey string, assignedKeys []string) (ActiveInfo, error) {
 	if !containsKey(assignedKeys, targetKey) {
 		return ActiveInfo{}, fmt.Errorf("%w: %s", ErrNotAssigned, targetKey)
@@ -118,17 +138,36 @@ func (sw *Switcher) Switch(targetKey string, assignedKeys []string) (ActiveInfo,
 			return ActiveInfo{}, fmt.Errorf("seat: reconcile %s before switch: %w", targetKey, err)
 		}
 	}
+
+	// Captured BEFORE the write so a failed read-back below has something to
+	// roll back to. previousErr set (ErrNoActive/ErrActiveMissing/other) means
+	// there was nothing safe to restore.
+	previousKey, _, previousErr := sw.Store.GetActive(sw.Driver.Name())
+
 	if err := sw.Store.SetActive(sw.Driver.Name(), targetKey); err != nil {
 		return ActiveInfo{}, err
 	}
+	if sw.testAfterSetActive != nil {
+		sw.testAfterSetActive()
+	}
+
 	info, err := sw.Active()
+	if err == nil && info.AccountKey == targetKey {
+		return info, nil
+	}
+	var violation error
 	if err != nil {
-		return ActiveInfo{}, fmt.Errorf("seat: switch to %s did not take effect (contract C10 violated): %w", targetKey, err)
+		violation = fmt.Errorf("seat: switch to %s did not take effect (contract C10 violated): %w", targetKey, err)
+	} else {
+		violation = fmt.Errorf("seat: switch to %s read back %s instead (contract C10 violated)", targetKey, info.AccountKey)
 	}
-	if info.AccountKey != targetKey {
-		return ActiveInfo{}, fmt.Errorf("seat: switch to %s read back %s instead (contract C10 violated)", targetKey, info.AccountKey)
+	if previousErr != nil || previousKey == "" {
+		return ActiveInfo{}, fmt.Errorf("%w; no previous active to roll back to (prior lookup: %v)", violation, previousErr)
 	}
-	return info, nil
+	if rerr := sw.Store.SetActive(sw.Driver.Name(), previousKey); rerr != nil {
+		return ActiveInfo{}, fmt.Errorf("%w; rollback to previous active %s also failed: %v", violation, previousKey, rerr)
+	}
+	return ActiveInfo{}, fmt.Errorf("%w; rolled back to previous active %s", violation, previousKey)
 }
 
 // Repair is the orphaned-active-pointer handler P2 review ④ asked P3 for:
@@ -141,12 +180,23 @@ func (sw *Switcher) Switch(targetKey string, assignedKeys []string) (ActiveInfo,
 //     unchanged. Repair's whole job is the ErrActiveMissing case; it is not a
 //     general-purpose "make sure something is active" call.
 //   - An orphaned pointer (ErrActiveMissing) with a non-empty assignedKeys is
-//     repointed to assignedKeys[0] via Switch — so the same ⑤/① checks Switch
-//     always applies still apply to the repair target; Repair grants no
-//     bypass.
-//   - An orphaned pointer with an EMPTY assignedKeys fails clearly: it
-//     returns the original ErrActiveMissing unchanged rather than guessing a
-//     replacement, so the caller can re-provision or alert.
+//     repointed to the first READY candidate, tried in order, via Switch — so
+//     the same ⑤/① checks Switch always applies still apply to the repair
+//     target; Repair grants no bypass. A candidate that Switch refuses with
+//     ErrNotReady (profile.StateAbsent — nothing staged there at all) is
+//     skipped in favor of the next one (adversarial review F6): a stale or
+//     not-yet-staged entry at assignedKeys[0] must not make Repair give up
+//     when a later candidate is perfectly usable. Any OTHER error from Switch
+//     (including ErrNotAssigned, which should be structurally impossible here
+//     since every candidate comes from assignedKeys itself) is NOT treated as
+//     skippable — it propagates immediately rather than silently trying more
+//     candidates, so an unexpected failure mode is never masked as "just try
+//     the next one".
+//   - An orphaned pointer with an EMPTY assignedKeys, or where NONE of the
+//     candidates are ready, fails clearly rather than guessing: the former
+//     returns the original ErrActiveMissing unchanged, the latter returns an
+//     error wrapping the last candidate's ErrNotReady, so the caller can
+//     re-provision or alert either way.
 func (sw *Switcher) Repair(assignedKeys []string) (ActiveInfo, error) {
 	info, err := sw.Active()
 	if err == nil {
@@ -158,7 +208,18 @@ func (sw *Switcher) Repair(assignedKeys []string) (ActiveInfo, error) {
 	if len(assignedKeys) == 0 {
 		return ActiveInfo{}, err
 	}
-	return sw.Switch(assignedKeys[0], assignedKeys)
+	lastErr := err
+	for _, candidate := range assignedKeys {
+		info, serr := sw.Switch(candidate, assignedKeys)
+		if serr == nil {
+			return info, nil
+		}
+		if !errors.Is(serr, ErrNotReady) {
+			return ActiveInfo{}, serr
+		}
+		lastErr = serr
+	}
+	return ActiveInfo{}, fmt.Errorf("seat: no assigned candidate is ready to repair the orphaned pointer: %w", lastErr)
 }
 
 func containsKey(keys []string, target string) bool {

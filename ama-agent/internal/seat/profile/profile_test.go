@@ -329,6 +329,87 @@ func TestGetActiveRejectsTamperedPointerContent(t *testing.T) {
 	_ = key
 }
 
+// TestGetActiveRejectsLeadingWhitespace is the adversarial-review F2
+// reproduction: a leading space (or any other stray byte) in the pointer
+// content must be REJECTED, not silently trimmed the way strings.TrimSpace
+// used to. Before this fix, this exact content made deploy/amx-claude reject
+// the pointer (its case pattern rejects any non-hex byte anywhere) while the
+// old TrimSpace-based GetActive/session_usage_hook.py's .strip() accepted
+// it — the three-reader disagreement F2 reproduced end to end.
+func TestGetActiveRejectsLeadingWhitespace(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("leading-space@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-lw"), provider.AddMeta{Email: "leading-space@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(" "+key), 0o600); err != nil {
+		t.Fatalf("write pointer with leading whitespace: %v", err)
+	}
+	_, dir, err := s.GetActive("claude")
+	if err == nil {
+		t.Fatalf("GetActive must reject a pointer with leading whitespace, got dir=%q", dir)
+	}
+	if errors.Is(err, ErrActiveMissing) || errors.Is(err, ErrNoActive) {
+		t.Fatalf("a leading-whitespace pointer must be its own error kind (invalid format), got %v", err)
+	}
+}
+
+// TestGetActiveAcceptsExactlyOneTrailingNewline confirms the ONE allowed
+// deviation from a bare 64-hex-char pointer: precisely one trailing "\n".
+func TestGetActiveAcceptsExactlyOneTrailingNewline(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("trailing-newline@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-tn"), provider.AddMeta{Email: "trailing-newline@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(key+"\n"), 0o600); err != nil {
+		t.Fatalf("write pointer with one trailing newline: %v", err)
+	}
+	got, dir, err := s.GetActive("claude")
+	if err != nil {
+		t.Fatalf("GetActive with one trailing newline: %v", err)
+	}
+	if got != key || dir == "" {
+		t.Fatalf("GetActive = (%q, %q), want (%q, non-empty)", got, dir, key)
+	}
+}
+
+// TestGetActiveRejectsTwoTrailingNewlines: TrimSuffix removes at most ONE
+// trailing "\n" by design — a second one left behind must fail the exact
+// 64-hex-char match, not be silently swallowed the way TrimSpace would.
+func TestGetActiveRejectsTwoTrailingNewlines(t *testing.T) {
+	s := openStore(t)
+	drv := claude.New()
+	key := AccountKey("double-newline@example.com")
+	if err := s.Stage(drv, key, sampleCredential("rt-dn"), provider.AddMeta{Email: "double-newline@example.com"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	providerDir, err := s.resolveProviderDir("claude")
+	if err != nil {
+		t.Fatalf("resolveProviderDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(providerDir, activeFileName), []byte(key+"\n\n"), 0o600); err != nil {
+		t.Fatalf("write pointer with two trailing newlines: %v", err)
+	}
+	_, _, err = s.GetActive("claude")
+	if err == nil {
+		t.Fatal("GetActive must reject a pointer with two trailing newlines")
+	}
+	if errors.Is(err, ErrActiveMissing) || errors.Is(err, ErrNoActive) {
+		t.Fatalf("a double-trailing-newline pointer must be its own error kind, got %v", err)
+	}
+}
+
 // --- Pre-existing permissive directory / symlink -------------------------
 
 func TestCreateTightensPreExistingWideDirectory(t *testing.T) {

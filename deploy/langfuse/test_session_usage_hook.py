@@ -13,7 +13,9 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import time
 
 import pytest
 
@@ -244,6 +246,11 @@ def test_active_account_email_swallows_tsamx_failure(monkeypatch, tmp_path):
     mod = _load_module()
     monkeypatch.setenv("CC_SESSION_USAGE_STATE_FILE", str(tmp_path / "state"))
     monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+    # Isolate from the REAL host's CLAUDE_CONFIG_DIR/~/.claude — this test
+    # wants every case to fall through to the tsamx mock below, so
+    # _session_config_home_email must resolve to nothing on this host too.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
 
     def _boom(*a, **kw):
         raise FileNotFoundError("tsamx")
@@ -273,39 +280,33 @@ def test_active_account_email_swallows_tsamx_failure(monkeypatch, tmp_path):
     assert mod.active_account_email() is None
 
 
-def _write_active_profile(tmp_path, email, key=None):
-    """P3 활성 프로파일 포인터 레이아웃을 그대로 재현: 시험용 헬퍼."""
-    import hashlib
-
-    if key is None:
-        key = hashlib.sha256(email.strip().lower().encode()).hexdigest()
-    provider_dir = tmp_path / "profiles" / "claude"
-    profile_dir = provider_dir / key
-    profile_dir.mkdir(parents=True)
-    (provider_dir / "active").write_text(key)
-    (profile_dir / ".claude.json").write_text(
+def _write_claude_json(config_home, email):
+    config_home.mkdir(parents=True, exist_ok=True)
+    (config_home / ".claude.json").write_text(
         json.dumps({"oauthAccount": {"emailAddress": email}})
     )
-    return key
 
 
-def test_active_account_email_prefers_profile_pointer_over_tsamx(monkeypatch, tmp_path):
+def test_active_account_email_prefers_session_config_home_over_tsamx(monkeypatch, tmp_path):
     mod = _load_module()
     monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
-    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
-    _write_active_profile(tmp_path, "profile-user@example.com")
+    config_home = tmp_path / "session-home"
+    _write_claude_json(config_home, "session-user@example.com")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
 
     def _boom(*a, **kw):
-        raise AssertionError("tsamx must not be consulted when the profile pointer resolves")
+        raise AssertionError("tsamx must not be consulted when the session config home resolves")
 
     monkeypatch.setattr(mod.subprocess, "run", _boom)
-    assert mod.active_account_email() == "profile-user@example.com"
+    assert mod.active_account_email() == "session-user@example.com"
 
 
-def test_active_account_email_falls_back_to_tsamx_when_no_profile_pointer(monkeypatch, tmp_path):
+def test_active_account_email_falls_back_to_tsamx_when_config_home_has_no_identity(
+    monkeypatch, tmp_path
+):
     mod = _load_module()
     monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
-    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))  # set, but no active file under it
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-home"))  # no .claude.json here
 
     class _Proc:
         returncode = 0
@@ -315,45 +316,84 @@ def test_active_account_email_falls_back_to_tsamx_when_no_profile_pointer(monkey
     assert mod.active_account_email() == "tsamx-user@example.com"
 
 
-def test_active_account_email_pin_beats_profile_pointer(monkeypatch, tmp_path):
+def test_active_account_email_pin_beats_session_config_home(monkeypatch, tmp_path):
     mod = _load_module()
     monkeypatch.setenv("LANGFUSE_USER_ID", "pinned@example.com")
-    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
-    _write_active_profile(tmp_path, "profile-user@example.com")
+    config_home = tmp_path / "session-home"
+    _write_claude_json(config_home, "session-user@example.com")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
     assert mod.active_account_email() == "pinned@example.com"
 
 
-@pytest.mark.parametrize(
-    "corrupt",
-    [
-        "not-a-hex-key",
-        "0" * 63,  # one short of 64
-        "0" * 65,  # one over 64
-    ],
-)
-def test_active_profile_email_rejects_malformed_pointer(monkeypatch, tmp_path, corrupt):
+def test_active_account_email_defaults_to_home_claude_when_config_dir_unset(monkeypatch, tmp_path):
     mod = _load_module()
     monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
-    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
-    provider_dir = tmp_path / "profiles" / "claude"
-    provider_dir.mkdir(parents=True)
-    (provider_dir / "active").write_text(corrupt)
-    assert mod._active_profile_email() is None
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_claude_json(tmp_path / ".claude", "default-home-user@example.com")
+
+    def _boom(*a, **kw):
+        raise AssertionError("tsamx must not be consulted when ~/.claude resolves")
+
+    monkeypatch.setattr(mod.subprocess, "run", _boom)
+    assert mod.active_account_email() == "default-home-user@example.com"
 
 
-def test_active_profile_email_none_when_state_dir_unset(monkeypatch):
+def test_session_config_home_email_size_cap(monkeypatch, tmp_path):
     mod = _load_module()
-    monkeypatch.delenv("AMX_STATE_DIR", raising=False)
-    assert mod._active_profile_email() is None
+    config_home = tmp_path / "big-home"
+    config_home.mkdir()
+    payload = json.dumps(
+        {"oauthAccount": {"emailAddress": "big@example.com"}, "pad": "x" * (2 * 1024 * 1024)}
+    )
+    (config_home / ".claude.json").write_text(payload)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
+    assert mod._session_config_home_email() is None
 
 
-def test_active_profile_email_none_when_profile_dir_missing(monkeypatch, tmp_path):
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo not available on this platform")
+def test_session_config_home_email_never_blocks_on_fifo(monkeypatch, tmp_path):
+    """adversarial review F1 reproduction: a FIFO at .claude.json must return
+    None promptly, never block the Stop hook."""
     mod = _load_module()
-    monkeypatch.setenv("AMX_STATE_DIR", str(tmp_path))
-    provider_dir = tmp_path / "profiles" / "claude"
-    provider_dir.mkdir(parents=True)
-    (provider_dir / "active").write_text("a" * 64)  # well-shaped, but no such profile dir
-    assert mod._active_profile_email() is None
+    config_home = tmp_path / "fifo-home"
+    config_home.mkdir()
+    fifo_path = config_home / ".claude.json"
+    os.mkfifo(fifo_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
+
+    start = time.monotonic()
+    result = mod._session_config_home_email()
+    elapsed = time.monotonic() - start
+
+    assert result is None
+    assert elapsed < 2.0, f"_session_config_home_email blocked on a FIFO for {elapsed:.2f}s"
+
+
+# F3 (adversarial review): the Stop hook must NOT re-read the P3 active
+# pointer at session-end time — it must use the config home the session
+# ACTUALLY inherited (CLAUDE_CONFIG_DIR), even when a *different* profile
+# looks "active" by the time the hook runs (the switcher moved on mid-session,
+# which is exactly the scenario that would misattribute a running session's
+# cost to the wrong account if the hook re-queried the pointer).
+def test_active_account_email_ignores_a_pointer_that_moved_mid_session(monkeypatch, tmp_path):
+    mod = _load_module()
+    monkeypatch.delenv("LANGFUSE_USER_ID", raising=False)
+
+    session_home = tmp_path / "session-home"
+    _write_claude_json(session_home, "session-started-with@example.com")
+    other_home = tmp_path / "switched-to-home"
+    _write_claude_json(other_home, "switched-to@example.com")
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(session_home))
+    # No AMX_STATE_DIR/pointer machinery exists in this module any more (F3
+    # removed it) -- there is nothing left to point at `other_home` even if
+    # some external switcher activated it. Confirm the session's own config
+    # home wins regardless.
+    assert mod.active_account_email() == "session-started-with@example.com"
+    assert not hasattr(mod, "_active_profile_email"), (
+        "F3: the pointer-reread function must be removed, not merely bypassed"
+    )
 
 
 # -- iterations 귀속 ----------------------------------------------------------

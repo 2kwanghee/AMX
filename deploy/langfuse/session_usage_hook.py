@@ -70,6 +70,7 @@ import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -87,6 +88,9 @@ _DEFER_MAX_SECONDS = 15.0
 _DEFER_POLL_INTERVAL_SECONDS = 0.5
 # tsamx 조회 타임아웃(초). 실패하면 계정 없이 보낸다(엔드포인트가 NULL을 받는다).
 _TSAMX_TIMEOUT_SECONDS = 2.0
+# 계정 identity 파일(.claude.json) 읽기 크기 상한. deploy/amx-claude의 F1 수정과
+# 같은 값 — 정상적인 .claude.json은 수 KB다. 크면 조용히 포기한다(계정 없이 전송).
+_IDENTITY_FILE_MAX_BYTES = 1 << 20  # 1MB
 # 트랜스크립트 스캔 줄 수 상한. 병리적으로 긴 파일이 훅 실행 시간을 좌우하지 못하게
 # 한다(초과분은 버리고 상태 파일에 1줄 남긴다).
 _MAX_LINES = 500_000
@@ -441,33 +445,88 @@ def build_models(by_model: dict[str, dict]) -> list[dict]:
     return out
 
 
-def _active_profile_email() -> str | None:
-    """P3 활성 프로파일 포인터(``internal/seat/profile`` + ``internal/seat.
-    Switcher``, 이 커밋 시점에는 어디에도 배선되지 않았다)를 통한 이메일 조회.
+def _read_bounded_regular_file(path: str, max_bytes: int) -> bytes | None:
+    """FIFO/네임드파이프여도 절대 블로킹하지 않는 경계 읽기 (adversarial review
+    F1: ``open()``에 아무 방어도 없으면 그 경로가 FIFO거나 멎은 네트워크
+    마운트일 때 훅 프로세스 전체가 영구 정지한다 — 실측 재현됨).
 
-    ``$AMX_STATE_DIR/profiles/claude/active``가 없거나, 내용이 accountKey
-    모양(64자 소문자 16진수)이 아니거나, 그 계정 디렉터리가 없거나 심링크이면
-    전부 ``None``이다 — ``tsamx status --json`` 폴백으로 넘어간다는 뜻이라
-    이 함수 자체가 예외를 던지는 일은 없다(subprocess도 부르지 않는다).
+    두 겹 방어:
+      1. ``os.stat``으로 사전에 정규 파일·크기를 확인한다 — TOCTOU 창이 있지만
+         (검사와 open 사이에 바뀌치기당할 수 있다) 싸고 빠르며, 정상 경로에서
+         파이썬이 굳이 파일을 열지 않고도 대부분의 비정상 입력을 걸러낸다.
+      2. 실제 open은 ``O_NONBLOCK``으로 연다 — POSIX 규약상 라이터가 없는
+         FIFO를 ``O_RDONLY|O_NONBLOCK``으로 열면 즉시 리턴하고(블로킹하지
+         않고), 그 이후 그 fd에서 읽을 데이터가 없으면 ``BlockingIOError``를
+         던진다(역시 블로킹하지 않는다). 사전 검사를 통과한 뒤에도 무언가가
+         그 사이 FIFO로 바꿔치기했을 경우조차 이 open 자체는 블로킹하지 않는다
+         — 그래서 이 함수에는 외부 타임아웃(``signal.alarm``이나 서브프로세스
+         ``timeout``)이 필요 없다.
+    정규 파일이 아니거나, 상한을 넘거나, 어떤 단계에서든 ``OSError``가 나면
+    ``None``이다 — 호출자는 그대로 폴백한다.
     """
-    state_dir = os.environ.get("AMX_STATE_DIR", "").strip()
-    if not state_dir:
-        return None
-    active_path = os.path.join(state_dir, "profiles", "claude", "active")
     try:
-        with open(active_path, "r", encoding="utf-8") as f:
-            key = f.read().strip()
+        st = os.stat(path)
     except OSError:
         return None
-    if not re.fullmatch(r"[0-9a-f]{64}", key):
-        return None
-    profile_dir = os.path.join(state_dir, "profiles", "claude", key)
-    if os.path.islink(profile_dir) or not os.path.isdir(profile_dir):
+    if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
         return None
     try:
-        with open(os.path.join(profile_dir, ".claude.json"), "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > max_bytes:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except (BlockingIOError, OSError):
+                return None  # 블로킹 없이 읽을 데이터가 없음: 정규 파일이 아니었거나 사라짐
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _session_config_home_email() -> str | None:
+    """이 세션이 실제로 쓴 config home의 identity를 읽는다.
+
+    adversarial review F3: 이전 구현은 Stop 훅(세션 **종료** 시점)에서 P3
+    활성 포인터를 다시 읽었다. 래퍼(``deploy/amx-claude``)는 세션 **기동**
+    시점에 계정을 고정하는데, 세션 도중 전환기가 포인터를 옮기면(그게
+    전환기의 존재 이유다) 포인터 재조회는 방금 끝난 세션의 비용을 엉뚱한
+    계정에 붙인다. 그래서 포인터는 다시 읽지 않는다 — 이 세션이 실제로 물려
+    받아 지금까지 들고 있던 ``CLAUDE_CONFIG_DIR`` 환경변수(래퍼가 세션
+    기동 시 한 번 정하고, claude 프로세스와 그 훅들이 그대로 상속한다)가
+    가리키는 홈만 본다. 그 홈이 P3 프로파일 디렉터리든 기존 공유 풀 홈이든
+    상관없이 같은 파일(``.claude.json``)을 같은 방식으로 읽는다.
+
+    ``CLAUDE_CONFIG_DIR``이 비어 있으면 ``deploy/amx-claude``와 같은 기본값
+    (``$HOME/.claude``)으로 떨어진다. 실패(둘 다 못 구함·파일 없음·FIFO·
+    크기초과·JSON 깨짐·필드 없음)는 모두 ``None`` — tsamx 폴백으로 넘어간다.
+    """
+    config_home = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if not config_home:
+        home = os.environ.get("HOME", "").strip()
+        if not home:
+            return None
+        config_home = os.path.join(home, ".claude")
+    raw = _read_bounded_regular_file(
+        os.path.join(config_home, ".claude.json"), _IDENTITY_FILE_MAX_BYTES
+    )
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
         return None
     if not isinstance(data, dict):
         return None
@@ -483,22 +542,27 @@ def _active_profile_email() -> str | None:
 def active_account_email() -> str | None:
     """현재 활성 계정 이메일.
 
-    조회 순서(design note P3, P2 리뷰 ② 해소): 명시적 pin
-    (``LANGFUSE_USER_ID``) > P3 활성 프로파일 포인터(``_active_profile_email``)
-    > ``tsamx status --json``의 ``active.email`` > 없음. 설치 시점의 값을
-    박아두지 않고 매번 물어보는 이유: 계정은 전환되고, 박아둔 값은 전환 즉시
-    거짓이 된다. ``CLAUDE_CONFIG_DIR``이 이미 설정 홈을 가리키므로 tsamx는 같은
-    홈을 본다(``deploy/amx-claude``와 같은 조회다).
+    조회 순서(design note P3, P2 리뷰 ② + adversarial review F3 해소): 명시적
+    pin(``LANGFUSE_USER_ID``) > 이 세션이 실제로 쓴 config home의 identity
+    (``_session_config_home_email`` — P3 활성 포인터는 다시 읽지 않는다, F3
+    참고) > ``tsamx status --json``의 ``active.email`` > 없음.
 
-    실패(포인터 없음·tsamx 없음·타임아웃·JSON 깨짐·필드 없음)는 모두 ``None``이다
-    — 계정 없이 보내면 서버가 ``account_id`` NULL로 받아들인다.
+    tsamx 폴백이 여전히 매번 다시 조회하는 이유는 그대로다: 계정은 전환되고,
+    박아둔 값은 전환 즉시 거짓이 된다. ``CLAUDE_CONFIG_DIR``이 이미 설정
+    홈을 가리키므로 tsamx는 같은 홈을 본다(``deploy/amx-claude``와 같은
+    조회다) — 이 폴백 경로 자체가 P3 이전부터 안고 있던 "세션 도중 전환되면
+    최신 계정을 본다"는 한계는 이번 수정 범위 밖이다(F3는 새로 추가된 포인터
+    재조회만 겨냥한다).
+
+    실패(config home 없음·tsamx 없음·타임아웃·JSON 깨짐·필드 없음)는 모두
+    ``None``이다 — 계정 없이 보내면 서버가 ``account_id`` NULL로 받아들인다.
     """
     pinned = os.environ.get("LANGFUSE_USER_ID", "").strip()
     if pinned:
         return pinned[:320]
-    profile_email = _active_profile_email()
-    if profile_email:
-        return profile_email
+    session_email = _session_config_home_email()
+    if session_email:
+        return session_email
     try:
         proc = subprocess.run(
             ["tsamx", "status", "--json"],

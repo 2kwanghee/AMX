@@ -71,6 +71,47 @@ fi
 # AMX_DELIVER_WAIT overrides the wait bound (seconds; default 5).
 flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
 
+# amx_profile_dir_is_safe DIR — adversarial review F4/F7: nothing creates
+# $AMX_STATE_DIR/profiles/claude/* today (internal/seat/profile.Store.Open is
+# the only code that enforces symlink-rejection + 0700 on that tree, and P3
+# never calls it), so this wrapper must not trust that tree's ownership or
+# mode just because a path under it exists and is a plain directory. Before
+# adopting DIR as CLAUDE_CONFIG_DIR, require it to be (a) owned by the
+# CURRENT user and (b) not writable by group or other — an attacker-planted
+# profile directory that a runner adopted could put arbitrary hooks in its
+# settings.json and have them run with the runner's privileges. `ls -ld`
+# parsing is the portable way to read a POSIX permission string in `sh` (no
+# `stat`(1) format is portable across GNU/BSD; `[ -O ]`/`[ -G ]` are bash/ksh
+# extensions this POSIX-sh script cannot use). Fails CLOSED on any doubt —
+# missing `ls`/`find`/`id`, an unparseable `ls -ld` line, or anything that is
+# not an affirmative pass returns non-zero, and the caller must treat that as
+# "do not adopt", never propagate it as an error.
+amx_profile_dir_is_safe() {
+	_d="$1"
+	command -v find >/dev/null 2>&1 || return 1
+	command -v ls >/dev/null 2>&1 || return 1
+	command -v id >/dev/null 2>&1 || return 1
+	_uid=$(id -u 2>/dev/null) || return 1
+	[ -n "$_uid" ] || return 1
+	# Ownership: -user takes a numeric uid on both GNU and BSD find, so this
+	# does not depend on NSS resolving a username for $_uid.
+	find "$_d" -maxdepth 0 -user "$_uid" >/dev/null 2>&1 || return 1
+	_perm=$(ls -ld -- "$_d" 2>/dev/null | awk '{print $1}') || return 1
+	# 10-char field: type, owner(rwx), group(rwx), other(rwx). Require: a
+	# directory (F4/F7), owner read+execute so we can actually list/open
+	# files inside it (F7 — a 0000 or exec-less directory must NOT be
+	# adopted), group write UNSET, other write UNSET (F4). Owner write,
+	# group/other read/execute are not our concern either way.
+	case "$_perm" in
+	dr?x?-??-? )
+		return 0
+		;;
+	* )
+		return 1
+		;;
+	esac
+}
+
 # --- Active profile pointer (P3, optional) -----------------------------------
 # internal/seat/profile (P2) + internal/seat.Switcher (P3) can stage a Claude
 # account into its own config-home directory
@@ -83,11 +124,25 @@ flock -w "${AMX_DELIVER_WAIT:-5}" -s "$LOCK_FILE" -c true 2>/dev/null || true
 # CONFIG_DIR/LOCK_FILE, fixed above, are NEVER reassigned by this block — see
 # the "FIXED ANCHOR" comment above for why that separation must hold.
 #
+# POINTER FORMAT: the active file's content must be exactly ^[0-9a-f]{64}$,
+# optionally followed by ONE trailing newline (command substitution below
+# already strips all trailing newlines, so this case pattern effectively
+# enforces "reject anything with a byte outside [0-9a-f] anywhere, or a
+# length other than 64" — matching, byte-for-byte, the rule canonically
+# defined in ama-agent/internal/seat/profile/profile.go's GetActive doc
+# (adversarial review F2: these two readers disagreeing on this exact point
+# is what let a runner bill one account while a separate reader believed a
+# different one was active). deploy/langfuse/session_usage_hook.py used to be
+# a third independent reimplementation of this same parsing; adversarial
+# review F3 removed its pointer re-read entirely, so it is no longer a party
+# to this rule.
+#
 # Fail-open at every step: an unset AMX_STATE_DIR, a missing/unreadable
-# pointer file, a pointer that is not shaped like a real accountKey (64
-# lowercase hex chars), or a profile directory that does not exist (or is a
-# symlink) all leave CLAUDE_CONFIG_DIR exactly as the caller set it — this
-# must never be what stops a runner from starting.
+# pointer file, a pointer that is not shaped like a real accountKey, a
+# profile directory that does not exist or is a symlink, or one that fails
+# amx_profile_dir_is_safe's ownership/permission check (F4/F7) all leave
+# CLAUDE_CONFIG_DIR exactly as the caller set it — this must never be what
+# stops a runner from starting.
 AMX_ACTIVE_PROFILE_DIR=""
 if [ -n "${AMX_STATE_DIR:-}" ]; then
 	_amx_active_file="$AMX_STATE_DIR/profiles/claude/active"
@@ -100,7 +155,8 @@ if [ -n "${AMX_STATE_DIR:-}" ]; then
 		* )
 			if [ "${#_amx_active_key}" -eq 64 ]; then
 				_amx_profile_dir="$AMX_STATE_DIR/profiles/claude/$_amx_active_key"
-				if [ -d "$_amx_profile_dir" ] && [ ! -L "$_amx_profile_dir" ]; then
+				if [ -d "$_amx_profile_dir" ] && [ ! -L "$_amx_profile_dir" ] \
+					&& amx_profile_dir_is_safe "$_amx_profile_dir"; then
 					AMX_ACTIVE_PROFILE_DIR="$_amx_profile_dir"
 					CLAUDE_CONFIG_DIR="$_amx_profile_dir"
 					export CLAUDE_CONFIG_DIR
@@ -116,11 +172,21 @@ fi
 # -----------------------------------------------------------------------------
 
 # --- Langfuse tracing (P3, optional) -----------------------------------------
-# If (and only if) `<CLAUDE_CONFIG_DIR>/amx-langfuse.env` exists, load it and,
+# If (and only if) `$CONFIG_DIR/amx-langfuse.env` exists, load it and,
 # when it opts in with TRACE_TO_LANGFUSE=true, export the credentials so the
 # Stop hook (installed in settings.json) ships this session to Langfuse. A
 # session NOT launched through this wrapper never gets the keys in its env, so
 # the hook no-ops there — only wrapper-launched sessions are traced.
+#
+# Note (adversarial review F5): this reads from $CONFIG_DIR — the FIXED
+# anchor captured at the top of this file, NEVER the active-profile override
+# — deliberately, not by oversight. There is exactly one Langfuse env file
+# per install today; a per-profile Langfuse config is not something this
+# commit adds (install-langfuse-hook.sh writes one file, at $CONFIG_DIR, full
+# stop). If per-profile Langfuse settings are ever wanted, that needs its own
+# design (where would install-langfuse-hook.sh even write one before a
+# profile exists?), not a silent switch of this path to
+# $AMX_ACTIVE_PROFILE_DIR.
 #
 # Fail-open, always: a missing file, a missing tsamx/timeout, or a tsamx query
 # error must never stop claude from starting (same philosophy as the flock
@@ -143,7 +209,7 @@ if [ -f "$LF_ENV_FILE" ] && [ -r "$LF_ENV_FILE" ]; then
 			# Resolution order (design note P3, resolving P2 review item ②):
 			#   1. the P3 active-profile pointer resolved above
 			#      (AMX_ACTIVE_PROFILE_DIR) — reads the email straight out of
-			#      that profile's own .claude.json, no subprocess involved;
+			#      that profile's own .claude.json;
 			#   2. `tsamx status --json`'s active.email (pre-P3 behavior,
 			#      kept as the fallback for as long as tsamx is what actually
 			#      manages the pool);
@@ -151,13 +217,40 @@ if [ -f "$LF_ENV_FILE" ] && [ -r "$LF_ENV_FILE" ]; then
 			# Step 1 is always skipped today (AMX_ACTIVE_PROFILE_DIR is only
 			# ever set once something calls internal/seat.Switcher, and
 			# nothing does yet), so this is a pure addition, not a behavior
-			# change. Step 2 is bounded to 2s via timeout(1); if timeout(1) is
-			# absent (some minimal images) it is skipped entirely rather than
-			# run tsamx unbounded — pin LANGFUSE_USER_ID in the env file on
-			# such hosts.
+			# change.
+			#
+			# Both steps are bounded by `timeout 2` (adversarial review F1,
+			# critical — reproduced and fixed): a plain `python3 -c
+			# '...open(path)...'` with no timeout hangs the ENTIRE runner
+			# launch forever if that path is a FIFO or a stalled network
+			# mount — the process never reaches `exec claude` at all. Step 1
+			# additionally requires `[ -f ]` (a POSIX regular-file test — this
+			# alone already rejects a FIFO; verified directly, not assumed)
+			# before ever invoking python3, and the python3 one-liner itself
+			# re-checks os.path.isfile + a 1MB size cap before touching the
+			# file's content, so a legitimate-looking regular file that is
+			# merely huge cannot balloon this process's RSS the way an
+			# uncapped json.load() of an arbitrary-size file could. If
+			# timeout(1) is absent (some minimal images) step 2 is skipped
+			# entirely rather than run tsamx unbounded — pin LANGFUSE_USER_ID
+			# in the env file on such hosts.
 			if [ -z "${LANGFUSE_USER_ID:-}" ]; then
-				if [ -n "${AMX_ACTIVE_PROFILE_DIR:-}" ] && command -v python3 >/dev/null 2>&1; then
-					_lf_email=$(python3 -c 'import sys,json;d=json.load(open(sys.argv[1]));print((d.get("oauthAccount") or {}).get("emailAddress") or "")' "$AMX_ACTIVE_PROFILE_DIR/.claude.json" 2>/dev/null)
+				if [ -n "${AMX_ACTIVE_PROFILE_DIR:-}" ] \
+					&& command -v python3 >/dev/null 2>&1 \
+					&& command -v timeout >/dev/null 2>&1 \
+					&& [ -f "$AMX_ACTIVE_PROFILE_DIR/.claude.json" ]; then
+					_lf_email=$(timeout 2 python3 -c '
+import json, os, sys
+p = sys.argv[1]
+try:
+    if not os.path.isfile(p) or os.path.getsize(p) > 1048576:
+        sys.exit(0)
+    with open(p) as f:
+        d = json.load(f)
+    print((d.get("oauthAccount") or {}).get("emailAddress") or "")
+except Exception:
+    pass
+' "$AMX_ACTIVE_PROFILE_DIR/.claude.json" 2>/dev/null)
 				fi
 				if [ -z "${_lf_email:-}" ] \
 					&& command -v timeout >/dev/null 2>&1 \
